@@ -1,0 +1,17 @@
+# 本地密钥与私密配置（勿提交）
+config.toml
+config/config.toml
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+
+# 导出与本机杂项（含达人筛查数据，默认不提交）
+exports/
+.DS_Store
+*.log

@@ -1,0 +1,22 @@
+# 复制为仓库根目录的 config.toml 后填写（config.toml 已被 gitignore）
+#   cp config.toml.example config.toml
+#
+# 优先级：CLI 参数 > 环境变量 > 本文件 > 代码默认值
+# Secret 勿提交 git、勿发到聊天记录
+
+[feishu]
+# 主推表 wiki（SOP 条件 2）只读
+app_id = "cli_a96b1c39ac789bb4"
+app_secret = "在此填写 主推表 App Secret"
+# hero_url = "https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc"
+# sheet = "Sheet1"
+
+# 达人关系管理(新) 写入（仅 --execute --yes --write-feishu 时使用）
+[feishu.bitable]
+app_id = "cli_a975ba96ae781cd1"
+app_secret = "在此填写 bitable App Secret（与主推可不同）"
+app_token = "CJXSbLIQWahB8esVOiscX7j1nLc"
+table_id = "tblWT2SRKJ3CEZ5e"
+view_id = "vewNtqmTk4"
+# 表名：达人关系管理(新)；视图：达人管理总表
+# 禁止在表中新增列；去重键：红人ID + 寄样产品

@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""飞书多维表格：达人关系管理(新) 只读/写入（可选）。
+
+默认目标（项目约定）：
+  Base 内部达人建联记录表 CJXSbLIQWahB8esVOiscX7j1nLc
+  表 达人关系管理(新) tblWT2SRKJ3CEZ5e
+  视图 达人管理总表 vewNtqmTk4
+
+纪律：
+  - 禁止新增飞书列；只能写已有字段
+  - 去重键：红人ID + 寄样产品（命中则跳过不写）
+  - 测试环境默认不调用写接口（由 CLI --write-feishu 显式开启）
+"""
+from __future__ import annotations
+
+import json
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from .app_config import AppConfigError, load_bitable_settings
+
+OPEN_API_BASE = "https://open.feishu.cn/open-apis"
+
+DEFAULT_BITABLE_APP_ID = "cli_a975ba96ae781cd1"
+DEFAULT_APP_TOKEN = "CJXSbLIQWahB8esVOiscX7j1nLc"
+DEFAULT_TABLE_ID = "tblWT2SRKJ3CEZ5e"
+DEFAULT_VIEW_ID = "vewNtqmTk4"
+DEFAULT_VIEW_NAME = "达人管理总表"
+COOPERATION_STATUS_PENDING_SHIP = "待发货"
+
+
+class FeishuBitableError(RuntimeError):
+    """多维表格读写失败。"""
+
+
+def _http_json(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Content-Type", "application/json; charset=utf-8")
+    for header_name, header_value in (headers or {}).items():
+        request.add_header(header_name, header_value)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raw_body = error.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as decode_error:
+            raise FeishuBitableError(
+                f"HTTP {error.code} 非 JSON: {raw_body[:500]}"
+            ) from decode_error
+        raise FeishuBitableError(
+            f"HTTP {error.code} code={payload.get('code')} msg={payload.get('msg')}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise FeishuBitableError(f"网络错误: {error}") from error
+
+    if not isinstance(payload, dict):
+        raise FeishuBitableError(f"响应非对象: {type(payload)}")
+    if payload.get("tenant_access_token"):
+        return payload
+    if payload.get("code") not in (0, None):
+        raise FeishuBitableError(
+            f"飞书 API 失败 code={payload.get('code')} msg={payload.get('msg')}"
+        )
+    return payload
+
+
+def get_bitable_access_token(
+    *,
+    app_id: str | None = None,
+    app_secret: str | None = None,
+    config_path: str | Path | None = None,
+) -> str:
+    try:
+        settings = load_bitable_settings(
+            config_path=config_path,
+            app_id=app_id,
+            app_secret=app_secret,
+            default_app_id=DEFAULT_BITABLE_APP_ID,
+        )
+    except AppConfigError as error:
+        raise FeishuBitableError(str(error)) from error
+
+    resolved_app_id = settings.get("app_id")
+    resolved_secret = settings.get("app_secret")
+    if not resolved_app_id:
+        raise FeishuBitableError("缺少 bitable app_id（[feishu.bitable].app_id）")
+    if not resolved_secret:
+        raise FeishuBitableError(
+            "缺少 bitable App Secret：请在 config.toml 的 [feishu.bitable].app_secret 填写"
+        )
+
+    payload = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/auth/v3/tenant_access_token/internal",
+        body={"app_id": resolved_app_id, "app_secret": resolved_secret},
+    )
+    token = payload.get("tenant_access_token")
+    if not token:
+        raise FeishuBitableError(f"token 响应无 tenant_access_token: {payload}")
+    return str(token)
+
+
+def list_sample_product_options(
+    access_token: str,
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> list[str]:
+    payload = _http_json(
+        "GET",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    items = ((payload.get("data") or {}).get("items") or [])
+    for field in items:
+        if field.get("field_name") == "寄样产品":
+            options = ((field.get("property") or {}).get("options") or [])
+            return [str(option.get("name") or "") for option in options if option.get("name")]
+    return []
+
+
+def match_sample_product_option(sku: str, options: list[str]) -> str | None:
+    """将主推表货号映射到「寄样产品」单选选项。
+
+    规则：精确 > 大小写不敏感精确 > 选项以前缀包含货号（优先最短选项名）。
+    """
+    raw = (sku or "").strip()
+    if not raw:
+        return None
+    if raw in options:
+        return raw
+    lower_map = {option.lower(): option for option in options}
+    if raw.lower() in lower_map:
+        return lower_map[raw.lower()]
+
+    candidates: list[str] = []
+    for option in options:
+        option_stripped = option.strip()
+        if not option_stripped:
+            continue
+        # P002 → P002（高腰内裤）；esp111 → esp111(生理裤)
+        if option_stripped.lower().startswith(raw.lower()):
+            candidates.append(option_stripped)
+            continue
+        # 去掉括号后缀再比
+        base = re.split(r"[（(]", option_stripped, maxsplit=1)[0].strip()
+        if base.lower() == raw.lower():
+            candidates.append(option_stripped)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda name: (len(name), name))
+    return candidates[0]
+
+
+def find_duplicate_record(
+    access_token: str,
+    *,
+    creator_handle: str,
+    sample_product: str,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any] | None:
+    """按 红人ID + 寄样产品 查重；命中返回首条记录，否则 None。"""
+    body = {
+        "page_size": 5,
+        "filter": {
+            "conjunction": "and",
+            "conditions": [
+                {
+                    "field_name": "红人ID",
+                    "operator": "is",
+                    "value": [creator_handle],
+                },
+                {
+                    "field_name": "寄样产品",
+                    "operator": "is",
+                    "value": [sample_product],
+                },
+            ],
+        },
+    }
+    payload = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+        headers={"Authorization": f"Bearer {access_token}"},
+        body=body,
+    )
+    items = ((payload.get("data") or {}).get("items") or [])
+    if not items:
+        return None
+    return items[0]
+
+
+def create_creator_relation_record(
+    access_token: str,
+    *,
+    creator_handle: str,
+    followers_raw: str | None,
+    fulfillment_raw: str | None,
+    sample_product: str,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """新增一行：红人ID / 粉丝数 / 履约率 / 合作状态=待发货 / 寄样产品；是否已寄样=否。"""
+    fields: dict[str, Any] = {
+        "红人ID": creator_handle,
+        "合作状态": [COOPERATION_STATUS_PENDING_SHIP],
+        "寄样产品": sample_product,
+        "是否已寄样": False,
+    }
+    if followers_raw is not None and str(followers_raw).strip() != "":
+        fields["粉丝数"] = str(followers_raw)
+    if fulfillment_raw is not None and str(fulfillment_raw).strip() != "":
+        fields["履约率"] = str(fulfillment_raw)
+
+    payload = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+        headers={"Authorization": f"Bearer {access_token}"},
+        body={"fields": fields},
+    )
+    record = ((payload.get("data") or {}).get("record") or {})
+    return {
+        "record_id": record.get("record_id"),
+        "fields": fields,
+        "raw": payload,
+    }
+
+
+def delete_record(
+    access_token: str,
+    record_id: str,
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """删除记录（回退飞书写入用）。"""
+    return _http_json(
+        "DELETE",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/"
+        f"{urllib.parse.quote(record_id)}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+
+def build_product_id_to_sku_map(hero_data: dict[str, Any]) -> dict[str, str]:
+    """从 feishu_hero.load_hero_from_feishu 结果构建 product_id → 产品货号。"""
+    mapping: dict[str, str] = {}
+    for row in hero_data.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        product_id = str(row.get("product_id") or "").strip()
+        sku = str(row.get("sku") or "").strip()
+        if not product_id or not sku:
+            continue
+        if not product_id.isdigit() and not re.fullmatch(r"\d+\.0+", product_id):
+            # 跳过「下架」等
+            digits = re.sub(r"\s+", "", product_id)
+            if not digits.isdigit():
+                continue
+            product_id = digits
+        mapping[product_id.split(".", 1)[0]] = sku
+    return mapping
+
+
+def resolve_sample_product_for_row(
+    row: dict[str, Any],
+    *,
+    product_id_to_sku: dict[str, str],
+    sample_product_options: list[str],
+) -> dict[str, Any]:
+    """解析某行应写入的寄样产品选项。
+
+    返回:
+      ok, sku, option, reason
+    """
+    product_id = str(row.get("product_id") or "").strip()
+    sku = product_id_to_sku.get(product_id) if product_id else None
+    if not sku:
+        return {
+            "ok": False,
+            "sku": None,
+            "option": None,
+            "reason": f"product_id={product_id} 在主推表无对应产品货号",
+        }
+    option = match_sample_product_option(sku, sample_product_options)
+    if not option:
+        return {
+            "ok": False,
+            "sku": sku,
+            "option": None,
+            "reason": f"货号 {sku} 无法匹配「寄样产品」单选选项",
+        }
+    return {"ok": True, "sku": sku, "option": option, "reason": "ok"}
+
+
+def format_followers_raw(row: dict[str, Any]) -> str:
+    """粉丝数原样字符串（优先列表原始字段）。"""
+    for key in ("follower_num", "followers_n", "followers"):
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        return str(value)
+    return ""
+
+
+def format_fulfillment_raw(row: dict[str, Any]) -> str:
+    """履约率原样字符串。"""
+    for key in ("fulfillment_rate", "fulfillment_n", "cell_fulfill", "est_post_rate"):
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
