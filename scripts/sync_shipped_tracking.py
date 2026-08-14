@@ -69,6 +69,7 @@ EXPORT_FIELDS = [
     "feishu_lang",
     "feishu_record_id",
     "feishu_status",
+    "cooperation_status_update",
     "send_status",
     "message",
     "error",
@@ -331,9 +332,13 @@ def main() -> int:
                 overwrite=args.overwrite,
                 current=record,
             )
+            out["cooperation_status_update"] = plan.get("status_transition")
             if plan.get("skip_tracking"):
                 out["feishu_status"] = "skip-existing-track"
-                print(f"    飞书已有不同运单 {plan.get('current_track')}，未覆盖")
+                print(
+                    f"    飞书已有不同运单 {plan.get('current_track')}，"
+                    "未覆盖且未推进合作状态"
+                )
             else:
                 try:
                     update_record_fields(
@@ -345,7 +350,14 @@ def main() -> int:
                     )
                     out["feishu_status"] = "updated"
                     written += 1
-                    print("    飞书已更新：快递单号 + 待发布")
+                    transition = str(plan.get("status_transition") or "")
+                    if "合作状态" in plan["fields"]:
+                        print(f"    飞书已更新：快递单号；合作状态 {transition}")
+                    else:
+                        print(
+                            "    飞书已更新：快递单号；"
+                            f"合作状态保持不变（{transition}）"
+                        )
                 except FeishuBitableError as error:
                     out["feishu_status"] = "update-error"
                     out["error"] = str(error)

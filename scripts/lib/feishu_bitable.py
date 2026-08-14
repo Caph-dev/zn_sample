@@ -9,6 +9,8 @@
 纪律：
   - 禁止新增飞书列；只能写已有字段
   - 去重键：红人ID + 寄样产品（命中则跳过不写）
+  - 新建记录默认人员=王良希（技术）、合作状态=待发货、是否已寄样=否
+  - 物流单号写入后才允许待发货 → 待发布，不回退后续状态
   - 测试环境默认不调用写接口（由 CLI --write-feishu 显式开启）
 """
 from __future__ import annotations
@@ -30,6 +32,7 @@ DEFAULT_APP_TOKEN = "CJXSbLIQWahB8esVOiscX7j1nLc"
 DEFAULT_TABLE_ID = "tblWT2SRKJ3CEZ5e"
 DEFAULT_VIEW_ID = "vewNtqmTk4"
 DEFAULT_VIEW_NAME = "达人管理总表"
+DEFAULT_RECORD_OWNER = "王良希（技术）"
 COOPERATION_STATUS_PENDING_SHIP = "待发货"
 COOPERATION_STATUS_PENDING_POST = "待发布"
 FEISHU_LANG_EN = "英语"
@@ -218,9 +221,10 @@ def create_creator_relation_record(
     app_token: str = DEFAULT_APP_TOKEN,
     table_id: str = DEFAULT_TABLE_ID,
 ) -> dict[str, Any]:
-    """新增一行：红人ID / 粉丝数 / 履约率 / 合作状态=待发货 / 寄样产品；是否已寄样=否。"""
+    """新增达人关系记录，并按 0814 SOP 填写默认负责人和待发货状态。"""
     fields: dict[str, Any] = {
         "红人ID": creator_handle,
+        "人员": DEFAULT_RECORD_OWNER,
         "合作状态": [COOPERATION_STATUS_PENDING_SHIP],
         "寄样产品": sample_product,
         "是否已寄样": False,
@@ -372,34 +376,69 @@ def build_shipping_fields(
     overwrite: bool = False,
     current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """填写物流后：订单号、快递单号、是否已寄样=是、合作状态=待发布。
+    """填写物流后联动寄样和合作状态。
 
-    已有不同快递单号且未 overwrite → skip_tracking=True，不改订单号/快递单号。
-    合作状态与是否已寄样仍写入。
+    - 成功写入新物流单号或确认同一单号后，勾选「是否已寄样」；
+    - 当前状态为待发货/空时，改成待发布；待发布保持幂等；
+    - 已发布等后续状态不回退；
+    - 已有不同物流单号且未 overwrite 时，不改任何物流联动字段。
     """
     current_fields = (current or {}).get("fields") or {}
     current_track = _field_plain(current_fields.get("快递单号")).strip()
     current_order = _field_plain(current_fields.get("订单号")).strip()
+    current_status = _field_plain(current_fields.get("合作状态")).strip()
     want_track = (tracking_raw or "").strip()
     same_track = bool(current_track) and current_track == want_track
     skip_tracking = bool(current_track) and (not overwrite) and (not same_track)
 
-    fields: dict[str, Any] = {
-        "是否已寄样": True,
-        "合作状态": [COOPERATION_STATUS_PENDING_POST],
-    }
+    fields: dict[str, Any] = {}
+    status_transition = "not-applicable"
+    if skip_tracking:
+        return {
+            "fields": fields,
+            "skip_tracking": True,
+            "current_track": current_track,
+            "current_order": current_order,
+            "current_status": current_status,
+            "status_transition": "skipped-different-tracking",
+        }
+
     if language in {FEISHU_LANG_EN, FEISHU_LANG_ES}:
         fields["使用语言"] = language
-    if not skip_tracking:
-        if order_no and (overwrite or not current_order or current_order == order_no):
-            fields["订单号"] = order_no
-        if want_track:
-            fields["快递单号"] = want_track
+    if order_no and (overwrite or not current_order or current_order == order_no):
+        fields["订单号"] = order_no
+    if want_track:
+        fields["快递单号"] = want_track
+        fields["是否已寄样"] = True
+        current_status_values = {
+            status.strip()
+            for status in current_status.split(",")
+            if status.strip()
+        }
+        protected_statuses = current_status_values - {
+            COOPERATION_STATUS_PENDING_SHIP,
+            COOPERATION_STATUS_PENDING_POST,
+        }
+        if protected_statuses:
+            status_transition = f"preserved:{current_status}"
+        elif not current_status_values or COOPERATION_STATUS_PENDING_SHIP in current_status_values:
+            fields["合作状态"] = [COOPERATION_STATUS_PENDING_POST]
+            status_transition = (
+                "待发货->待发布" if current_status else "空->待发布"
+            )
+        elif COOPERATION_STATUS_PENDING_POST in current_status_values:
+            fields["合作状态"] = [COOPERATION_STATUS_PENDING_POST]
+            status_transition = "already-pending-post"
+        else:
+            status_transition = f"preserved:{current_status}"
+
     return {
         "fields": fields,
-        "skip_tracking": skip_tracking,
+        "skip_tracking": False,
         "current_track": current_track,
         "current_order": current_order,
+        "current_status": current_status,
+        "status_transition": status_transition,
     }
 
 

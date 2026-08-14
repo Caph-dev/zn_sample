@@ -2,21 +2,21 @@
 
 # 第一步：进入联盟中心
 
-![image\.png](图片和附件/image%202.png)
+![image\.png](图片和附件/image%204.png)
 
 # 第二步：进入【样品申请管理】
 
 
 
-![image\.png](图片和附件/image%201.png)
+![image\.png](图片和附件/image.png)
 
 # 第三步：点击【待审核】
 
-![image\.png](图片和附件/image.png)
+![image\.png](图片和附件/image%205.png)
 
 # 第四步：逐一点开达人数据主页
 
-# **筛选条件 1：**
+# **筛选条件：**
 
 ## 1\.粉丝数（达人名字下面）：＞2000
 
@@ -54,39 +54,33 @@
 
 ## 10\.平均视频播放量：＞300            10\.平均直播播放量：＞1000
 
-## 11\.视频平均互动率：＞2%    11.直播平均互动率：无要求         
+## 11\.视频平均互动率：＞2%
 
-# ** 筛选条件2：**
+# **筛选条件 2：**
 
-## 申请的样本必须是 [tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink) 里的“主推款”（是否主推=是）
+## 申请的样品必须是 [tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink) 里的“主推款”（是否主推=是）
 
 ## 找到都满足条件的达人后进入第五步
 
-# 第五步：记录达人信息，点击同意样品申请，并同步到表格
+# 第五步：记录达人信息，点击同意样品申请，并同步到表格[内部达人建联记录表](https://rsed6zggjt.feishu.cn/base/CJXSbLIQWahB8esVOiscX7j1nLc?from=from_copylink)
 
-同步到 [内部达人建联记录表](https://rsed6zggjt.feishu.cn/base/CJXSbLIQWahB8esVOiscX7j1nLc?from=from_copylink)
+## 需要记录信息：
 
-- **默认**：只导出名单，**禁止**脚本执行「同意」。
-- **可选危险路径**（须显式参数，见 `AGENTS.md` / CLI）：`--execute --yes` 可对通过筛查的申请点「同意」；测试环境默认 **不写飞书**，写飞书须再加 `--write-feishu`。
-- 默认 `--execute-limit 1`；批准成功后再写「达人关系管理(新)」；去重键为红人ID+寄样产品。
+1\.达人名
 
-xlsx 格式 + csv 格式（同时）
+2\.产品货号[tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink)
 
-需要记录信息：
-
-1\.达人名(网页中可能有多个类似的字段，如果你不确定，可以问我)
-
-2\.产品货号 [tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink) （从这个飞书表格里对比获取）
-
-3\.履约率 （网页内如果没有「履约率」，那么应该是「合作指标」-「预计发布率」）
-
-4\.成交件数（「销量」-「成交件数」）
-
-5\.GPM（「视频数据」-「视频 GPM」，「直播数据」-「直播 GPM」，两个 GPM 都需要记录）
-
-6\.视频达人/直播达人（应该是选择）
+3\.履约率
 
 7\.粉丝数
+
+## 项目自动化补充
+
+- 自动化默认只导出 xlsx / csv / json，禁止点击「同意」；仅显式 `--execute --yes` 才可批准，默认 `--execute-limit 1`。
+- 写入飞书须再显式添加 `--write-feishu`；先批准成功，再新增「达人关系管理(新)」记录。
+- 新建飞书记录时，「人员」固定写为 **王良希（技术）**，「合作状态」写为「待发货」，「是否已寄样」不勾选。
+- “申请样品必须是主推款（是否主推=是）”是正式硬性条件；0814 飞书导出原文遗漏，本项目已补入 SOP。
+- 当前导出仍保留成交件数、视频/直播 GPM、视频达人/直播达人等诊断字段，不影响飞书必填字段。
 
 # 第六步：打开达人私信界面，发送话术
 
@@ -106,17 +100,23 @@ Estamos muy emocionados de trabajar contigo. Para coordinar mejor el envío y ha
 
 Además, querida, ¿estarías abierta a hacer transmisiones en vivo de nuestros productos? En cuanto tenga el número de seguimiento, te lo envío inmediatamente.
 
-![image\.png](图片和附件/image%203.png)
+![image\.png](图片和附件/image%207.png)
 
 # 第七步：北京时间下午四点后点击【样品申请】--【已发货】--【查看物流】
 
-![image\.png](图片和附件/image%204.png)
+![image\.png](图片和附件/image%203.png)
 
 # 第八步：复制订单号、物流单号到【内部达人建联表】，填进下图2中红标中（要打勾）
 
-![image\.png](图片和附件/image%205.png)
+![image\.png](图片和附件/image%202.png)
 
-![image\.png](图片和附件/image%206.png)
+![image\.png](图片和附件/image%201.png)
+
+## 项目自动化补充
+
+- 飞书写入订单号和商家订单页的「TikTok 物流」单号后，自动勾选「是否已寄样」。
+- 只有本次已写入物流单号（或确认飞书已有同一单号）时，才将「合作状态」从「待发货」改为「待发布」；不得把「已发布」等后续状态回退。
+- 飞书已有不同物流单号时默认不覆盖，也不推进合作状态；仅显式 `--overwrite` 可覆盖。
 
 # 第九步：复制对应达人的物流单号打开私信发送给达人
 
@@ -130,8 +130,5 @@ Además, querida, ¿estarías abierta a hacer transmisiones en vivo de nuestros 
 
 示例图如下：
 
-![image\.png](图片和附件/image%207.png)
-
-
-
+![image\.png](图片和附件/image%206.png)
 
