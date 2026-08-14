@@ -46,9 +46,16 @@ from lib.im_dom import (  # noqa: E402
     open_im_inbox,
     search_and_open_conversation,
 )
+from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import looks_like_tracking, tracking_message  # noqa: E402
 from lib.order_dom import fetch_tiktok_tracking  # noqa: E402
-from lib.shipped_dom import SAMPLE_REQUEST_URL, scrape_shipped_list  # noqa: E402
+from lib.order_api import fetch_tiktok_tracking_api  # noqa: E402
+from lib.sample_api import scrape_shipped_list_api  # noqa: E402
+from lib.shipped_dom import (  # noqa: E402
+    SAMPLE_REQUEST_URL,
+    ensure_on_sample_page,
+    scrape_shipped_list,
+)
 from lib.zclaw import resolve_store_id, visit_page  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
@@ -63,6 +70,7 @@ EXPORT_FIELDS = [
     "resolved_sku",
     "sample_product_option",
     "main_order_id",
+    "tracking_source",
     "tracking_raw",
     "tracking_no",
     "lang",
@@ -70,7 +78,9 @@ EXPORT_FIELDS = [
     "feishu_record_id",
     "feishu_status",
     "cooperation_status_update",
+    "send_source",
     "send_status",
+    "send_postcheck",
     "message",
     "error",
 ]
@@ -108,9 +118,11 @@ def _send_tracking_dm(
     tracking_no: str,
     execute: bool,
     wait: float,
+    write_source: str,
 ) -> dict[str, Any]:
     name = str(row.get("creator_name") or "")
     body = tracking_message(lang, tracking_no)
+    clicked: dict[str, Any] = {}
     opened = open_im_from_detail(store_id, wait=wait)
     if not opened.get("ok"):
         inbox = open_im_inbox(store_id, shop_id=str(row.get("_shop_id") or ""))
@@ -120,16 +132,60 @@ def _send_tracking_dm(
         if not clicked.get("ok"):
             return {"ok": False, "error": "找不到会话", "message": body}
     else:
-        search_and_open_conversation(store_id, name, wait=wait)
+        clicked = search_and_open_conversation(store_id, name, wait=wait)
+        if not clicked.get("ok"):
+            return {"ok": False, "error": "找不到会话", "message": body}
     probe = inspect_im(store_id)
     if looks_like_tracking(str(probe.get("text") or ""), tracking_no):
         return {"ok": True, "status": "already-sent", "message": body}
     if not execute:
         return {"ok": True, "status": "dry-run", "message": body}
+    if write_source == "api":
+        click_detail = clicked.get("click") if isinstance(clicked.get("click"), dict) else clicked
+        sent = send_message_via_sdk(
+            store_id,
+            body,
+            expected_creator_name=name,
+            expected_creator_id=str(row.get("creator_id") or ""),
+            conversation_id=str((click_detail or {}).get("conversation_id") or ""),
+        )
+        if not sent.get("ok"):
+            return {
+                "ok": False,
+                "error": sent.get("reason") or str(sent),
+                "message": body,
+                "send_source": write_source,
+            }
+        time.sleep(max(1.5, wait))
+        post_probe = inspect_im(store_id)
+        confirmed = looks_like_tracking(str(post_probe.get("text") or ""), tracking_no)
+        return {
+            "ok": confirmed,
+            "status": "sent" if confirmed else "send-unknown",
+            "message": body,
+            "send_source": write_source,
+            "send_postcheck": "confirmed" if confirmed else "unknown",
+            "error": "API 已启动但发送后未确认，禁止自动重试" if not confirmed else "",
+        }
     sent = fill_or_send_message(store_id, body, execute=True)
     if sent.get("ok") and sent.get("sent"):
-        return {"ok": True, "status": "sent", "message": body}
-    return {"ok": False, "error": sent.get("error") or str(sent), "message": body}
+        time.sleep(1.0)
+        post_probe = inspect_im(store_id)
+        confirmed = looks_like_tracking(str(post_probe.get("text") or ""), tracking_no)
+        return {
+            "ok": confirmed,
+            "status": "sent" if confirmed else "send-unknown",
+            "message": body,
+            "send_source": write_source,
+            "send_postcheck": "confirmed" if confirmed else "unknown",
+            "error": "DOM 点击后未确认消息，禁止自动重试" if not confirmed else "",
+        }
+    return {
+        "ok": False,
+        "error": sent.get("error") or str(sent),
+        "message": body,
+        "send_source": write_source,
+    }
 
 
 def main() -> int:
@@ -140,6 +196,18 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--max-rows", type=int, default=0)
     parser.add_argument("--page-wait", type=float, default=2.5)
+    parser.add_argument(
+        "--data-source",
+        choices=("api", "auto", "dom"),
+        default="api",
+        help="已发货列表读取方式：api=页面同源接口（默认）；auto=失败回退 DOM；dom=旧路径",
+    )
+    parser.add_argument(
+        "--tracking-source",
+        choices=("api", "auto", "dom"),
+        default="api",
+        help="订单物流读取方式：api=logistic_detail/list（默认）；auto=失败回退 DOM；dom=旧路径",
+    )
     parser.add_argument("--config", default=None)
     parser.add_argument("--force", action="store_true", help="忽略北京时间 16:00 前门闩")
     parser.add_argument("--overwrite", action="store_true", help="覆盖飞书已有快递单号")
@@ -149,6 +217,12 @@ def main() -> int:
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--execute-limit", type=int, default=DEFAULT_EXECUTE_LIMIT)
     parser.add_argument("--execute-delay", type=float, default=1.5)
+    parser.add_argument(
+        "--write-source",
+        choices=("api", "dom"),
+        default="api",
+        help="物流私信发送方式：api=页面内 IM SDK（默认）；dom=点击发送按钮备用路径",
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -175,7 +249,9 @@ def main() -> int:
 
     print("=" * 60)
     print(
-        f"第7-9步物流同步 | 写飞书={'开' if args.write_feishu else '关'} | "
+        f"第7-9步物流同步 | 列表数据源={args.data_source} | "
+        f"物流数据源={args.tracking_source} | "
+        f"写飞书={'开' if args.write_feishu else '关'} | "
         f"发私信={'开' if args.send_tracking and args.execute else '关'} | "
         f"force={'是' if args.force else '否'}"
     )
@@ -211,12 +287,34 @@ def main() -> int:
         print(f"[飞书] 不可用，只做页面抽取: {error}", file=sys.stderr)
         bitable_token = None
 
-    rows = scrape_shipped_list(
-        store_id,
-        max_pages=args.max_pages,
-        max_rows=args.max_rows,
-        page_wait=args.page_wait,
-    )
+    if args.data_source == "dom":
+        rows = scrape_shipped_list(
+            store_id,
+            max_pages=args.max_pages,
+            max_rows=args.max_rows,
+            page_wait=args.page_wait,
+        )
+    else:
+        try:
+            # API 读取仍需先把页面置于联盟中心样品页，以获得当前店铺上下文。
+            ensure_on_sample_page(store_id, page_wait=args.page_wait)
+            rows = scrape_shipped_list_api(
+                store_id,
+                max_pages=args.max_pages,
+                max_rows=args.max_rows,
+            )
+            print(f"[已发货] API 读取完成 rows={len(rows)}")
+        except Exception as error:
+            if args.data_source == "api":
+                print(f"[已发货] API 读取失败，未自动执行 DOM 回退: {error}", file=sys.stderr)
+                return 2
+            print(f"[已发货] API 读取失败，回退 DOM: {error}", file=sys.stderr)
+            rows = scrape_shipped_list(
+                store_id,
+                max_pages=args.max_pages,
+                max_rows=args.max_rows,
+                page_wait=args.page_wait,
+            )
     if not rows:
         print("已发货 0 行")
         return 0
@@ -242,18 +340,43 @@ def main() -> int:
             print(f"  [跳过] {name}: 无订单号")
             continue
 
-        tracking = fetch_tiktok_tracking(
-            store_id,
-            order_id,
-            shop_id=str(row.get("_shop_id") or ""),
-            wait=max(3.5, args.page_wait + 1.0),
-        )
+        if args.tracking_source == "dom":
+            tracking = fetch_tiktok_tracking(
+                store_id,
+                order_id,
+                shop_id=str(row.get("_shop_id") or ""),
+                wait=max(3.5, args.page_wait + 1.0),
+            )
+        else:
+            try:
+                tracking = fetch_tiktok_tracking_api(
+                    store_id,
+                    order_id,
+                    shop_id=str(row.get("_shop_id") or ""),
+                    fulfill_unit_ids=row.get("fulfill_unit_ids") or [],
+                    wait=max(3.5, args.page_wait + 1.0),
+                )
+            except Exception as error:
+                if args.tracking_source == "api":
+                    tracking = {
+                        "ok": False,
+                        "error": f"物流 API 读取失败: {error}",
+                    }
+                else:
+                    print(f"    物流 API 失败，回退 DOM: {error}", file=sys.stderr)
+                    tracking = fetch_tiktok_tracking(
+                        store_id,
+                        order_id,
+                        shop_id=str(row.get("_shop_id") or ""),
+                        wait=max(3.5, args.page_wait + 1.0),
+                    )
         # 回到样品申请，避免停在商家中心
         visit_page(store_id, SAMPLE_REQUEST_URL)
         time.sleep(1.2)
 
         out["tracking_raw"] = tracking.get("tracking_raw") or ""
         out["tracking_no"] = tracking.get("tracking_no") or ""
+        out["tracking_source"] = tracking.get("via") or args.tracking_source
         if not tracking.get("ok"):
             out["error"] = tracking.get("error") or "无 TikTok 物流单号"
             print(f"  [无运单] {name} order={order_id}: {out['error']}")
@@ -382,16 +505,19 @@ def main() -> int:
                     tracking_no=str(out["tracking_no"]),
                     execute=bool(args.execute),
                     wait=args.page_wait,
+                    write_source=args.write_source,
                 )
                 out["message"] = dm.get("message") or tracking_message(
                     str(out.get("lang") or "en"), str(out["tracking_no"])
                 )
+                out["send_source"] = dm.get("send_source") or args.write_source
+                out["send_postcheck"] = dm.get("send_postcheck") or ""
                 if dm.get("ok"):
                     out["send_status"] = dm.get("status")
                     if dm.get("status") == "sent":
                         sent += 1
                 else:
-                    out["send_status"] = "send-failed"
+                    out["send_status"] = dm.get("status") or "send-failed"
                     out["error"] = dm.get("error")
                 visit_page(store_id, SAMPLE_REQUEST_URL)
                 time.sleep(1.0)

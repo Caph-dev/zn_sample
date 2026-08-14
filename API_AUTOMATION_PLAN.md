@@ -20,7 +20,7 @@
 
 ## 2. 已验证事实
 
-2026-08-14 在紫鸟 GUI 的 1 号店、样品申请页面完成了只读验证。
+2026-08-14 在紫鸟 GUI 的 1 号店和 2 号店、样品申请页面完成了只读验证。
 
 ### 2.1 待审核列表
 
@@ -94,6 +94,20 @@ ZClaw 会对包含 Cookie 获取特征的脚本做静态拦截。正式实现必
 - 对页面请求中无关的 `cookie_enabled` 参数优先做可删除性验证；若必须保留，只在运行时安全构造参数名，避免被静态规则误判；
 - 所有请求仍经 `ziniao-cli zclaw invoke execute_script` 在目标店铺页面中执行。
 
+### 2.4 2 号店异步请求兼容性
+
+2 号店的页面原生列表 XHR 可以正常返回，但在页面上下文中使用同步 `XMLHttpRequest` 会出现 `status=0` 和空响应，导致错误类型被误判为 `invalid-json`。对同一 endpoint、query 和请求体改用异步 `fetch` 后，实际返回 HTTP 200、业务 `code=0` 和完整 JSON。
+
+因此 `page_api.post_read_json()` 当前采用：
+
+1. 在店铺页面中启动异步 `fetch`；
+2. 为每次请求生成随机 `request_id`；
+3. 由本地 Python 经 ZClaw 轮询页面中的有限状态；
+4. 成功、业务错误、响应过大、超时和 JSON 解析失败统一返回结构化状态；
+5. 请求完成后删除页面临时状态，避免残留响应占用页面内存。
+
+实际验证结果：2 号店列表 API 已能返回分页数据；此前被空响应阻断的两位候选均能通过只读状态预检，状态为 `pending-approvable`，且 `creator_id` / `product_id` 匹配。
+
 ## 3. 总体架构
 
 ```text
@@ -127,16 +141,17 @@ filters.py -> export_util.py -> 可选 execute 流水线
 
 ### 3.1 页面上下文传输
 
-优先顺序：
+当前实现：
 
-1. 先验证 ZClaw 是否能等待返回 Promise；若可以，使用页面上下文 `fetch`；
-2. 若不能，使用“启动异步请求 + request_id 轮询结果”的模式；
-3. 同步 XHR 只作为兼容兜底，因为它会阻塞页面主线程且无法可靠设置超时。
+1. 使用页面上下文异步 `fetch`，不阻塞页面主线程；
+2. 使用“启动异步请求 + request_id 轮询结果”的模式，适配 ZClaw `execute_script` 的返回边界；
+3. 使用页面内 `AbortController` 和本地轮询 deadline 控制超时；
+4. 不把同步 XHR 作为生产传输路径，因为它在 2 号店会返回空响应且无法可靠设置超时。
 
 传输层必须具备：
 
 - 仅允许当前 TikTok 联盟中心同源的相对路径；
-- 只读阶段仅允许 `GET` 和已登记的查询型 `POST`；
+- 只读阶段仅允许 `GET` 和已登记的查询型 `POST`；批准阶段另有独立的单一写 endpoint allowlist，不能由调用方传任意 URL；
 - 响应同时校验 HTTP 状态和业务 `code`；
 - 有限网络重试和指数退避；
 - 限制响应大小，防止大响应阻塞 Bridge；
@@ -272,7 +287,8 @@ filters.py -> export_util.py -> 可选 execute 流水线
 
 1. 2A：样品申请「同意」API；
 2. 2B：达人介绍私信 API；
-3. 2C：物流单号私信 API。
+3. 2C：物流单号私信 API；
+4. 2D：已发货列表和订单物流读取 API。
 
 继续禁止：
 
@@ -296,17 +312,40 @@ filters.py -> export_util.py -> 可选 execute 流水线
 6. 记录是否存在预检、批准、二次确认等多个接口；
 7. 识别 `apply_id`、店铺、商品、幂等键、CSRF/签名、时间戳和一次性 token 的绑定关系。
 
-私信接口按同样方式分别捕获介绍话术和物流话术，但每次只允许真实发送 1 条，且必须先通过现有会话指纹去重。
+私信接口按同样方式分别捕获介绍话术和物流话术，但每次只允许真实发送 1 条，且必须先通过现有会话指纹去重。实际 IM 发送不是普通 JSON HTTP 写接口，而是当前页面加载的 IM SDK 文本发送回调，底层由页面 WebSocket 管理；项目只封装该窄 SDK 调用，不重建 protobuf/WebSocket 协议。
+
+#### 5.2.1 本次批准请求捕获结果（2026-08-14）
+
+已按用户授权对二号店单条申请 `franciscarodrig227` 做了一次真实 DOM 批准；本次不在批准命令中写飞书，批准后再单独核验飞书。被动观察到的批准请求为：
+
+```text
+POST /api/v1/affiliate/sample/group/action
+type=1                         # approve
+status_type=11                 # CreatorOrderPending
+apply_ids=[目标 apply_id]
+group_ids=[]
+is_use_cross_regions=false
+```
+
+请求返回 HTTP 200、业务 `code=0`、`success_count=1`、`failed_count=0`。批准后的列表 API 存在短暂的 `pending-not-approvable` 中间态；延迟刷新后申请进入 `READY_TO_SHIP`，`curr_status=20`，并获得 `main_order_id`，因此最终确认批准成功。完整脱敏审计文件保存在本次运行的 `exports/sample_approve_*_capture.json` 中，不保存 Cookie 或完整原始响应。
 
 ### 5.3 批准 API 客户端
 
-`sample_write_api.approve_application()` 必须是窄接口，只接受明确字段，例如：
+`sample_write_api.approve_application_api()` 是窄接口，只接受明确字段，例如：
 
 ```python
 approve_application(store_id, apply_id, expected_creator_id, expected_product_id)
 ```
 
 禁止暴露“任意 endpoint + 任意 body”的通用写方法给业务 CLI。
+
+当前实现位于 `scripts/lib/sample_write_api.py`，传输层只 allowlist `/api/v1/affiliate/sample/group/action`，不自动重试，不在 API 不确定时回退 DOM。CLI 通过：
+
+```text
+--write-source dom|api
+```
+
+选择写来源，默认改为 `api`；`dom` 是显式页面备用路径。两者仍必须同时使用 `--execute --yes`、默认单条上限、批准前备份、主推款映射、即时预检和批准后状态确认。由于用户只授权了一次真实批准，本次 API 路径完成了契约实现、离线测试和代码接入，尚未对第二条真实申请重复执行。
 
 执行前门闩保持现状：
 
@@ -322,8 +361,9 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 执行后必须通过只读 API 验证：
 
 - `apply_id` 不再处于待审核；或
-- `review_status` 已变为批准状态；或
-- `can_be_approved` 已变为 false 且状态与批准一致。
+- 申请进入 `READY_TO_SHIP` tab 且 `curr_status=20`；
+- `review_status` 仍可能为 0，不能单独作为批准成功或失败依据；
+- DOM 兼容路径仍可用列表消失/不可再批准作为过渡观察，但最终状态必须与批准动作一致。
 
 只有响应成功且状态验证成功时，才设置 `approve_status=approved`，随后才允许写飞书。
 
@@ -344,11 +384,11 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 --write-source dom|api
 ```
 
-迁移期默认 `dom`，API 通过验收后再改推荐值；任何来源都必须受相同 execute 门闩保护。
+当前默认已改为 `api`；DOM 仅作为显式紧急备用。任何来源都必须受相同 execute 门闩保护。
 
 ### 5.5 私信 API 客户端
 
-`im_api.send_message()` 必须保留：
+`im_api.send_message_via_sdk()` 通过当前 `/seller/im` 页面 textarea 对应的 React `onSendText` 回调调用已加载 IM SDK。它不点击「发送」按钮，也不读取 Cookie/token；必须保留：
 
 - `--execute --yes`；
 - 默认 `execute-limit=1`；
@@ -373,10 +413,17 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 - 飞书后续动作及 record_id；
 - `success` / `failed` / `unknown` 最终分类。
 
-### 5.7 第二阶段完成标准
+### 5.7 第七至九步 API 读取和发送
 
-- 经用户授权的单条批准 API 流程通过；
-- 连续多次限量运行无重复批准、无误批、无不明状态遗留；
+- 已发货列表读取：复用 `/api/v1/affiliate/sample/group/list`，使用 `tab=30`，默认 `--data-source api`，保留 `auto` / `dom` 选择；行模型保留 `main_order_id` 和 `fulfill_unit_ids`。
+- 订单物流读取：商家订单页加载后调用已登记的只读 GET `/api/v1/fulfillment/na/logistic_detail/list`，查询参数为 `main_order_id` 和可选 `fulfill_unit_ids[]`；默认 `--tracking-source api`，失败不会在 `api` 模式自动切 DOM，`auto` 才回退。
+- 飞书第八步原本已是 Open API；写入成功后仍按原规则推进 `合作状态：待发货 → 待发布`。
+- 第九步物流私信复用 `im_api.send_message_via_sdk()`，默认 `--write-source api`；DOM 仅显式备用。仍须 `--write-feishu`、`--send-tracking --execute --yes`、指纹去重、发送后只读确认和不自动重试。
+
+### 5.8 第二阶段完成标准
+
+- 经用户授权的单条 DOM 捕获和状态/飞书联动流程通过；批准 API 已完成契约实现和离线测试，尚未完成第二条真实 API 执行验收；
+- API 路径后续需要在新的明确授权下做单条真实运行，确认无重复批准、无误批、无不明状态遗留；
 - 网络超时场景验证“先查状态、后决定重试”；
 - API 与 DOM 批准结果、导出状态和飞书顺序一致；
 - 私信发送具备消息指纹幂等验证；
@@ -391,9 +438,10 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 4. 新增 `--data-source shadow`，产出一致性报告；
 5. 修正字段差异，完成 3 次只读真实店验证；
 6. 启用 `--data-source auto`，API 优先、DOM 兜底；
-7. 稳定运行一段时间后，再开始批准写接口发现；
-8. 上线 `--write-source api` 的单条限量试运行；
-9. 最后迁移介绍私信和物流私信，并保留 DOM 显式回退。
+7. 稳定运行一段时间后，先用一次用户授权的 DOM 操作被动发现批准写接口；
+8. 已实现 `--write-source api`，待新的明确授权后做单条真实 API 试运行；
+9. 介绍私信和物流私信已迁移到页面内 IM SDK API，保留 DOM 显式回退；
+10. 已发货列表和订单物流读取已迁移到页面同源 API，保留 `auto` / `dom` 只读回退选择。
 
 ## 7. 第一批实现任务
 
@@ -409,19 +457,34 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 - [x] 真实样本覆盖视频达人、视频+直播达人、Live GPM 为 0、低于 1% 互动率；离线契约测试补齐直播达人、双侧 GPM 为 0、可选字段无权限、核心 GPM 无权限须回退；
 - [x] 完成两个不同达人详情 shadow（修复低于 1% 的 DOM 百分比放大问题后，8 个核心字段一致）；
 - [x] 验证两达人 `auto` 模式全程使用 API，并更新 README.md / AGENTS.md；
-- [x] 三轮真实 shadow 验证后，将文档中的日常只读推荐命令切为 `--data-source auto`；CLI 默认仍保留 `dom`，所有 TikTok 写操作继续强制 `dom`；
+- [x] 三轮真实 shadow 验证后，将文档中的日常只读推荐命令切为 `--data-source auto`；CLI 默认仍保留 `dom`，批准读路径仍强制 `dom`，批准写来源由 `--write-source dom|api` 显式选择；
 - [x] 纯 `api` 模式任一目标详情失败时保留排查导出并返回非零；`auto` 要求视频和直播两侧 GPM 都存在，否则按达人回退 DOM；
+- [x] 将页面只读传输切换为异步 `fetch` + request_id 轮询，修复 2 号店同步 XHR 空响应；
+- [x] 实测 2 号店列表 API 分页读取成功，并完成两位候选的只读状态预检：均为 `pending-approvable`，身份字段匹配；
 - [ ] 继续积累真实日常运行样本后，再考虑修改 CLI 的默认数据源。
 
 ## 8. 第二阶段 2A 当前进度
 
-- [x] 新增按 `apply_id` 的待审核列表 API 状态预检，并核对 `creator_id` / `product_id`；只有明确 `can_be_approved=true` 才允许进入 DOM 批准；
+- [x] 新增按 `apply_id` 的待审核列表 API 状态预检，并核对 `creator_id` / `product_id`；只有明确 `can_be_approved=true` 才允许进入批准路径；
 - [x] DOM 返回批准成功后，用列表 API 最多复查两次；仅确认申请已移出待审核时才写飞书，无法确认则标记 `unknown`、停止本轮且禁止自动重试；
 - [x] 新增 `network_observer.py` 被动 fetch/XHR 观察器；只记录 endpoint、query 键、请求体结构、必要业务 ID、HTTP/业务码和响应顶层键，不读取请求头、不保存完整请求/响应；
 - [x] 使用真实 1 号店的列表只读请求验证观察器可安装、捕获安全摘要并恢复页面原始网络函数，全程未触发批准；
 - [x] 新增 `--observe-approve-network` 门闩：默认关闭，仅能与 `--execute --yes` 联用，且只观察现有 DOM 批准，不重放请求；
-- [ ] 需要用户再次明确授权单条 `--execute --yes --execute-limit 1 --observe-approve-network` 后，才能捕获批准 endpoint/body 契约；捕获期间默认不写飞书；
-- [ ] 捕获并脱敏确认契约后，实现窄接口 `approve_application()`；在此之前不得猜测或登记写 endpoint。
+- [x] 修复 2 号店列表 API 的同步 XHR 空响应问题；批准前预检现在可复用异步列表 API，仍不绕过 `can_be_approved` 和身份校验；
+- [x] 经用户授权对二号店 `franciscarodrig227` 完成单条真实 DOM 批准捕获；捕获期间不写飞书，保存批准前备份和脱敏审计；
+- [x] 捕获并脱敏确认 `/api/v1/affiliate/sample/group/action` 的批准契约，实现窄接口 `approve_application_api()`；`type=1`、`status_type=11`、单条 `apply_ids`，不提供任意写 endpoint；
+- [x] 新增 `--write-source dom|api`；API 路径不自动重试、不回退 DOM，并以 `READY_TO_SHIP/curr_status=20` 作为成功后只读确认；
+- [x] 确认真实批准后再单独写入飞书；记录 `record_id=recvsg3x1imFR8`，核验 `人员=王良希（技术）`、`合作状态=待发货`、`是否已寄样=否`；
+- [ ] 在新的明确授权下对第二条真实申请执行一次 `--write-source api`，完成 API 路径实时验收；当前默认已切换 API，DOM 仍可显式回退。
+
+## 9. 第二阶段 2B–2D 当前进度
+
+- [x] 经明确授权对 `franciscarodrig227` 发送一次第六步英语介绍话术；首次按钮调用未实际发出，第二次通过页面 IM SDK `onSendText` 成功发送并完成会话指纹确认，保存脱敏审计。
+- [x] 新增 `im_api.py` 窄 SDK 发送适配器；默认不重试、不点击 DOM 发送按钮、不读 Cookie/token，发送后由脚本读会话确认。
+- [x] 第六步 `send_sample_intro.py` 默认 `--write-source api`；`--write-source dom` 作为显式备用，并新增 `send_source` / `send_postcheck` 导出字段。
+- [x] 第七步已发货列表复用样品列表 API `tab=30`，默认 `--data-source api`；离线测试覆盖 tab、订单号和店铺上下文。
+- [x] 第七步订单物流读取使用商家中心页面同源 GET `/api/v1/fulfillment/na/logistic_detail/list`；二号店真实订单 `577523711101473244` 读取到 `UUS68E5590171628828`。
+- [x] 第九步复用 `im_api.py`，默认 `--write-source api`；保留物流话术指纹、飞书先写门闩、发送后确认和 DOM 显式回退。
 
 ## 9. GUI + ZClaw 两阶段启动
 

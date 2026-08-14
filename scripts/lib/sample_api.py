@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from .page_api import (
     SAMPLE_LIST_ENDPOINT,
@@ -15,6 +16,8 @@ from .page_api import (
 from .sample_dom import assert_on_pending_list
 
 PENDING_TAB = 10
+READY_TO_SHIP_TAB = 20
+SHIPPED_TAB = 30
 DEFAULT_PAGE_SIZE = 50
 
 RequestJson = Callable[
@@ -23,9 +26,14 @@ RequestJson = Callable[
 ]
 
 
-def build_pending_list_request(page: int, page_size: int = DEFAULT_PAGE_SIZE) -> dict[str, Any]:
+def build_pending_list_request(
+    page: int,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    *,
+    tab: int = PENDING_TAB,
+) -> dict[str, Any]:
     return {
-        "tab": PENDING_TAB,
+        "tab": int(tab),
         "cur_page": int(page),
         "page_size": int(page_size),
         "search_params": [
@@ -63,6 +71,9 @@ def parse_pending_list_payload(
         raise PageApiSchemaError("sample list 响应缺少 agg_info 数组")
 
     rows: list[dict[str, Any]] = []
+    parsed_list_url = urlparse(list_href or "")
+    shop_id_values = parse_qs(parsed_list_url.query).get("shop_id") or []
+    shop_id = str(shop_id_values[0] if shop_id_values else "").strip()
     for row_index, aggregate_value in enumerate(aggregate_items):
         aggregate = _required_mapping(aggregate_value, f"agg_info[{row_index}]")
         # 接口字段当前拼写为 apply_deatil；兼容未来修正后的 apply_detail。
@@ -106,6 +117,15 @@ def parse_pending_list_payload(
         )
         if apply_id not in apply_ids:
             apply_ids.insert(0, apply_id)
+        raw_fulfill_unit_ids = apply_info.get("fulfill_unit_ids")
+        if raw_fulfill_unit_ids is None:
+            raw_fulfill_unit_ids = apply_info.get("fulfill_unit_id")
+        if isinstance(raw_fulfill_unit_ids, list):
+            fulfill_unit_ids = raw_fulfill_unit_ids
+        elif raw_fulfill_unit_ids is not None:
+            fulfill_unit_ids = [raw_fulfill_unit_ids]
+        else:
+            fulfill_unit_ids = []
 
         rows.append(
             {
@@ -119,6 +139,12 @@ def parse_pending_list_payload(
                 "apply_count": group.get("apply_count"),
                 "can_be_approved": apply_info.get("can_be_approved"),
                 "review_status": apply_info.get("review_status"),
+                "curr_status": apply_info.get("curr_status"),
+                "operable": apply_info.get("operable"),
+                "main_order_id": str(apply_info.get("main_order_id") or ""),
+                "fulfill_unit_ids": [
+                    str(value) for value in fulfill_unit_ids if value is not None
+                ],
                 "creator_id": str(creator.get("creator_id") or ""),
                 "tt_uid": str(creator.get("tt_uid") or ""),
                 "creator_name": creator_name,
@@ -139,6 +165,7 @@ def parse_pending_list_payload(
                 "cell_units": "",
                 "href": list_href,
                 "_list_href": list_href,
+                "_shop_id": shop_id,
                 "_data_source": "api",
             }
         )
@@ -154,6 +181,7 @@ def scrape_pending_list_api(
     ensure_page: bool = True,
     request_json: Callable[..., dict[str, Any]] = post_read_json,
     context: AffiliatePageContext | None = None,
+    tab: int = PENDING_TAB,
 ) -> list[dict[str, Any]]:
     """通过页面同源 API 读取待审核列表，不点击分页控件。"""
     if ensure_page:
@@ -165,7 +193,11 @@ def scrape_pending_list_api(
     previous_page_signature: tuple[str, ...] | None = None
 
     for page_number in range(1, max(1, int(max_pages)) + 1):
-        request_body = build_pending_list_request(page_number, page_size)
+        request_body = build_pending_list_request(
+            page_number,
+            page_size,
+            tab=tab,
+        )
         payload = request_json(
             store_id,
             SAMPLE_LIST_ENDPOINT,
@@ -207,6 +239,29 @@ def scrape_pending_list_api(
 
     print(f"[API扫表] 完成，去重后 {len(all_rows)} 行")
     return all_rows
+
+
+def scrape_shipped_list_api(
+    store_id: str,
+    *,
+    max_pages: int = 50,
+    max_rows: int = 0,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    request_json: Callable[..., dict[str, Any]] = post_read_json,
+    context: AffiliatePageContext | None = None,
+) -> list[dict[str, Any]]:
+    """通过样品列表 API 读取「已发货」申请，保留订单号字段。"""
+    resolved_context = context or get_affiliate_page_context(store_id)
+    return scrape_pending_list_api(
+        store_id,
+        max_pages=max_pages,
+        max_rows=max_rows,
+        page_size=page_size,
+        ensure_page=False,
+        request_json=request_json,
+        context=resolved_context,
+        tab=SHIPPED_TAB,
+    )
 
 
 def locate_pending_application(
@@ -266,29 +321,40 @@ def locate_pending_application(
         "apply_id": normalized_apply_id,
         "can_be_approved": can_be_approved,
         "review_status": matched_row.get("review_status"),
+        "curr_status": matched_row.get("curr_status"),
+        "operable": matched_row.get("operable"),
+        "main_order_id": matched_row.get("main_order_id") or "",
     }
 
 
-def check_pending_application_api(
+def check_application_in_tab_api(
     store_id: str,
     apply_id: str,
     *,
+    tab: int,
     expected_creator_id: str = "",
     expected_product_id: str = "",
+    ensure_page: bool = False,
+    context: AffiliatePageContext | None = None,
+    max_pages: int = 50,
 ) -> dict[str, Any]:
-    """通过只读列表 API 即时确认申请仍处于待审核且身份一致。"""
-    assert_on_pending_list(store_id)
-    context = get_affiliate_page_context(store_id)
+    """在指定列表 tab 中定位申请，并核对身份和当前状态。"""
+    if ensure_page:
+        assert_on_pending_list(store_id)
+    resolved_context = context or get_affiliate_page_context(store_id)
     previous_page_signature: tuple[str, ...] | None = None
 
-    for page_number in range(1, 51):
+    for page_number in range(1, max(1, int(max_pages)) + 1):
         payload = post_read_json(
             store_id,
             SAMPLE_LIST_ENDPOINT,
-            build_pending_list_request(page_number),
-            context=context,
+            build_pending_list_request(page_number, tab=tab),
+            context=resolved_context,
         )
-        page_rows = parse_pending_list_payload(payload, list_href=context.href)
+        page_rows = parse_pending_list_payload(
+            payload,
+            list_href=resolved_context.href,
+        )
         page_signature = tuple(str(row.get("apply_id") or "") for row in page_rows)
         if previous_page_signature is not None and page_signature == previous_page_signature:
             raise PageApiSchemaError(
@@ -304,6 +370,7 @@ def check_pending_application_api(
         )
         if page_status.get("state") != "not-found-in-pending":
             page_status["page"] = page_number
+            page_status["tab"] = tab
             return page_status
 
         if not payload.get("has_more"):
@@ -313,4 +380,24 @@ def check_pending_application_api(
                 f"批准前预检 API 声称 has_more=true，但 page={page_number} 为空"
             )
 
-    raise PageApiSchemaError("批准前预检超过 50 页，未能确认完整待审核列表")
+    raise PageApiSchemaError(
+        f"列表 tab={tab} 预检超过 {max_pages} 页，未能确认完整列表"
+    )
+
+
+def check_pending_application_api(
+    store_id: str,
+    apply_id: str,
+    *,
+    expected_creator_id: str = "",
+    expected_product_id: str = "",
+) -> dict[str, Any]:
+    """通过只读列表 API 即时确认申请仍处于待审核且身份一致。"""
+    return check_application_in_tab_api(
+        store_id,
+        apply_id,
+        tab=PENDING_TAB,
+        expected_creator_id=expected_creator_id,
+        expected_product_id=expected_product_id,
+        ensure_page=True,
+    )

@@ -74,6 +74,10 @@ from lib.sample_data_source import (  # noqa: E402
     load_creator_detail,
     load_pending_rows,
 )
+from lib.sample_write_api import (  # noqa: E402
+    approve_application_api,
+    confirm_application_approved_api,
+)
 from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
@@ -106,6 +110,7 @@ def _run_execute_pipeline(
     config_path: str | None,
     page_wait: float,
     observe_approve_network: bool,
+    write_source: str = "api",
 ) -> list[dict[str, Any]]:
     """对筛查通过行执行：解析货号 →（可选查重）→ 同意 →（可选写飞书）。"""
     product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
@@ -163,6 +168,7 @@ def _run_execute_pipeline(
         creator_name = str(row.get("creator_name") or "").strip()
         row["action"] = "execute-pending"
         row["approve_forbidden"] = False
+        row["approve_write_source"] = write_source
 
         if not apply_id:
             row["approve_status"] = "skipped"
@@ -287,15 +293,29 @@ def _run_execute_pipeline(
         try:
             # doctor 绿 ≠ execute_script 可用；批准前先探活（含 network 重试）
             ensure_store_exec_ready(store_id, label="批准前")
-            if observe_approve_network:
-                arm_network_observer(store_id)
-                observer_armed = True
             approval_attempt_started = True
-            approve_result = click_approve_for_apply_id(
-                store_id,
-                apply_id,
-                page_wait=max(1.0, page_wait),
-            )
+            if write_source == "api":
+                approve_result = approve_application_api(
+                    store_id,
+                    apply_id,
+                    expected_creator_id=str(row.get("creator_id") or ""),
+                    expected_product_id=str(row.get("product_id") or ""),
+                    preflight_status=pending_status,
+                )
+                if not approve_result.get("ok"):
+                    print(
+                        f"    批准 API 未接受请求: {approve_result.get('state')}"
+                    )
+            else:
+                if observe_approve_network:
+                    arm_network_observer(store_id)
+                    observer_armed = True
+                click_result = click_approve_for_apply_id(
+                    store_id,
+                    apply_id,
+                    page_wait=max(1.0, page_wait),
+                )
+                approve_result = click_result
         except Exception as error:
             approve_exception = error
             row["approve_status"] = "error"
@@ -318,44 +338,67 @@ def _run_execute_pipeline(
 
         postcheck_status: dict[str, Any] | None = None
         postcheck_error = ""
-        for postcheck_attempt in range(2):
+        if write_source == "api":
             try:
-                postcheck_status = check_pending_application_api(
+                postcheck_status = confirm_application_approved_api(
                     store_id,
                     apply_id,
                     expected_creator_id=str(row.get("creator_id") or ""),
                     expected_product_id=str(row.get("product_id") or ""),
                 )
-                postcheck_error = ""
             except Exception as error:
-                postcheck_status = None
                 postcheck_error = str(error)
+        else:
+            for postcheck_attempt in range(2):
+                try:
+                    postcheck_status = check_pending_application_api(
+                        store_id,
+                        apply_id,
+                        expected_creator_id=str(row.get("creator_id") or ""),
+                        expected_product_id=str(row.get("product_id") or ""),
+                    )
+                    postcheck_error = ""
+                except Exception as error:
+                    postcheck_status = None
+                    postcheck_error = str(error)
 
-            if (
-                postcheck_status
-                and postcheck_status.get("ok")
-                and postcheck_status.get("state") == "not-found-in-pending"
-            ):
-                break
-            if postcheck_attempt == 0:
-                time.sleep(1.0)
+                if (
+                    postcheck_status
+                    and postcheck_status.get("ok")
+                    and postcheck_status.get("state") == "not-found-in-pending"
+                ):
+                    break
+                if postcheck_attempt == 0:
+                    time.sleep(1.0)
 
         row["approve_postcheck"] = postcheck_status or {
             "ok": False,
             "state": "verification-error",
             "error": postcheck_error,
         }
-        approval_is_confirmed = bool(
-            postcheck_status
-            and postcheck_status.get("ok")
-            and postcheck_status.get("state") == "not-found-in-pending"
-        )
-        approval_is_confirmed_failed = bool(
-            postcheck_status
-            and postcheck_status.get("ok")
-            and postcheck_status.get("state") == "pending-approvable"
-            and (approve_exception is not None or not approve_result.get("ok"))
-        )
+        if write_source == "api":
+            approval_is_confirmed = bool(
+                postcheck_status
+                and postcheck_status.get("ok")
+                and postcheck_status.get("state") == "approved"
+            )
+            approval_is_confirmed_failed = bool(
+                postcheck_status
+                and postcheck_status.get("state") == "still-pending"
+                and (approve_exception is not None or not approve_result.get("ok"))
+            )
+        else:
+            approval_is_confirmed = bool(
+                postcheck_status
+                and postcheck_status.get("ok")
+                and postcheck_status.get("state") == "not-found-in-pending"
+            )
+            approval_is_confirmed_failed = bool(
+                postcheck_status
+                and postcheck_status.get("ok")
+                and postcheck_status.get("state") == "pending-approvable"
+                and (approve_exception is not None or not approve_result.get("ok"))
+            )
         if approval_is_confirmed_failed:
             row["approve_status"] = "failed"
             row["approve_error"] = (
@@ -370,7 +413,8 @@ def _run_execute_pipeline(
         if not approval_is_confirmed:
             row["approve_status"] = "unknown"
             row["approve_error"] = (
-                "DOM 点击后无法通过只读 API 确认批准状态；禁止重试及写飞书"
+                f"{write_source} 批准后无法通过只读 API 确认批准状态；"
+                "禁止重试及写飞书"
             )
             row["action"] = "approve-unknown"
             print(
@@ -381,12 +425,21 @@ def _run_execute_pipeline(
 
         row["approve_status"] = "approved"
         row["action"] = "approved"
-        row["approve_detail"] = {
-            "note": approve_result.get("note"),
-            "steps_summary": [
-                list(step.keys())[0] for step in (approve_result.get("steps") or [])
-            ],
-        }
+        if write_source == "api":
+            row["approve_detail"] = {
+                "write_source": "api",
+                "request": approve_result.get("request"),
+                "response": approve_result.get("response"),
+            }
+        else:
+            row["approve_detail"] = {
+                "write_source": "dom",
+                "note": approve_result.get("note"),
+                "steps_summary": [
+                    list(step.keys())[0]
+                    for step in (approve_result.get("steps") or [])
+                ],
+            }
         approval_note = approve_result.get("note") or (
             "postcheck-confirmed-after-exception"
             if approve_exception is not None
@@ -442,7 +495,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
             "样品申请筛查（默认只读导出；"
-            "--execute --yes 可批准；--write-feishu 才写达人关系管理(新)）"
+            "--execute --yes 可批准；批准默认调用 API；--write-feishu 才写达人关系管理(新)）"
         ),
     )
     ap.add_argument("--store-id", default=None, help=f"默认测试 1 号店 {DEFAULT_TEST_STORE_ID}")
@@ -519,7 +572,7 @@ def main() -> int:
     ap.add_argument(
         "--execute",
         action="store_true",
-        help="危险：对筛查通过行点击「同意」（须同时 --yes；默认仍只导出）",
+        help="危险：对筛查通过行批准（默认调用 API；须同时 --yes；默认仍只导出）",
     )
     ap.add_argument(
         "--yes",
@@ -549,6 +602,15 @@ def main() -> int:
         help="仅 execute 时：被动记录批准相关请求的脱敏结构；不主动重放请求",
     )
     ap.add_argument(
+        "--write-source",
+        choices=("dom", "api"),
+        default="api",
+        help=(
+            "批准写入路径：api=已捕获验证的页面同源批准接口（默认）；"
+            "dom=列表页面点击备用路径"
+        ),
+    )
+    ap.add_argument(
         "--no-pre-backup",
         action="store_true",
         help="execute 时跳过批准前本地备份（不推荐）",
@@ -570,6 +632,13 @@ def main() -> int:
     if args.observe_approve_network and not args.execute:
         print("--observe-approve-network 仅在 --execute --yes 时有效", file=sys.stderr)
         return 2
+    if args.observe_approve_network and args.write_source != "dom":
+        print(
+            "--observe-approve-network 仅适用于 --write-source dom；"
+            "API 写入使用已登记的窄接口",
+            file=sys.stderr,
+        )
+        return 2
     if args.execute and args.data_source != "dom":
         print(
             "第一阶段 API 化仅限只读；真实批准时 --data-source 必须为 dom。",
@@ -584,6 +653,7 @@ def main() -> int:
         limit_show = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
         print(
             f"  批准: 开 | limit={limit_show} | "
+            f"写入路径={args.write_source} | "
             f"写飞书={'开' if args.write_feishu else '关（测试默认）'}"
         )
         print("  顺序: 同意成功 → 再写飞书；去重命中/货号无法映射 → 整单跳过")
@@ -949,6 +1019,7 @@ def main() -> int:
             config_path=args.config,
             page_wait=args.page_wait,
             observe_approve_network=bool(args.observe_approve_network),
+            write_source=args.write_source,
         )
         # 非通过行保持 export-only
         for row in pre:

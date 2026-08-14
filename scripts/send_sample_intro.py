@@ -4,6 +4,7 @@
 默认只读预演（抽简介、判语言、生成话术，不发送）。
 真正发送须 --execute --yes。默认 limit=1。
 语言只认英语 / 西班牙语，来源：达人详情页简介。
+真实发送默认调用页面内 IM SDK API；需要时可显式使用 DOM 备用路径。
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ from lib.im_dom import (  # noqa: E402
     open_im_inbox,
     search_and_open_conversation,
 )
+from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import intro_message, looks_like_intro  # noqa: E402
 from lib.zclaw import resolve_store_id  # noqa: E402
 
@@ -55,8 +57,10 @@ EXPORT_FIELDS = [
     "feishu_lang",
     "lang_reason",
     "message",
+    "send_source",
     "im_status",
     "send_status",
+    "send_postcheck",
     "feishu_record_id",
     "feishu_status",
     "error",
@@ -113,7 +117,13 @@ def _open_conversation(store_id: str, row: dict[str, Any], *, wait: float) -> di
         name = str(row.get("creator_name") or "")
         if name and name.lower() in str(probe.get("text") or "").lower():
             return {"ok": True, "via": "detail-direct", "detail": from_detail}
-        return {"ok": True, "via": "detail-im", "detail": from_detail, "click": clicked}
+        return {
+            "ok": False,
+            "error": "私信会话未确认打开",
+            "detail": from_detail,
+            "click": clicked,
+            "probe": probe,
+        }
     inbox = open_im_inbox(store_id)
     if not inbox.get("ok"):
         return {"ok": False, "error": "无法打开私信页", "detail": from_detail, "inbox": inbox}
@@ -140,6 +150,12 @@ def main() -> int:
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--execute-limit", type=int, default=DEFAULT_EXECUTE_LIMIT)
     parser.add_argument("--execute-delay", type=float, default=1.5)
+    parser.add_argument(
+        "--write-source",
+        choices=("api", "dom"),
+        default="api",
+        help="私信发送方式：api=页面内 IM SDK（默认）；dom=点击发送按钮备用路径",
+    )
     parser.add_argument(
         "--write-feishu",
         action="store_true",
@@ -234,6 +250,11 @@ def main() -> int:
             results.append(out)
             continue
         out["im_status"] = opened.get("via")
+        opened_click = opened.get("click")
+        if isinstance(opened_click, dict) and isinstance(opened_click.get("click"), dict):
+            click_detail = opened_click.get("click") or {}
+        else:
+            click_detail = opened_click if isinstance(opened_click, dict) else {}
         probe = inspect_im(store_id)
         if looks_like_intro(str(probe.get("text") or "")):
             out["send_status"] = "already-sent"
@@ -245,15 +266,57 @@ def main() -> int:
             out["send_status"] = "dry-run"
             print("    DRY-RUN 不发送")
         else:
-            sent_ret = fill_or_send_message(store_id, body, execute=True)
-            if sent_ret.get("ok") and sent_ret.get("sent"):
-                out["send_status"] = "sent"
-                sent += 1
-                print("    已发送")
+            out["send_source"] = args.write_source
+            if args.write_source == "api":
+                sent_ret = send_message_via_sdk(
+                    store_id,
+                    body,
+                    expected_creator_name=name,
+                    expected_creator_id=str(row.get("creator_id") or ""),
+                    conversation_id=str(click_detail.get("conversation_id") or ""),
+                )
+                if sent_ret.get("ok"):
+                    time.sleep(max(1.5, args.page_wait))
+                    post_probe = inspect_im(store_id)
+                    out["send_postcheck"] = (
+                        "confirmed"
+                        if looks_like_intro(str(post_probe.get("text") or ""))
+                        else "unknown"
+                    )
+                    if out["send_postcheck"] == "confirmed":
+                        out["send_status"] = "sent"
+                        sent += 1
+                        print("    已通过 IM SDK API 发送并确认")
+                    else:
+                        out["send_status"] = "send-unknown"
+                        out["error"] = "API 已启动但发送后未确认，禁止自动重试"
+                        print(f"    发送状态未知: {out['error']}")
+                else:
+                    out["send_status"] = "send-failed"
+                    out["error"] = sent_ret.get("reason") or str(sent_ret)
+                    print(f"    API 发送失败: {out['error']}")
             else:
-                out["send_status"] = "send-failed"
-                out["error"] = sent_ret.get("error") or str(sent_ret)
-                print(f"    发送失败: {out['error']}")
+                sent_ret = fill_or_send_message(store_id, body, execute=True)
+                if sent_ret.get("ok") and sent_ret.get("sent"):
+                    time.sleep(1.0)
+                    post_probe = inspect_im(store_id)
+                    out["send_postcheck"] = (
+                        "confirmed"
+                        if looks_like_intro(str(post_probe.get("text") or ""))
+                        else "unknown"
+                    )
+                    if out["send_postcheck"] == "confirmed":
+                        out["send_status"] = "sent"
+                        sent += 1
+                        print("    已通过 DOM 发送并确认")
+                    else:
+                        out["send_status"] = "send-unknown"
+                        out["error"] = "DOM 点击后未确认消息，禁止自动重试"
+                        print(f"    发送状态未知: {out['error']}")
+                else:
+                    out["send_status"] = "send-failed"
+                    out["error"] = sent_ret.get("error") or str(sent_ret)
+                    print(f"    发送失败: {out['error']}")
 
         if bitable_token and detected.get("feishu_lang"):
             try:

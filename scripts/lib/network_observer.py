@@ -24,7 +24,9 @@ ARM_NETWORK_OBSERVER_JS = r"""
   const maximumEntries = 200;
   const identifierKeys = new Set([
     'apply_id', 'application_id', 'creator_id', 'creator_oec_id',
-    'product_id', 'sku_id'
+    'product_id', 'sku_id', 'conversation_id', 'conversationid',
+    'oec_user_id', 'receiver_id', 'target_id', 'to_user_id',
+    'user_id', 'chat_id', 'message_id'
   ]);
 
   function describeValue(value, depth) {
@@ -121,6 +123,7 @@ ARM_NETWORK_OBSERVER_JS = r"""
   const originalFetch = window.fetch;
   const originalOpen = XMLHttpRequest.prototype.open;
   const originalSend = XMLHttpRequest.prototype.send;
+  const originalWebSocketSend = WebSocket.prototype.send;
 
   if (typeof originalFetch === 'function') {
     window.fetch = function(input, init) {
@@ -177,6 +180,18 @@ ARM_NETWORK_OBSERVER_JS = r"""
     return originalSend.apply(this, arguments);
   };
 
+  WebSocket.prototype.send = function(data) {
+    let websocketUrl = '';
+    try { websocketUrl = this.url || ''; } catch (error) {}
+    appendEntry({
+      transport: 'websocket',
+      ...requestSummary('WS', websocketUrl, data),
+      status: 'sent',
+      duration_ms: 0,
+    });
+    return originalWebSocketSend.apply(this, arguments);
+  };
+
   window[stateKey] = {
     installed: true,
     entries,
@@ -184,6 +199,7 @@ ARM_NETWORK_OBSERVER_JS = r"""
       if (typeof originalFetch === 'function') window.fetch = originalFetch;
       XMLHttpRequest.prototype.open = originalOpen;
       XMLHttpRequest.prototype.send = originalSend;
+      WebSocket.prototype.send = originalWebSocketSend;
     },
   };
   return JSON.stringify({ok: true, installed: true});

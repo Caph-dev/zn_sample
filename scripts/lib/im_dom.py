@@ -97,6 +97,32 @@ CLICK_CONV_JS_TMPL = r"""
     const head = t.split('\n')[0] || '';
     const blob = t.toLowerCase();
     if (blob.includes(want) || head.toLowerCase() === want) {
+      const fiberKey = Object.keys(card).find(key =>
+        key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
+      );
+      const fiber = fiberKey ? card[fiberKey] : null;
+      const props = fiber && fiber.memoizedProps;
+      const parentProps = fiber && fiber.return && fiber.return.memoizedProps;
+      const contact = parentProps && parentProps.contact;
+      if (props && typeof props.onClick === 'function') {
+        props.onClick({
+          currentTarget: card,
+          target: card,
+          preventDefault() {},
+          stopPropagation() {},
+        });
+        return JSON.stringify({
+          ok: true,
+          via: 'react-onClick',
+          preview: t.slice(0, 80),
+          conversation_id: contact && contact.conversationId
+            ? String(contact.conversationId)
+            : '',
+          creator_id: contact && contact.userInfo && contact.userInfo.userId
+            ? String(contact.userInfo.userId)
+            : '',
+        });
+      }
       card.click();
       return JSON.stringify({ok: true, via: 'card', preview: t.slice(0, 80)});
     }
@@ -118,6 +144,8 @@ FILL_MESSAGE_JS_TMPL = r"""
       'value'
     ).set;
     box.focus();
+    const tracker = box._valueTracker;
+    if (tracker) tracker.setValue('');
     setter.call(box, body);
     box.dispatchEvent(new Event('input', {bubbles: true}));
     box.dispatchEvent(new Event('change', {bubbles: true}));
@@ -201,20 +229,35 @@ def search_and_open_conversation(
     name = (creator_name or "").strip()
     if not name:
         return {"ok": False, "error": "empty-creator"}
-    searched = zclaw_exec(store_id, SEARCH_USER_JS_TMPL.replace("%NAME%", _js_str(name)))
-    time.sleep(wait)
-    clicked = zclaw_exec(store_id, CLICK_CONV_JS_TMPL.replace("%NAME%", _js_str(name)))
-    if not (isinstance(clicked, dict) and clicked.get("ok")):
-        try:
-            el = zclaw_invoke(
-                "click_element",
-                {"storeId": store_id, "selector": ".arco-list-item", "hint": name},
-                timeout=60,
-            )
-            if el.get("ok"):
-                clicked = {"ok": True, "via": "click_element", "raw": el}
-        except Exception as error:
-            clicked = {"ok": False, "reason": str(error)}
+    searched: dict[str, Any] = {}
+    clicked: dict[str, Any] = {"ok": False, "reason": "conv-not-found"}
+    for attempt in range(3):
+        current_search = zclaw_exec(
+            store_id,
+            SEARCH_USER_JS_TMPL.replace("%NAME%", _js_str(name)),
+        )
+        if isinstance(current_search, dict):
+            searched = current_search
+        time.sleep(max(1.0, wait))
+        current_click = zclaw_exec(
+            store_id,
+            CLICK_CONV_JS_TMPL.replace("%NAME%", _js_str(name)),
+        )
+        if isinstance(current_click, dict):
+            clicked = current_click
+        if isinstance(clicked, dict) and clicked.get("ok"):
+            break
+        if attempt == 2:
+            try:
+                el = zclaw_invoke(
+                    "click_element",
+                    {"storeId": store_id, "selector": ".arco-list-item", "hint": name},
+                    timeout=60,
+                )
+                if el.get("ok"):
+                    clicked = {"ok": True, "via": "click_element", "raw": el}
+            except Exception as error:
+                clicked = {"ok": False, "reason": str(error)}
     time.sleep(max(1.5, wait))
     if isinstance(clicked, dict) and clicked.get("ok"):
         return {"ok": True, "search": searched, "click": clicked}

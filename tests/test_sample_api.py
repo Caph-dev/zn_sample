@@ -22,6 +22,7 @@ from lib.sample_api import (  # noqa: E402
     locate_pending_application,
     parse_pending_list_payload,
     scrape_pending_list_api,
+    scrape_shipped_list_api,
 )
 from lib.sample_data_source import compare_pending_rows  # noqa: E402
 
@@ -56,6 +57,35 @@ class SampleApiParserTests(unittest.TestCase):
         self.assertEqual(request["tab"], 10)
         self.assertEqual(request["cur_page"], 3)
         self.assertEqual(request["page_size"], 25)
+
+    def test_shipped_scraper_uses_shipped_tab_and_keeps_order_context(self) -> None:
+        payload = load_fixture()
+        payload["agg_info"][0]["apply_deatil"]["apply_info"].update(
+            {
+                "curr_status": 30,
+                "main_order_id": "order-test-001",
+            }
+        )
+        request_bodies: list[dict] = []
+
+        def request_json(store_id: str, endpoint: str, body: dict, **kwargs) -> dict:
+            request_bodies.append(body)
+            return payload
+
+        rows = scrape_shipped_list_api(
+            "store-test",
+            max_pages=1,
+            request_json=request_json,
+            context=AffiliatePageContext(
+                href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                shop_id="shop-test",
+                shop_region="US",
+            ),
+        )
+
+        self.assertEqual(request_bodies[0]["tab"], 30)
+        self.assertEqual(rows[0]["main_order_id"], "order-test-001")
+        self.assertEqual(rows[0]["_shop_id"], "shop-test")
 
     def test_scraper_follows_has_more_and_deduplicates(self) -> None:
         first_payload = load_fixture()

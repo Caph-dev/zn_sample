@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 import uuid
@@ -18,12 +19,16 @@ from .zclaw import DEFAULT_EXEC_RETRIES, zclaw_exec
 AFFILIATE_HOST = "affiliate.tiktokshopglobalselling.com"
 SAMPLE_LIST_ENDPOINT = "/api/v1/affiliate/sample/group/list"
 CREATOR_PROFILE_ENDPOINT = "/api/v1/oec/affiliate/creator/marketplace/profile"
+SAMPLE_GROUP_ACTION_ENDPOINT = "/api/v1/affiliate/sample/group/action"
 READ_POST_ENDPOINTS = frozenset(
     {
         SAMPLE_LIST_ENDPOINT,
         CREATOR_PROFILE_ENDPOINT,
     }
 )
+WRITE_POST_ENDPOINTS = frozenset({SAMPLE_GROUP_ACTION_ENDPOINT})
+SELLER_LOGISTICS_ENDPOINT = "/api/v1/fulfillment/na/logistic_detail/list"
+SELLER_READ_GET_ENDPOINTS = frozenset({SELLER_LOGISTICS_ENDPOINT})
 DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.5
@@ -39,6 +44,13 @@ class PageApiSchemaError(PageApiError):
 
 @dataclass(frozen=True)
 class AffiliatePageContext:
+    href: str
+    shop_id: str
+    shop_region: str
+
+
+@dataclass(frozen=True)
+class SellerPageContext:
     href: str
     shop_id: str
     shop_region: str
@@ -75,40 +87,107 @@ def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
     )
 
 
+def get_seller_page_context(
+    store_id: str,
+    *,
+    shop_id: str,
+    shop_region: str = "US",
+) -> SellerPageContext:
+    """读取当前商家订单页上下文；店铺 ID 来自已读样品列表行。"""
+    result = zclaw_exec(
+        store_id,
+        "(() => JSON.stringify({href: location.href || ''}))()",
+        retries=DEFAULT_EXEC_RETRIES,
+    )
+    if not isinstance(result, dict):
+        raise PageApiError(f"无法读取当前商家页面 URL: {result!r}"[:300])
+
+    href = str(result.get("href") or "").strip()
+    parsed = urllib.parse.urlsplit(href)
+    hostname = str(parsed.hostname or "").lower()
+    if not re.fullmatch(r"seller(?:\.[a-z0-9-]+)*\.tiktokshopglobalselling\.com", hostname):
+        raise PageApiError("当前页面不是 TikTok Shop 商家中心订单页")
+    if "/order" not in parsed.path:
+        raise PageApiError("当前页面不是 TikTok Shop 商家订单页")
+
+    normalized_shop_id = str(shop_id or "").strip()
+    normalized_shop_region = str(shop_region or "US").strip().upper()
+    if not normalized_shop_id:
+        raise PageApiError("商家订单 API 缺少 shop_id")
+    if not normalized_shop_region:
+        raise PageApiError("商家订单 API 缺少 shop_region")
+    return SellerPageContext(
+        href=href,
+        shop_id=normalized_shop_id,
+        shop_region=normalized_shop_region,
+    )
+
+
+def _build_request_url(
+    endpoint: str,
+    *,
+    context: AffiliatePageContext | SellerPageContext,
+    allowed_endpoints: frozenset[str],
+    extra_query: dict[str, Any] | None = None,
+) -> str:
+    if endpoint not in allowed_endpoints:
+        raise PageApiError(f"未登记的页面 POST endpoint: {endpoint}")
+    if isinstance(context, AffiliatePageContext):
+        query: dict[str, str] = {
+            "user_language": "zh-CN",
+            "aid": "6556",
+            "app_name": "i18n_ecom_alliance",
+            "device_id": "0",
+            "device_platform": "web",
+            "oec_seller_id": context.shop_id,
+            "shop_region": context.shop_region,
+        }
+    else:
+        query = {
+            "shop_id": context.shop_id,
+            "shop_region": context.shop_region,
+        }
+    if extra_query:
+        query.update(extra_query)
+    return f"{endpoint}?{urllib.parse.urlencode(query, doseq=True)}"
+
+
 def _build_read_url(
     endpoint: str,
     *,
     context: AffiliatePageContext,
-    extra_query: dict[str, str] | None = None,
 ) -> str:
-    if endpoint not in READ_POST_ENDPOINTS:
-        raise PageApiError(f"未登记的只读 POST endpoint: {endpoint}")
-    query: dict[str, str] = {
-        "user_language": "zh-CN",
-        "aid": "6556",
-        "app_name": "i18n_ecom_alliance",
-        "device_id": "0",
-        "device_platform": "web",
-        "oec_seller_id": context.shop_id,
-        "shop_region": context.shop_region,
-    }
-    query.update(extra_query or {})
-    return f"{endpoint}?{urllib.parse.urlencode(query)}"
+    return _build_request_url(
+        endpoint,
+        context=context,
+        allowed_endpoints=READ_POST_ENDPOINTS,
+    )
 
 
-def post_read_json(
+def _post_page_json(
     store_id: str,
     endpoint: str,
     body: dict[str, Any],
     *,
-    context: AffiliatePageContext,
+    context: AffiliatePageContext | SellerPageContext,
+    allowed_endpoints: frozenset[str],
+    operation_label: str,
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    retries: int = 2,
+    retries: int = 0,
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    start_exec_retries: int = 1,
+    poll_exec_retries: int = 1,
+    http_method: str = "POST",
+    request_query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """在当前页面中执行已登记的查询型 POST，并返回业务 payload。"""
-    request_url = _build_read_url(endpoint, context=context)
+    """在页面上下文执行一个已登记的异步 POST。"""
+    request_url = _build_request_url(
+        endpoint,
+        context=context,
+        allowed_endpoints=allowed_endpoints,
+        extra_query=request_query,
+    )
     attempts = max(1, int(retries) + 1)
     last_error: PageApiError | None = None
     for attempt in range(attempts):
@@ -118,6 +197,7 @@ def post_read_json(
   const requestId = {json.dumps(request_id)};
   const requestUrl = {json.dumps(request_url, ensure_ascii=False)};
   const requestBody = {json.dumps(body, ensure_ascii=False)};
+  const requestMethod = {json.dumps(http_method.upper())};
   const maxResponseBytes = {int(max_response_bytes)};
   const timeoutMilliseconds = {max(1000, int(request_timeout_seconds * 1000))};
   const stateKey = '__znPageApiReadRequests';
@@ -126,15 +206,18 @@ def post_read_json(
   const timeoutHandle = window.setTimeout(() => abortController.abort(), timeoutMilliseconds);
   requestStates[requestId] = {{done: false}};
 
-  fetch(requestUrl, {{
-    method: 'POST',
+  const requestOptions = {{
+    method: requestMethod,
     headers: {{
       'accept': 'application/json, text/plain, */*',
       'content-type': 'application/json'
     }},
-    body: JSON.stringify(requestBody),
     signal: abortController.signal
-  }}).then(async response => {{
+  }};
+  if (requestMethod !== 'GET' && requestMethod !== 'HEAD') {{
+    requestOptions.body = JSON.stringify(requestBody);
+  }}
+  fetch(requestUrl, requestOptions).then(async response => {{
     const responseText = await response.text();
     const responseByteLength = new TextEncoder().encode(responseText).length;
     if (responseByteLength > maxResponseBytes) {{
@@ -184,7 +267,7 @@ def post_read_json(
                 store_id,
                 start_script,
                 timeout=30,
-                retries=1,
+                retries=start_exec_retries,
             )
             if not isinstance(start_result, dict) or not start_result.get("started"):
                 raise PageApiError(
@@ -212,7 +295,7 @@ def post_read_json(
                     store_id,
                     poll_script,
                     timeout=30,
-                    retries=1,
+                    retries=poll_exec_retries,
                 )
                 if not isinstance(poll_result, dict):
                     raise PageApiError(
@@ -249,8 +332,9 @@ def post_read_json(
                         f"message={str(payload.get('message') or '')[:160]}"
                     )
                 print(
-                    f"[页面API] POST {endpoint} status={result.get('status')} "
-                    f"code={business_code} elapsed_ms={elapsed_ms}",
+                    f"[页面API] {operation_label} {http_method.upper()} {endpoint} "
+                    f"status={result.get('status')} code={business_code} "
+                    f"elapsed_ms={elapsed_ms}",
                     flush=True,
                 )
                 return payload
@@ -260,3 +344,85 @@ def post_read_json(
 
     assert last_error is not None
     raise last_error
+
+
+def post_read_json(
+    store_id: str,
+    endpoint: str,
+    body: dict[str, Any],
+    *,
+    context: AffiliatePageContext,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    retries: int = 2,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    """在当前页面中执行已登记的查询型 POST，并返回业务 payload。"""
+    return _post_page_json(
+        store_id,
+        endpoint,
+        body,
+        context=context,
+        allowed_endpoints=READ_POST_ENDPOINTS,
+        operation_label="只读",
+        max_response_bytes=max_response_bytes,
+        retries=retries,
+        request_timeout_seconds=request_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        start_exec_retries=1,
+        poll_exec_retries=1,
+    )
+
+
+def post_sample_group_action_json(
+    store_id: str,
+    body: dict[str, Any],
+    *,
+    context: AffiliatePageContext,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    """发送已登记的样品批准动作；不自动重试，避免不确定状态下重复写入。"""
+    return _post_page_json(
+        store_id,
+        SAMPLE_GROUP_ACTION_ENDPOINT,
+        body,
+        context=context,
+        allowed_endpoints=WRITE_POST_ENDPOINTS,
+        operation_label="批准",
+        retries=0,
+        request_timeout_seconds=request_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        start_exec_retries=0,
+        poll_exec_retries=1,
+    )
+
+
+def get_seller_read_json(
+    store_id: str,
+    endpoint: str,
+    *,
+    query: dict[str, Any],
+    context: SellerPageContext,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    retries: int = 2,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> dict[str, Any]:
+    """在商家订单页执行已登记的物流查询 GET。"""
+    return _post_page_json(
+        store_id,
+        endpoint,
+        {},
+        context=context,
+        allowed_endpoints=SELLER_READ_GET_ENDPOINTS,
+        operation_label="商家订单只读",
+        max_response_bytes=max_response_bytes,
+        retries=retries,
+        request_timeout_seconds=request_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        start_exec_retries=1,
+        poll_exec_retries=1,
+        http_method="GET",
+        request_query=query,
+    )

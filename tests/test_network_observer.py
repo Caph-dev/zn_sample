@@ -34,6 +34,7 @@ class NetworkObserverSafetyTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         script = execute.call_args.args[1]
         self.assertIn("window.fetch = function", script)
+        self.assertIn("WebSocket.prototype.send", script)
         self.assertNotIn("fetch('/api", script)
         self.assertNotIn('request.open(\'POST\'', script)
 

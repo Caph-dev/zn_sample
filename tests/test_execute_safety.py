@@ -53,6 +53,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             config_path=None,
             page_wait=0,
             observe_approve_network=False,
+            write_source="dom",
         )
 
         click_approve.assert_not_called()
@@ -93,6 +94,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             config_path=None,
             page_wait=0,
             observe_approve_network=False,
+            write_source="dom",
         )
 
         ensure_ready.assert_called_once()
@@ -135,6 +137,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             config_path=None,
             page_wait=0,
             observe_approve_network=False,
+            write_source="dom",
         )
 
         ensure_ready.assert_called_once()
