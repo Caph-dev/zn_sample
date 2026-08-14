@@ -55,6 +55,23 @@ class BuildShippingFieldsTests(unittest.TestCase):
         self.assertEqual(result["fields"]["合作状态"], ["待发布"])
         self.assertEqual(result["status_transition"], "待发货->待发布")
 
+    def test_cbt_prefix_is_same_tracking_as_bare_number(self) -> None:
+        result = build_shipping_fields(
+            order_no="577524102614586321",
+            tracking_raw="CBT, 9200190412726311129185",
+            current={
+                "fields": {
+                    "订单号": "577524102614586321",
+                    "快递单号": "9200190412726311129185",
+                    "合作状态": ["待发布"],
+                }
+            },
+        )
+
+        self.assertFalse(result["skip_tracking"])
+        self.assertEqual(result["fields"]["快递单号"], "CBT, 9200190412726311129185")
+        self.assertEqual(result["status_transition"], "already-pending-post")
+
     def test_same_tracking_number_repairs_pending_ship_status(self) -> None:
         result = build_shipping_fields(
             order_no="order-1",

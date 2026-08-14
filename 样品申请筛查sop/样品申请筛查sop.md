@@ -137,13 +137,13 @@ Además, querida, ¿estarías abierta a hacer transmisiones en vivo de nuestros 
 
 # 第九步：复制对应达人的物流单号打开私信发送给达人
 
-发给达人的是商家订单页 **「TikTok 物流」单号**（如 `UUS68…` / `9200…` / `1LSD…`），**不是**「订单 ID」。下图示例误把订单号贴进了话术，以本文为准。
+发给达人的是商家订单页 **「TikTok 物流」单号**（如 `UUS68…` / `CBT, 9200…` / `1LSD…`），**不是**「订单 ID」。`9200` 开头须写成 `CBT, {单号}`。下图示例误把订单号贴进了话术，以本文为准。
 
-话术后接物流单号
+话术后接物流单号展示格式
 
-英语：Dear, here is the tracking number:
+英语：Dear, here is the tracking number:CBT, 9200…
 
-西语：Estimada, aquí tienes el número seguimiento:
+西语：Estimada, aquí tienes el número seguimiento:CBT, 9200…
 
 示例图如下：
 

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_config import AppConfigError, load_bitable_settings
+from .tracking_parse import tracking_numbers_equivalent
 
 OPEN_API_BASE = "https://open.feishu.cn/open-apis"
 
@@ -388,7 +389,9 @@ def build_shipping_fields(
     current_order = _field_plain(current_fields.get("订单号")).strip()
     current_status = _field_plain(current_fields.get("合作状态")).strip()
     want_track = (tracking_raw or "").strip()
-    same_track = bool(current_track) and current_track == want_track
+    same_track = bool(current_track) and (
+        current_track == want_track or tracking_numbers_equivalent(current_track, want_track)
+    )
     skip_tracking = bool(current_track) and (not overwrite) and (not same_track)
 
     fields: dict[str, Any] = {}

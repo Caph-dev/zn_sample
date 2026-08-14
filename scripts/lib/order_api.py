@@ -98,11 +98,12 @@ def parse_logistics_payload(
 
         for token in TRACKING_TOKEN_PATTERN.findall(value):
             if token != str(order_id) and len(token) >= 8:
+                token_parsed = parse_tiktok_logistics(token, order_id=order_id)
                 return {
                     "ok": True,
                     "order_id": str(order_id),
-                    "tracking_raw": value,
-                    "tracking_no": token,
+                    "tracking_raw": token_parsed.get("tracking_raw") or value,
+                    "tracking_no": token_parsed.get("tracking_no") or token,
                     "via": "api-field-token",
                 }
 

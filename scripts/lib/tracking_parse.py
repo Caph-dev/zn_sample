@@ -30,7 +30,10 @@ def is_order_id(value: str | None) -> bool:
 
 
 def normalize_tracking(raw: str | None) -> dict[str, str]:
-    """拆成飞书「快递单号」原文 与 发给达人的纯单号。"""
+    """拆成飞书/私信展示原文，以及用于比对的核心单号。
+
+    9200 开头的 TikTok 物流展示为「CBT, {单号}」。
+    """
     text = re.sub(r"\s+", " ", (raw or "").strip())
     text = text.replace("，", ",").strip(" ,")
     if not text:
@@ -50,11 +53,24 @@ def normalize_tracking(raw: str | None) -> dict[str, str]:
     number = re.sub(r"\s+", "", number)
     if is_order_id(number):
         return {"tracking_raw": "", "tracking_no": ""}
+    if not carrier and number.upper().startswith("9200"):
+        carrier = "CBT"
     if carrier:
         raw_out = f"{carrier}, {number}"
     else:
         raw_out = number
     return {"tracking_raw": raw_out, "tracking_no": number}
+
+
+def tracking_core_number(value: str | None) -> str:
+    return str(normalize_tracking(value).get("tracking_no") or "").strip()
+
+
+def tracking_numbers_equivalent(left: str | None, right: str | None) -> bool:
+    """「CBT, 9200…」与纯「9200…」视为同一物流单号。"""
+    left_number = tracking_core_number(left)
+    right_number = tracking_core_number(right)
+    return bool(left_number) and left_number == right_number
 
 
 def parse_tiktok_logistics(page_text: str, *, order_id: str = "") -> dict[str, Any]:

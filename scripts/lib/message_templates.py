@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .detect_lang import LANG_EN, LANG_ES
+from .tracking_parse import tracking_core_number
 
 INTRO_FINGERPRINTS = (
     "thanks for requesting our lingerie sample",
@@ -56,7 +57,11 @@ def looks_like_intro(text: str) -> bool:
 
 def looks_like_tracking(text: str, tracking_no: str = "") -> bool:
     blob = (text or "").lower()
+    compact = blob.replace(" ", "")
     if any(token in blob for token in TRACKING_FINGERPRINTS):
         return True
-    number = (tracking_no or "").strip().lower()
-    return bool(number) and number in blob.replace(" ", "")
+    display = (tracking_no or "").strip().lower()
+    if display and display.replace(" ", "") in compact:
+        return True
+    core_number = tracking_core_number(tracking_no).lower()
+    return bool(core_number) and core_number in compact

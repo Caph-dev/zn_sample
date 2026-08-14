@@ -338,8 +338,8 @@ python3 scripts/sync_shipped_tracking.py --write-feishu --send-tracking \
   --execute --yes --execute-limit 1
 ```
 
-第 9 步话术接 **纯物流单号**：  
-`Dear, here is the tracking number:{单号}` / `Estimada, aquí tienes el número seguimiento:{单号}`。
+第 9 步话术接飞书「快递单号」展示格式。`9200` 开头写成 `CBT, {单号}`：  
+`Dear, here is the tracking number:CBT, 9200…` / `Estimada, aquí tienes el número seguimiento:CBT, 9200…`。
 
 会话里已有介绍/物流话术指纹则跳过。禁止点「邀请」。
 

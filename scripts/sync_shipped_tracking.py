@@ -407,7 +407,7 @@ def main() -> int:
             continue
         print(
             f"  [物流] {name} order={order_id} "
-            f"track={out['tracking_no']} raw={out['tracking_raw']}"
+            f"track={out['tracking_raw'] or out['tracking_no']}"
         )
 
         option = ""
@@ -525,13 +525,14 @@ def main() -> int:
                     store_id,
                     row,
                     lang=str(out.get("lang") or "en"),
-                    tracking_no=str(out["tracking_no"]),
+                    tracking_no=str(out["tracking_raw"] or out["tracking_no"]),
                     execute=bool(args.execute),
                     wait=args.page_wait,
                     write_source=args.write_source,
                 )
                 out["message"] = dm.get("message") or tracking_message(
-                    str(out.get("lang") or "en"), str(out["tracking_no"])
+                    str(out.get("lang") or "en"),
+                    str(out["tracking_raw"] or out["tracking_no"]),
                 )
                 out["send_source"] = dm.get("send_source") or args.write_source
                 out["send_postcheck"] = dm.get("send_postcheck") or ""

@@ -51,6 +51,28 @@ class OrderApiParserTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["tracking_no"], "UUS68E5590171628828")
+        self.assertEqual(result["tracking_raw"], "UUS68E5590171628828")
+
+    def test_prefixes_cbt_for_9200_tracking_numbers(self) -> None:
+        result = parse_logistics_payload(
+            {
+                "code": 0,
+                "data": {
+                    "package_list": [
+                        {
+                            "logistics_info": {
+                                "tracking_number": "9200190412726311129185"
+                            }
+                        }
+                    ]
+                },
+            },
+            order_id="577524102614586321",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tracking_no"], "9200190412726311129185")
+        self.assertEqual(result["tracking_raw"], "CBT, 9200190412726311129185")
 
     def test_rejects_payload_without_tracking_value(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "未找到运单号"):
