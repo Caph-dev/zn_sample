@@ -1,0 +1,100 @@
+{
+  "code": 0,
+  "message": "",
+  "has_more": false,
+  "total_count": 1,
+  "view_type": 1,
+  "is_predict_fulfillment_rate": true,
+  "agg_info": [
+    {
+      "apply_group": {
+        "group_id": "creator-test-001",
+        "apply_count": 2,
+        "apply_ids": [
+          "apply-test-001",
+          "apply-test-002"
+        ],
+        "creator_info": {
+          "creator_id": "creator-test-001",
+          "tt_uid": "tt-test-001",
+          "name": "creator_test",
+          "nick_name": "Creator Test",
+          "follower_num": "3200",
+          "gmv": "$2,400",
+          "item_sold": "120",
+          "fulfillment_rate": "91%",
+          "content_video_views": "18000",
+          "pps_score": "4.8",
+          "categories": [
+            {
+              "name": "Womenswear & Underwear"
+            }
+          ],
+          "top_follower_gender": [
+            {
+              "key": "female",
+              "value": "0.68"
+            }
+          ],
+          "top_follower_ages": [
+            {
+              "key": "25-34",
+              "value": "0.42"
+            }
+          ]
+        }
+      },
+      "apply_deatil": {
+        "apply_info": {
+          "apply_id": "apply-test-001",
+          "product_id": "product-test-001",
+          "product_title": "Synthetic sample product",
+          "sku_id": "sku-test-001",
+          "sku_desc": "Synthetic size",
+          "can_be_approved": true,
+          "review_status": 10
+        },
+        "apply_infos": [
+          {
+            "apply_id": "apply-test-001",
+            "product_id": "product-test-001"
+          },
+          {
+            "apply_id": "apply-test-002",
+            "product_id": "product-test-002"
+          }
+        ],
+        "creator_info": {
+          "creator_id": "creator-test-001",
+          "tt_uid": "tt-test-001",
+          "name": "creator_test",
+          "nick_name": "Creator Test",
+          "follower_num": "3200",
+          "gmv": "$2,400",
+          "item_sold": "120",
+          "fulfillment_rate": "91%",
+          "content_video_views": "18000",
+          "pps_score": "4.8",
+          "categories": [
+            {
+              "name": "Womenswear & Underwear"
+            }
+          ],
+          "top_follower_gender": [
+            {
+              "key": "female",
+              "value": "0.68"
+            }
+          ],
+          "top_follower_ages": [
+            {
+              "key": "25-34",
+              "value": "0.42"
+            }
+          ]
+        },
+        "has_more": false
+      }
+    }
+  ]
+}

@@ -205,7 +205,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 - `bio`；
 - `creator_type`。
 
-如某字段确实不在 profile API 中，采用字段级 DOM 补充前必须先量化成本；正式流程不能悄悄把缺失值当作 0。
+实测 profile API 不返回 `bio`。简介不属于筛查条件，第 6 步语言识别和介绍私信继续显式使用详情 DOM；筛查 API 适配器将 `bio` 留空，不把缺失值伪装成接口数据。其他筛查核心指标缺失时，`auto` 必须按达人回退 DOM。
 
 ### 4.4 里程碑 D：数据源编排和 CLI
 
@@ -397,13 +397,16 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 
 ## 7. 第一批实现任务
 
-- [ ] 建立 `page_api.py` 的同源请求 allowlist 和脱敏日志；
-- [ ] 建立脱敏列表/详情 fixture；
-- [ ] 明确列表响应到标准 row 的完整字段映射；
-- [ ] 明确 `profile_types` 2/3/4/5 各字段归属；
-- [ ] 完成分页和响应 schema 测试；
-- [ ] 完成详情合并和指标规范化测试；
-- [ ] 新增数据源编排和 `--data-source`；
-- [ ] 新增 shadow 差异报告；
-- [ ] 用 1 号店 `--max-rows 6` 做三轮只读对比；
-- [ ] API 优先模式达到第一阶段验收标准后更新 README.md / AGENTS.md。
+- [x] 建立 `page_api.py` 的同源请求 allowlist 和脱敏日志；
+- [x] 建立脱敏列表和详情 fixture；
+- [x] 明确列表响应到标准 row 的完整字段映射；
+- [x] 明确 `profile_types` 2/3/4/5 各字段归属；
+- [x] 完成列表分页和响应 schema 测试；
+- [x] 完成详情合并和指标规范化测试；
+- [x] 新增数据源编排和 `--data-source`；
+- [x] 新增 shadow 差异报告；
+- [x] 用 1 号店 `shadow --detail-all --max-rows 6` 做三轮只读对比：三轮列表均为 6/6 且零字段差异；详情可比较数据没有不可解释的数值差异。第 1 轮有一行 DOM 卡片显示 `--` 而 API 返回完整指标；第 2 轮有一行 DOM 遭遇 Bridge 瞬断；加入待审核页加载重试、详情只读网络重试和容差边界修复后，第 3 轮 6/6 达人的 8 个核心字段全部一致；
+- [x] 真实样本覆盖视频达人、视频+直播达人、Live GPM 为 0、低于 1% 互动率；离线契约测试补齐直播达人、双侧 GPM 为 0、可选字段无权限、核心 GPM 无权限须回退；
+- [x] 完成两个不同达人详情 shadow（修复低于 1% 的 DOM 百分比放大问题后，8 个核心字段一致）；
+- [x] 验证两达人 `auto` 模式全程使用 API，并更新 README.md / AGENTS.md；
+- [ ] 扩大真实达人样本并稳定运行后，再考虑把默认数据源从 `dom` 改为 `auto`。

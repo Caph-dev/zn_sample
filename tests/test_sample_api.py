@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import copy
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+
+from lib.page_api import (  # noqa: E402
+    SAMPLE_LIST_ENDPOINT,
+    AffiliatePageContext,
+    PageApiError,
+    post_read_json,
+)
+from lib.sample_api import (  # noqa: E402
+    build_pending_list_request,
+    parse_pending_list_payload,
+    scrape_pending_list_api,
+)
+from lib.sample_data_source import compare_pending_rows  # noqa: E402
+
+FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "sample_group_list.json"
+
+
+def load_fixture() -> dict:
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+class SampleApiParserTests(unittest.TestCase):
+    def test_maps_aggregate_to_existing_dom_row_shape(self) -> None:
+        rows = parse_pending_list_payload(
+            load_fixture(),
+            list_href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+        )
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["apply_id"], "apply-test-001")
+        self.assertEqual(row["apply_ids"], ["apply-test-001", "apply-test-002"])
+        self.assertEqual(row["product_id"], "product-test-001")
+        self.assertEqual(row["creator_id"], "creator-test-001")
+        self.assertEqual(row["creator_name"], "creator_test")
+        self.assertEqual(row["follower_num"], "3200")
+        self.assertTrue(row["can_be_approved"])
+        self.assertEqual(row["_data_source"], "api")
+
+    def test_request_contract_uses_pending_tab_and_server_pagination(self) -> None:
+        request = build_pending_list_request(3, 25)
+
+        self.assertEqual(request["tab"], 10)
+        self.assertEqual(request["cur_page"], 3)
+        self.assertEqual(request["page_size"], 25)
+
+    def test_scraper_follows_has_more_and_deduplicates(self) -> None:
+        first_payload = load_fixture()
+        first_payload["has_more"] = True
+        second_payload = copy.deepcopy(first_payload)
+        second_payload["has_more"] = False
+        second_payload["agg_info"][0]["apply_deatil"]["apply_info"]["apply_id"] = (
+            "apply-test-003"
+        )
+        second_payload["agg_info"][0]["apply_deatil"]["apply_info"]["product_id"] = (
+            "product-test-003"
+        )
+        second_payload["agg_info"][0]["apply_group"]["apply_ids"] = [
+            "apply-test-003"
+        ]
+        calls: list[int] = []
+
+        def request_json(
+            store_id: str,
+            endpoint: str,
+            body: dict,
+            **kwargs,
+        ) -> dict:
+            self.assertEqual(store_id, "store-test")
+            self.assertEqual(endpoint, SAMPLE_LIST_ENDPOINT)
+            calls.append(body["cur_page"])
+            return first_payload if body["cur_page"] == 1 else second_payload
+
+        rows = scrape_pending_list_api(
+            "store-test",
+            max_pages=5,
+            ensure_page=False,
+            request_json=request_json,
+            context=AffiliatePageContext(
+                href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                shop_id="shop-test",
+                shop_region="US",
+            ),
+        )
+
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual([row["apply_id"] for row in rows], [
+            "apply-test-001",
+            "apply-test-003",
+        ])
+
+
+class PageApiTransportTests(unittest.TestCase):
+    def test_transport_uses_only_allowlisted_endpoint_without_session_extraction(self) -> None:
+        with patch(
+            "lib.page_api.zclaw_exec",
+            return_value={
+                "ok": True,
+                "status": 200,
+                "payload": {"code": 0, "agg_info": [], "total_count": 0},
+            },
+        ) as execute:
+            payload = post_read_json(
+                "store-test",
+                SAMPLE_LIST_ENDPOINT,
+                build_pending_list_request(1),
+                context=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+            )
+
+        script = execute.call_args.args[1]
+        self.assertNotIn("document.cookie", script.lower())
+        self.assertNotIn("cookie_enabled", script.lower())
+        self.assertIn("oec_seller_id=shop-test", script)
+        self.assertEqual(payload["code"], 0)
+
+    def test_transport_rejects_unregistered_endpoint(self) -> None:
+        with self.assertRaises(PageApiError):
+            post_read_json(
+                "store-test",
+                "/api/v1/affiliate/sample/approve",
+                {},
+                context=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+            )
+
+
+class ShadowComparisonTests(unittest.TestCase):
+    def test_matching_rows_pass(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="test")
+        report = compare_pending_rows(rows, copy.deepcopy(rows))
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["field_mismatches"], [])
+
+    def test_mismatch_report_does_not_expose_apply_id(self) -> None:
+        api_rows = parse_pending_list_payload(load_fixture(), list_href="test")
+        dom_rows = copy.deepcopy(api_rows)
+        dom_rows[0]["gmv"] = "$9,999"
+
+        report = compare_pending_rows(dom_rows, api_rows)
+        serialized_report = json.dumps(report, ensure_ascii=False)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["field_mismatches"][0]["fields"], ["gmv"])
+        self.assertNotIn("apply-test-001", serialized_report)
+        self.assertNotIn("creator_test", serialized_report)
+
+
+if __name__ == "__main__":
+    unittest.main()

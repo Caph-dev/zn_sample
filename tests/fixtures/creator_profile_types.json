@@ -1,0 +1,124 @@
+{
+  "2": {
+    "code": 0,
+    "message": "",
+    "creator_profile": {
+      "ec_video_gpm": {
+        "is_authorized": true,
+        "status": 0,
+        "value": {
+          "minimal": "12.5",
+          "minimal_format": "$12.5",
+          "maximum": "12.5",
+          "maximum_format": "$12.5",
+          "symbol": "$"
+        }
+      },
+      "ec_live_gpm": {
+        "is_authorized": true,
+        "status": 0,
+        "value": {
+          "minimal": "0",
+          "minimal_format": "$0.00",
+          "maximum": "0",
+          "maximum_format": "$0.00",
+          "symbol": "$"
+        }
+      },
+      "gpm": {
+        "is_authorized": true,
+        "status": 0,
+        "value": {
+          "value": "13.24",
+          "format": "$13.2",
+          "symbol": "$"
+        }
+      },
+      "ec_video_med_view_cnt": {
+        "is_authorized": true,
+        "status": 0,
+        "value": "450"
+      },
+      "ec_live_med_view_cnt": {
+        "is_authorized": true,
+        "status": 0,
+        "value": "800"
+      },
+      "video_med_view_cnt": {
+        "is_authorized": true,
+        "status": 0,
+        "value": "460"
+      },
+      "live_med_view_cnt": {
+        "is_authorized": true,
+        "status": 0,
+        "value": "810"
+      },
+      "ec_video_engagement": {
+        "is_authorized": true,
+        "status": 0,
+        "value": 245
+      },
+      "ec_live_engagement": {
+        "is_authorized": true,
+        "status": 0,
+        "value": 1234
+      },
+      "video_engagement": {
+        "is_authorized": true,
+        "status": 0,
+        "value": 250
+      },
+      "live_engagement": {
+        "is_authorized": true,
+        "status": 0,
+        "value": 1250
+      },
+      "sample_fulfillment_rate": {
+        "is_authorized": true,
+        "status": 0,
+        "value": 9125
+      },
+      "avg_revenue_per_buyer": {
+        "is_authorized": true,
+        "status": 0,
+        "value": {
+          "value": "18.75",
+          "format": "$18.8",
+          "symbol": "$"
+        }
+      }
+    }
+  },
+  "3": {
+    "code": 0,
+    "message": "",
+    "creator_profile": {
+      "follower_genders_v2": {
+        "is_authorized": true,
+        "status": 0,
+        "value": [
+          {
+            "key": "female",
+            "value": 0.7
+          }
+        ]
+      }
+    }
+  },
+  "4": {
+    "code": 0,
+    "message": ""
+  },
+  "5": {
+    "code": 0,
+    "message": "",
+    "creator_profile": {
+      "ec_top_video_data": {
+        "is_authorized": true,
+        "status": 0,
+        "value": []
+      }
+    }
+  }
+}

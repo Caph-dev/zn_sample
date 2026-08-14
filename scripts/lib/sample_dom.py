@@ -173,17 +173,36 @@ CLICK_NEXT_JS = r"""
 """
 
 
-def assert_on_pending_list(store_id: str, *, page_wait: float = 1.5) -> dict:
+def assert_on_pending_list(
+    store_id: str,
+    *,
+    page_wait: float = 1.5,
+    retries: int = 2,
+) -> dict:
     """校验已在样品申请页，并确保「待审核」tab。不打开入口页。"""
-    tab = zclaw_exec(store_id, ENSURE_PENDING_TAB_JS)
-    if not isinstance(tab, dict) or not tab.get("ok"):
-        raise RuntimeError(
-            "当前不在「样品申请-待审核」或无法切换 tab。"
-            f" 请手动打开并定位到该页后重试。详情: {tab}"
+    attempts = max(1, int(retries) + 1)
+    tab: dict | Any = {}
+    for attempt in range(attempts):
+        tab = zclaw_exec(store_id, ENSURE_PENDING_TAB_JS)
+        if isinstance(tab, dict) and tab.get("ok"):
+            if tab.get("clicked"):
+                time.sleep(page_wait)
+            return tab
+
+        page_is_still_loading = bool(
+            isinstance(tab, dict)
+            and tab.get("reason") == "no-pending-tab"
+            and "sample-request" in str(tab.get("href") or "")
         )
-    if tab.get("clicked"):
-        time.sleep(page_wait)
-    return tab
+        if page_is_still_loading and attempt + 1 < attempts:
+            time.sleep(max(1.0, page_wait))
+            continue
+        break
+
+    raise RuntimeError(
+        "当前不在「样品申请-待审核」或无法切换 tab。"
+        f" 请手动打开并定位到该页后重试。详情: {tab}"
+    )
 
 
 def extract_page(store_id: str) -> dict:

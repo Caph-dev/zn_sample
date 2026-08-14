@@ -68,11 +68,15 @@ def parse_percent(v: Any) -> float | None:
     if isinstance(v, (int, float)):
         x = float(v)
         return x * 100 if 0 <= x <= 1 else x
-    s = str(v).strip().replace("%", "").replace(",", "")
+    raw_text = str(v).strip()
+    has_explicit_percent_sign = "%" in raw_text
+    s = raw_text.replace("%", "").replace(",", "")
     try:
         x = float(s)
     except ValueError:
         return None
+    if has_explicit_percent_sign:
+        return x
     return x * 100 if 0 <= x <= 1 else x
 
 

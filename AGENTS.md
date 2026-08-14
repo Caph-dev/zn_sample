@@ -88,6 +88,10 @@ zn_sample/
 │   └── lib/
 │       ├── zclaw.py                   # ziniao-cli / execute_script 薄封装
 │       ├── sample_dom.py              # 待审核列表扫表（假定已定位）
+│       ├── page_api.py                # 页面上下文只读 API 传输（allowlist）
+│       ├── sample_api.py              # 待审核列表 API 适配
+│       ├── sample_data_source.py      # dom/api/auto/shadow 编排
+│       ├── creator_api.py             # 达人 profile_types 详情 API 适配
 │       ├── creator_detail.py          # 达人详情只读
 │       ├── feishu_hero.py             # 飞书主推表只读（默认 wiki 链接）
 │       ├── feishu_bitable.py          # 达人关系管理(新) 查重/写入（可选）
@@ -146,7 +150,7 @@ https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc
 
 ## 样品申请筛查（`screen_sample_requests.py`）
 
-TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本（ZClaw DOM）。  
+TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本（默认 ZClaw DOM；列表和详情 API 正在只读试运行）。
 规则对齐 `样品申请筛查sop/样品申请筛查sop.md`：默认输出通过名单；**默认禁止同意**。
 
 | 路径 | 说明 |
@@ -159,6 +163,7 @@ TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本�
 | `scripts/lib/order_dom.py` | 商家订单页只读抽 TikTok 物流单号 |
 | `scripts/lib/im_dom.py` | 达人消息打开会话 / 发送（仅 execute） |
 | `scripts/lib/detect_lang.py` | 详情页简介 → 英语 / 西班牙语 |
+| `scripts/lib/creator_api.py` | 达人详情 profile_types 2/3/4/5 API（筛查指标） |
 | `scripts/lib/creator_detail.py` | 达人详情只读（GPM、简介） |
 | `scripts/lib/feishu_hero.py` | 飞书主推表只读（产品货号 / 是否主推） |
 | `scripts/lib/feishu_bitable.py` | 达人关系管理(新)：查重 / 写入 / 回写物流 |
@@ -244,6 +249,7 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
 | `--out` | 可选 | 导出前缀（默认 `exports/sample_screen_<时间戳>`） |
 | `--store-id` / `--store-name` | 可选 | 店铺；默认 1 号店 |
 | `--max-rows` | 仅测试 | 扫表最多 N 行；正式全量勿限 |
+| `--data-source` | 可选 | 列表和筛查详情来源 `dom/api/auto/shadow`；默认 `dom`；第一阶段非 DOM 仅限只读 |
 | `--detail-limit` | **禁止使用** | 已移除；勿截断详情目标（限量请用 `--max-rows`） |
 | `--skip-hero-check` | **禁止正式用** | 跳过主推 |
 | `--execute` | 危险可选 | 对筛查通过行点「同意」；**须同时** `--yes` |
@@ -265,9 +271,9 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
 ```text
 1. 读 config / 飞书主推表 → hero_keys（「是否主推=是」的货号 + 商品ID）
 2. 校验当前页为样品申请；必要时点「待审核」tab（找不到则报错）
-3. 静默扫表（React record + 翻页）→ raw_rows
+3. 按 `--data-source` 扫表 → raw_rows（默认 DOM；API 试运行支持 shadow/auto）
 4. 列表初判 evaluate_row（此时尚无详情 GPM；require_detail=False）
-5. 按开关决定谁进详情 → 只读打开达人详情 → 抽 Video/Live GPM 等 → 回列表
+5. 按开关决定谁进详情 → 按数据源读取 profile API 或 DOM → 抽 Video/Live GPM 等
 6. 带详情重判 evaluate_row（正式须 require_detail=True）
 7. 若未 --execute：导出 csv/xlsx/json，结束
 8. 若 --execute --yes：
@@ -311,8 +317,9 @@ execute 时另有：动作、批准状态/错误、飞书状态/`record_id`/错�
 2. 正式筛查必须：`config.toml`/`FEISHU_APP_SECRET` + `--with-detail` + `--require-detail`；测试可用 `--max-rows` 限扫表行数  
 3. 禁止文档推荐「仅列表」、本地 xlsx 或 `--skip-hero-check` 作为正式路径；**禁止使用 `--detail-limit`**  
 4. **默认**禁止同意；仅 `--execute --yes` 可批；测试默认**不要** `--write-feishu`；默认 `--execute-limit 1`  
-5. 店掉线 / 停在详情页：手动回到待审核列表后重跑  
-6. 勿把 `app_secret` / `config.toml` 提交 git 或写入聊天记录  
+5. 第一阶段 API 化覆盖待审核列表和筛查详情；简介/私信仍走 DOM；`--execute` 必须使用 `--data-source dom`，shadow 始终以 DOM 为权威
+6. 店掉线 / 停在详情页：手动回到待审核列表后重跑
+7. 勿把 `app_secret` / `config.toml` 提交 git 或写入聊天记录
 
 ---
 

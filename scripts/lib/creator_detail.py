@@ -355,7 +355,7 @@ def extract_creator_detail(store_id: str, *, retries: int = 2, retry_wait: float
     last: dict | None = None
     attempts = max(1, retries + 1)
     for attempt in range(attempts):
-        ret = zclaw_exec(store_id, EXTRACT_DETAIL_JS)
+        ret = zclaw_exec(store_id, EXTRACT_DETAIL_JS, retries=2)
         if not isinstance(ret, dict):
             raise RuntimeError(f"extract detail bad: {ret!r}"[:300])
         last = _normalize_detail_numbers(ret)
@@ -384,6 +384,7 @@ def go_back_to_list(store_id: str, list_href: str = "", *, wait: float = 2.5) ->
     ret = zclaw_exec(
         store_id,
         "(() => { history.back(); return JSON.stringify({ok:true, href: location.href}); })()",
+        retries=2,
     )
     time.sleep(wait)
     return {"ok": True, "via": "history.back", "ret": ret}

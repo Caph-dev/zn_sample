@@ -40,7 +40,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
-from lib.creator_detail import fetch_detail_for_row  # noqa: E402
 from lib.export_util import write_reports  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
@@ -64,7 +63,11 @@ from lib.feishu_hero import (  # noqa: E402
     load_hero_from_feishu,
 )
 from lib.filters import Criteria, evaluate_row  # noqa: E402
-from lib.sample_dom import scrape_pending_list  # noqa: E402
+from lib.sample_data_source import (  # noqa: E402
+    DATA_SOURCE_CHOICES,
+    load_creator_detail,
+    load_pending_rows,
+)
 from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
@@ -333,6 +336,15 @@ def main() -> int:
     ap.add_argument("--max-rows", type=int, default=0, help="最多处理 N 条（0=不限；测试建议小）")
     ap.add_argument("--page-wait", type=float, default=2.0)
     ap.add_argument(
+        "--data-source",
+        choices=DATA_SOURCE_CHOICES,
+        default="dom",
+        help=(
+            "列表和筛查详情数据源：dom=现有路径；api=页面同源接口；"
+            "auto=API失败回退DOM；shadow=双读对比且DOM为权威（默认 dom）"
+        ),
+    )
+    ap.add_argument(
         "--config",
         default=None,
         help="配置文件路径（默认仓库根 config.toml；也可用 ZN_SAMPLE_CONFIG）",
@@ -423,6 +435,12 @@ def main() -> int:
     if args.write_feishu and not args.execute:
         print("--write-feishu 仅在 --execute --yes 时有效", file=sys.stderr)
         return 2
+    if args.execute and args.data_source != "dom":
+        print(
+            "第一阶段 API 化仅限只读；真实批准时 --data-source 必须为 dom。",
+            file=sys.stderr,
+        )
+        return 2
 
     mode = "EXECUTE" if args.execute else "DRY-RUN/只读导出"
     print("=" * 60)
@@ -436,6 +454,7 @@ def main() -> int:
         print("  顺序: 同意成功 → 再写飞书；去重命中/货号无法映射 → 整单跳过")
     else:
         print("  默认只读导出 | **未**启用同意")
+    print(f"  列表和筛查详情数据源: {args.data_source}")
     print("主推表来源: 飞书云文档（不再使用本地 xlsx）")
     print("前提：你已手动打开「样品申请 → 待审核」并停在该页")
     print("=" * 60)
@@ -508,16 +527,21 @@ def main() -> int:
 
     t0 = time.time()
     try:
-        raw_rows = scrape_pending_list(
+        pending_result = load_pending_rows(
             store_id,
+            data_source=args.data_source,
             max_pages=args.max_pages,
             max_rows=args.max_rows,
             page_wait=args.page_wait,
-            ensure_tab=True,
         )
+        raw_rows = pending_result.rows
     except Exception as e:
         print(f"扫表失败: {e}", file=sys.stderr)
         return 1
+
+    print(f"[数据源] 实际使用={pending_result.source_used}")
+    if pending_result.fallback_reason:
+        print(f"[数据源] fallback={pending_result.fallback_reason}")
 
     if not raw_rows:
         print("未读到待审核行", file=sys.stderr)
@@ -550,6 +574,7 @@ def main() -> int:
     # 详情：只读
     need_detail = args.with_detail or args.detail_all or args.require_detail
     detail_targets: list[dict] = []
+    detail_shadow_reports: list[dict[str, Any]] = []
     if need_detail:
         if args.detail_all:
             detail_targets = list(pre)
@@ -578,17 +603,21 @@ def main() -> int:
                 target,
             )
             try:
-                res = fetch_detail_for_row(
+                detail_result = load_creator_detail(
                     store_id,
                     src,
+                    data_source=args.data_source,
                     list_href=list_href,
-                    prefer_url=True,
                     wait=max(3.5, args.page_wait + 1.5),
                 )
+                res = detail_result.result
             except Exception as e:
                 print(f"    失败: {e}")
                 target["detail_error"] = str(e)
                 continue
+            print(f"    详情数据源={detail_result.source_used}")
+            if detail_result.shadow_report:
+                detail_shadow_reports.append(detail_result.shadow_report)
             if not res.get("ok"):
                 print(f"    失败: {res.get('error')}")
                 target["detail_error"] = res.get("error")
@@ -625,6 +654,9 @@ def main() -> int:
                     "has_en_video_card",
                     "extract_via",
                     "text_head",
+                    "profile_type_field_counts",
+                    "_detail_data_source",
+                    "_detail_fallback_reason",
                 ):
                     if k in d:
                         row[k] = d[k]
@@ -684,6 +716,44 @@ def main() -> int:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_prefix = args.out or (ROOT / "exports" / f"sample_screen_{ts}")
+
+    if pending_result.shadow_report:
+        pending_result.shadow_report["detail_reports"] = detail_shadow_reports
+        pending_result.shadow_report["detail_summary"] = {
+            "count": len(detail_shadow_reports),
+            "ok_count": sum(
+                1 for report in detail_shadow_reports if report.get("ok")
+            ),
+            "mismatch_count": sum(
+                len(report.get("mismatches") or [])
+                for report in detail_shadow_reports
+            ),
+            "dom_only_count": sum(
+                len(report.get("dom_only_fields") or [])
+                for report in detail_shadow_reports
+            ),
+            "api_more_complete_count": sum(
+                1
+                for report in detail_shadow_reports
+                if report.get("comparison_status") == "api-more-complete"
+            ),
+            "no_comparable_metrics_count": sum(
+                1
+                for report in detail_shadow_reports
+                if report.get("comparison_status") == "no-comparable-metrics"
+            ),
+        }
+        shadow_path = out_prefix.with_name(out_prefix.name + "_shadow.json")
+        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+        shadow_path.write_text(
+            json.dumps(
+                pending_result.shadow_report,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[shadow] 差异报告: {shadow_path}")
 
     if args.execute:
         # 批准前备份（可回看筛查结果；平台侧「同意」不可自动撤销）

@@ -66,6 +66,7 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail
 | 全表都拉详情（慢，含非主推） | `--detail-all` |
 | 冒烟测试（限扫表行数） | `--max-rows 6`（**禁止** `--detail-limit`） |
 | 指定店铺 | `--store-id <storeId>` |
+| 列表和详情 API/DOM 对比（只读） | `--data-source shadow` |
 
 示例：
 
@@ -76,6 +77,26 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail --eligi
 # 快速冒烟（只限扫表行数；详情不截断）
 python3 scripts/screen_sample_requests.py --with-detail --require-detail --max-rows 6
 ```
+
+### 列表和达人详情 API 化试运行
+
+待审核列表和筛查所需的达人详情指标已接入页面同源 API。默认数据源仍保持 `dom`；`auto` 为 API 优先、按列表或单达人自动回退 DOM 的只读试运行模式。
+
+```bash
+# 推荐验证：列表和详情双读，DOM 结果仍是筛选权威
+python3 scripts/screen_sample_requests.py \
+  --data-source shadow --detail-all --max-rows 2
+
+# 纯 API 筛查（只读；任一接口失败即报错）
+python3 scripts/screen_sample_requests.py \
+  --data-source api --with-detail --require-detail --max-rows 6
+
+# API 优先，列表或单达人读取失败时自动回退 DOM
+python3 scripts/screen_sample_requests.py \
+  --data-source auto --with-detail --require-detail --max-rows 6
+```
+
+`shadow` 会输出脱敏差异报告 `*_shadow.json`。Profile API 不返回达人简介；第 6 步语言识别和介绍私信仍按原流程读取详情 DOM。第一阶段禁止将非 DOM 数据源与 `--execute` 联用；真实批准仍必须使用默认 `--data-source dom`。
 
 **不要**用：省略 `--with-detail` / `--require-detail`、`--skip-hero-check`，或 **`--detail-limit`**（已移除，禁止使用）。  
 
@@ -139,7 +160,7 @@ python3 scripts/sync_shipped_tracking.py --write-feishu --force --max-rows 1
 
 | SOP | 来源 |
 |-----|------|
-| 粉丝/GMV/成交件数/履约/女性/类目 | 待审核列表 React record |
+| 粉丝/GMV/成交件数/履约/女性/类目 | 待审核列表（默认 React record；API 只读试运行） |
 | 千次曝光 / 客单价 | 详情优先；列表可作辅助 |
 | 视频/直播 GPM、均播、互动率 | 达人详情（`--with-detail`，正式必开） |
 | 主推款 | 飞书表「是否主推=是」的产品货号 + 商品ID |
@@ -164,6 +185,10 @@ scripts/screen_sample_requests.py   # CLI
 scripts/lib/feishu_hero.py          # 飞书主推表只读
 scripts/lib/feishu_bitable.py       # 达人关系管理(新) 可选写入
 scripts/lib/approve_dom.py          # 列表点「同意」（仅 execute）
+scripts/lib/page_api.py             # 紫鸟页面上下文只读 API 传输
+scripts/lib/sample_api.py           # 待审核列表 API 适配
+scripts/lib/creator_api.py          # 达人 profile_types 详情 API 适配
+scripts/lib/sample_data_source.py   # dom/api/auto/shadow 编排
 scripts/lib/app_config.py           # 读 config.toml
 scripts/lib/                        # DOM / 判定 / 导出
 exports/                            # 输出（含可选 *_pre_execute 备份）
