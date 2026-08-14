@@ -52,12 +52,11 @@ from lib.order_dom import fetch_tiktok_tracking  # noqa: E402
 from lib.order_api import fetch_tiktok_tracking_api  # noqa: E402
 from lib.sample_api import scrape_shipped_list_api  # noqa: E402
 from lib.shipped_dom import (  # noqa: E402
-    SAMPLE_REQUEST_URL,
     ensure_on_sample_page,
     ensure_sample_page_loaded,
     scrape_shipped_list,
 )
-from lib.zclaw import resolve_store_id, visit_page  # noqa: E402
+from lib.zclaw import resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
@@ -393,10 +392,6 @@ def main() -> int:
                         shop_id=str(row.get("_shop_id") or ""),
                         wait=max(3.5, args.page_wait + 1.0),
                     )
-        # 回到样品申请，避免停在商家中心
-        visit_page(store_id, SAMPLE_REQUEST_URL)
-        time.sleep(1.2)
-
         out["tracking_raw"] = tracking.get("tracking_raw") or ""
         out["tracking_no"] = tracking.get("tracking_no") or ""
         out["tracking_source"] = tracking.get("via") or args.tracking_source
@@ -467,8 +462,6 @@ def main() -> int:
             out["lang"] = detected.get("lang")
             out["feishu_lang"] = detected.get("feishu_lang")
             out["lang_reason"] = detected.get("reason")
-            visit_page(store_id, SAMPLE_REQUEST_URL)
-            time.sleep(1.0)
 
         if args.write_feishu and bitable_token and record:
             plan = build_shipping_fields(
@@ -543,8 +536,6 @@ def main() -> int:
                 else:
                     out["send_status"] = dm.get("status") or "send-failed"
                     out["error"] = dm.get("error")
-                visit_page(store_id, SAMPLE_REQUEST_URL)
-                time.sleep(1.0)
         if args.execute_delay:
             time.sleep(args.execute_delay)
         results.append(out)

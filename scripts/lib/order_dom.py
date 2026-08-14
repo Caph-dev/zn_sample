@@ -6,8 +6,9 @@ import time
 from typing import Any
 from urllib.parse import quote
 
+from .sample_navigation import is_seller_order_href, navigate_to_url
 from .tracking_parse import parse_tiktok_logistics
-from .zclaw import visit_page, zclaw_exec
+from .zclaw import zclaw_exec
 
 EXTRACT_ORDER_JS = r"""
 (() => {
@@ -52,8 +53,14 @@ def fetch_tiktok_tracking(
     if not oid:
         return {"ok": False, "error": "empty-order-id"}
     url = order_lookup_url(oid, shop_id=shop_id)
-    visit_page(store_id, url)
-    time.sleep(wait)
+    navigate_to_url(
+        store_id,
+        url,
+        is_seller_order_href,
+        timeout=max(12.0, wait + 8.0),
+        poll_interval=0.5,
+    )
+    time.sleep(max(0.8, min(wait, 2.5)))
     last: dict[str, Any] | None = None
     attempts = max(1, retries + 1)
     for attempt in range(attempts):

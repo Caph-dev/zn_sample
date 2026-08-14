@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -105,6 +106,151 @@ def validate_sample_request_destination(page_state: dict[str, Any]) -> dict[str,
         "shop_id": shop_id,
         "shop_region": shop_region,
     }
+
+
+def sample_request_url(*, shop_id: str = "", shop_region: str = "US") -> str:
+    """带上已知店铺上下文，避免回样品申请页时落到无 shop_id 的中间态。"""
+    query = {
+        "shop_region": str(shop_region or "US").strip().upper() or "US",
+    }
+    normalized_shop_id = str(shop_id or "").strip()
+    if normalized_shop_id:
+        query["shop_id"] = normalized_shop_id
+    return (
+        "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
+        f"?{urllib.parse.urlencode(query)}"
+    )
+
+
+def current_page_href(
+    store_id: str,
+    *,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+) -> str:
+    result = execute_script_fn(
+        store_id,
+        "(() => JSON.stringify({href: location.href || ''}))()",
+        timeout=15,
+        retries=0,
+    )
+    if isinstance(result, dict):
+        return str(result.get("href") or "").strip()
+    return ""
+
+
+def is_sample_request_href(href: str) -> bool:
+    parsed_url = urllib.parse.urlsplit(href or "")
+    return (
+        parsed_url.hostname == "affiliate.tiktokshopglobalselling.com"
+        and "sample-request" in parsed_url.path
+    )
+
+
+def is_seller_order_href(href: str) -> bool:
+    parsed_url = urllib.parse.urlsplit(href or "")
+    hostname = str(parsed_url.hostname or "").lower()
+    return bool(
+        re.fullmatch(
+            r"seller(?:\.[a-z0-9-]+)*\.tiktokshopglobalselling\.com",
+            hostname,
+        )
+        and "/order" in parsed_url.path
+    )
+
+
+def navigate_to_url(
+    store_id: str,
+    url: str,
+    href_matches: Callable[[str], bool],
+    *,
+    timeout: float = 20.0,
+    poll_interval: float = 0.5,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+    navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """当前已在目标页则跳过；否则异步 assign 后短轮询 href。"""
+    current_href = ""
+    try:
+        current_href = current_page_href(
+            store_id,
+            execute_script_fn=execute_script_fn,
+        )
+    except Exception:
+        current_href = ""
+    if href_matches(current_href):
+        return {"ok": True, "href": current_href, "already": True, "target_url": url}
+
+    navigator = navigate_page_fn or schedule_page_navigation
+    navigator(
+        store_id,
+        url,
+        execute_script_fn=execute_script_fn,
+    )
+    arrived_href = wait_for_page_href(
+        store_id,
+        href_matches,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+    )
+    return {
+        "ok": True,
+        "href": arrived_href,
+        "already": False,
+        "target_url": url,
+    }
+
+
+def wait_for_page_href(
+    store_id: str,
+    href_matches: Callable[[str], bool],
+    *,
+    timeout: float = 20.0,
+    poll_interval: float = 0.5,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+) -> str:
+    """短轮询当前 href，直到命中目标页。不使用阻塞 visit_page。"""
+    deadline = time.monotonic() + max(1.0, timeout)
+    last_href = ""
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            last_href = current_page_href(
+                store_id,
+                execute_script_fn=execute_script_fn,
+            )
+            if href_matches(last_href):
+                return last_href
+        except Exception as error:
+            last_error = str(error)
+        time.sleep(max(0.2, poll_interval))
+    raise RuntimeError(
+        "页面跳转超时。"
+        f" last_href={last_href[:180]}"
+        f" error={last_error}"
+    )
+
+
+def navigate_to_sample_request(
+    store_id: str,
+    *,
+    shop_id: str = "",
+    shop_region: str = "US",
+    timeout: float = 20.0,
+    poll_interval: float = 0.5,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+    navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """已在样品申请页则直接返回；否则异步跳转并短轮询，避免 visit_page 假死。"""
+    return navigate_to_url(
+        store_id,
+        sample_request_url(shop_id=shop_id, shop_region=shop_region),
+        is_sample_request_href,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+        navigate_page_fn=navigate_page_fn,
+    )
 
 
 def schedule_page_navigation(

@@ -107,10 +107,10 @@ class OrderApiParserTests(unittest.TestCase):
 class OrderApiAdapterTests(unittest.TestCase):
     @patch("lib.order_api.get_seller_read_json")
     @patch("lib.order_api.get_seller_page_context")
-    @patch("lib.order_api.visit_page")
+    @patch("lib.order_api.navigate_to_url")
     def test_fetches_logistics_through_allowlisted_get(
         self,
-        visit_page,
+        navigate_to_url,
         get_context,
         get_read_json,
     ) -> None:
@@ -137,7 +137,7 @@ class OrderApiAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(result["tracking_no"], "UUS68E5590171628828")
-        visit_page.assert_called_once()
+        navigate_to_url.assert_called_once()
         get_read_json.assert_called_once()
         self.assertEqual(get_read_json.call_args.args[1], SELLER_LOGISTICS_ENDPOINT)
         self.assertEqual(

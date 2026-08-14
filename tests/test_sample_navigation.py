@@ -11,7 +11,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from lib.sample_navigation import (  # noqa: E402
     INSPECT_NAVIGATION_PAGE_JS,
     SAMPLE_REQUEST_URL,
+    is_sample_request_href,
+    is_seller_order_href,
     navigate_from_seller_home_to_pending,
+    navigate_to_sample_request,
+    sample_request_url,
     schedule_page_navigation,
     validate_navigation_start,
     validate_sample_request_destination,
@@ -156,6 +160,64 @@ class SampleNavigationFlowTests(unittest.TestCase):
 
         navigate_page.assert_called_once_with("store-two", SAMPLE_REQUEST_URL)
         self.assertEqual(result["initial_page_type"], "sample-request")
+
+    def test_sample_request_url_includes_known_shop_id(self) -> None:
+        url = sample_request_url(shop_id="shop-two", shop_region="US")
+        self.assertIn("shop_id=shop-two", url)
+        self.assertIn("shop_region=US", url)
+
+    def test_href_helpers_recognize_sample_and_order_pages(self) -> None:
+        self.assertTrue(
+            is_sample_request_href(
+                "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=1"
+            )
+        )
+        self.assertTrue(
+            is_seller_order_href(
+                "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+            )
+        )
+        self.assertFalse(is_sample_request_href("https://seller.us.tiktokshopglobalselling.com/order"))
+
+    def test_already_on_sample_page_skips_navigation(self) -> None:
+        current_href = (
+            "https://affiliate.tiktokshopglobalselling.com/"
+            "affiliate/sample/sample-request?shop_region=US&shop_id=shop-two"
+        )
+        navigate_page = Mock()
+
+        result = navigate_to_sample_request(
+            "store-two",
+            shop_id="shop-two",
+            execute_script_fn=Mock(return_value={"href": current_href}),
+            navigate_page_fn=navigate_page,
+        )
+
+        self.assertTrue(result["already"])
+        navigate_page.assert_not_called()
+
+    def test_leaves_order_page_with_async_navigation_not_visit_page(self) -> None:
+        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+        sample_href = (
+            "https://affiliate.tiktokshopglobalselling.com/"
+            "affiliate/sample/sample-request?shop_region=US&shop_id=shop-two"
+        )
+        execute_script = Mock(side_effect=[{"href": order_href}, {"href": sample_href}])
+        navigate_page = Mock(return_value={"ok": True, "scheduled": True})
+
+        result = navigate_to_sample_request(
+            "store-two",
+            shop_id="shop-two",
+            timeout=1,
+            poll_interval=0.01,
+            execute_script_fn=execute_script,
+            navigate_page_fn=navigate_page,
+        )
+
+        self.assertFalse(result["already"])
+        self.assertEqual(result["href"], sample_href)
+        navigate_page.assert_called_once()
+        self.assertIn("shop_id=shop-two", navigate_page.call_args.args[1])
 
 
 if __name__ == "__main__":

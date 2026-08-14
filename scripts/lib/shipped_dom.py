@@ -11,7 +11,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .sample_dom import click_next
-from .zclaw import visit_page, zclaw_exec
+from .sample_navigation import navigate_to_sample_request
+from .zclaw import zclaw_exec
 
 SAMPLE_REQUEST_URL = (
     "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
@@ -145,13 +146,14 @@ def ensure_sample_page_loaded(store_id: str, *, page_wait: float = 2.0) -> dict[
     if isinstance(probe, dict):
         href = str(probe.get("href") or "")
     if "sample-request" not in href:
-        visit_page(store_id, SAMPLE_REQUEST_URL)
-        time.sleep(max(2.0, page_wait))
-        probe = zclaw_exec(
+        arrived = navigate_to_sample_request(
             store_id,
-            "(() => JSON.stringify({href: location.href, text: (document.body.innerText||'').slice(0,80)}))()",
+            shop_id=shop_id_from_href(href),
+            timeout=max(12.0, page_wait + 8.0),
+            poll_interval=0.5,
         )
-        href = str(probe.get("href") or "") if isinstance(probe, dict) else ""
+        href = str(arrived.get("href") or "")
+        time.sleep(max(0.8, min(page_wait, 2.0)))
     if "sample-request" not in href:
         raise RuntimeError(f"无法进入样品申请页: {probe}")
     return {"ok": True, "href": href, "clicked": False}
@@ -167,8 +169,14 @@ def ensure_on_sample_page(store_id: str, *, page_wait: float = 2.0) -> dict[str,
     if isinstance(probe, dict):
         href = str(probe.get("href") or "")
     if "sample-request" not in href:
-        visit_page(store_id, SAMPLE_REQUEST_URL)
-        time.sleep(max(2.0, page_wait))
+        arrived = navigate_to_sample_request(
+            store_id,
+            shop_id=shop_id_from_href(href),
+            timeout=max(12.0, page_wait + 8.0),
+            poll_interval=0.5,
+        )
+        href = str(arrived.get("href") or "")
+        time.sleep(max(0.8, min(page_wait, 2.0)))
     tab = zclaw_exec(store_id, ENSURE_SHIPPED_TAB_JS)
     if not isinstance(tab, dict) or not tab.get("ok"):
         raise RuntimeError(f"无法切到「已发货」tab: {tab}")

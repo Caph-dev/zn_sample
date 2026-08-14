@@ -14,8 +14,8 @@ from .page_api import (
     get_seller_page_context,
     get_seller_read_json,
 )
+from .sample_navigation import is_seller_order_href, navigate_to_url
 from .tracking_parse import normalize_carrier, normalize_tracking
-from .zclaw import visit_page
 
 TRACKING_KEY_PATTERN = re.compile(
     r"(?:tracking|waybill|logistic|express|shipment|shipping)",
@@ -151,15 +151,18 @@ def fetch_tiktok_tracking_api(
     if not normalized_order_id:
         return {"ok": False, "error": "empty-order-id"}
 
-    visit_page(
+    navigate_to_url(
         store_id,
         order_lookup_url(
             normalized_order_id,
             shop_id=str(shop_id or ""),
             shop_region=str(shop_region or "US"),
         ),
+        is_seller_order_href,
+        timeout=max(12.0, wait + 8.0),
+        poll_interval=0.5,
     )
-    time.sleep(max(1.0, wait))
+    time.sleep(max(0.8, min(wait, 2.5)))
     context = get_seller_page_context(
         store_id,
         shop_id=str(shop_id or ""),
