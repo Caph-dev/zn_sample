@@ -290,11 +290,13 @@ def main() -> int:
         print(f"[飞书] 不可用，只做页面抽取: {error}", file=sys.stderr)
         bitable_token = None
 
+    # 指定达人时先扫完全表再过滤，避免 max_rows 把目标截在页外。
+    scrape_max_rows = 0 if (args.creator_name or args.creator_id) else args.max_rows
     if args.data_source == "dom":
         rows = scrape_shipped_list(
             store_id,
             max_pages=args.max_pages,
-            max_rows=args.max_rows,
+            max_rows=scrape_max_rows,
             page_wait=args.page_wait,
         )
     else:
@@ -304,7 +306,7 @@ def main() -> int:
             rows = scrape_shipped_list_api(
                 store_id,
                 max_pages=args.max_pages,
-                max_rows=args.max_rows,
+                max_rows=scrape_max_rows,
             )
             print(f"[已发货] API 读取完成 rows={len(rows)}")
         except Exception as error:
@@ -315,7 +317,7 @@ def main() -> int:
             rows = scrape_shipped_list(
                 store_id,
                 max_pages=args.max_pages,
-                max_rows=args.max_rows,
+                max_rows=scrape_max_rows,
                 page_wait=args.page_wait,
             )
     wanted_name = str(args.creator_name or "").strip().lower()
@@ -333,6 +335,9 @@ def main() -> int:
             f"[过滤] creator_name={args.creator_name or '-'} "
             f"creator_id={args.creator_id or '-'} → {len(rows)} 行"
         )
+    if args.max_rows and len(rows) > args.max_rows:
+        rows = rows[: args.max_rows]
+        print(f"[限量] max_rows={args.max_rows} → {len(rows)} 行")
     if not rows:
         print("已发货 0 行")
         return 0
