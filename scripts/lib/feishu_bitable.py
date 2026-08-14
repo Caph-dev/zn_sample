@@ -31,6 +31,9 @@ DEFAULT_TABLE_ID = "tblWT2SRKJ3CEZ5e"
 DEFAULT_VIEW_ID = "vewNtqmTk4"
 DEFAULT_VIEW_NAME = "达人管理总表"
 COOPERATION_STATUS_PENDING_SHIP = "待发货"
+COOPERATION_STATUS_PENDING_POST = "待发布"
+FEISHU_LANG_EN = "英语"
+FEISHU_LANG_ES = "西班牙语"
 
 
 class FeishuBitableError(RuntimeError):
@@ -255,6 +258,149 @@ def delete_record(
         f"{urllib.parse.quote(record_id)}",
         headers={"Authorization": f"Bearer {access_token}"},
     )
+
+
+def _field_plain(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(
+                    str(item.get("text") or item.get("name") or item.get("value") or "")
+                )
+            else:
+                parts.append(str(item))
+        return ",".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("name") or value.get("value") or "")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def search_relation_records(
+    access_token: str,
+    *,
+    creator_handle: str,
+    sample_product: str | None = None,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+    page_size: int = 20,
+) -> list[dict[str, Any]]:
+    """按红人ID（可选再加寄样产品）搜行。"""
+    handle = (creator_handle or "").strip()
+    if not handle:
+        return []
+    conditions: list[dict[str, Any]] = [
+        {"field_name": "红人ID", "operator": "is", "value": [handle]},
+    ]
+    product = (sample_product or "").strip()
+    if product:
+        conditions.append(
+            {"field_name": "寄样产品", "operator": "is", "value": [product]}
+        )
+    payload = _http_json(
+        "POST",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+        headers={"Authorization": f"Bearer {access_token}"},
+        body={
+            "page_size": page_size,
+            "filter": {"conjunction": "and", "conditions": conditions},
+        },
+    )
+    return list(((payload.get("data") or {}).get("items") or []))
+
+
+def pick_shipping_target(
+    records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """优先：无快递单号且待发货 → 无快递单号 → 首条。"""
+    if not records:
+        return None
+
+    def tracking_of(record: dict[str, Any]) -> str:
+        fields = record.get("fields") or {}
+        return _field_plain(fields.get("快递单号")).strip()
+
+    def status_of(record: dict[str, Any]) -> str:
+        fields = record.get("fields") or {}
+        return _field_plain(fields.get("合作状态"))
+
+    empty = [item for item in records if not tracking_of(item)]
+    if empty:
+        pending_ship = [
+            item for item in empty if "待发货" in status_of(item)
+        ]
+        return pending_ship[0] if pending_ship else empty[0]
+    return records[0]
+
+
+def update_record_fields(
+    access_token: str,
+    record_id: str,
+    fields: dict[str, Any],
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """按 record_id 更新已有字段。禁止调用方传不存在的列名。"""
+    if not record_id:
+        raise FeishuBitableError("缺少 record_id")
+    if not fields:
+        raise FeishuBitableError("更新字段为空")
+    payload = _http_json(
+        "PUT",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/"
+        f"{urllib.parse.quote(record_id)}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        body={"fields": fields},
+    )
+    return {
+        "record_id": record_id,
+        "fields": fields,
+        "raw": payload,
+    }
+
+
+def build_shipping_fields(
+    *,
+    order_no: str,
+    tracking_raw: str,
+    language: str | None = None,
+    overwrite: bool = False,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """填写物流后：订单号、快递单号、是否已寄样=是、合作状态=待发布。
+
+    已有不同快递单号且未 overwrite → skip_tracking=True，不改订单号/快递单号。
+    合作状态与是否已寄样仍写入。
+    """
+    current_fields = (current or {}).get("fields") or {}
+    current_track = _field_plain(current_fields.get("快递单号")).strip()
+    current_order = _field_plain(current_fields.get("订单号")).strip()
+    want_track = (tracking_raw or "").strip()
+    same_track = bool(current_track) and current_track == want_track
+    skip_tracking = bool(current_track) and (not overwrite) and (not same_track)
+
+    fields: dict[str, Any] = {
+        "是否已寄样": True,
+        "合作状态": [COOPERATION_STATUS_PENDING_POST],
+    }
+    if language in {FEISHU_LANG_EN, FEISHU_LANG_ES}:
+        fields["使用语言"] = language
+    if not skip_tracking:
+        if order_no and (overwrite or not current_order or current_order == order_no):
+            fields["订单号"] = order_no
+        if want_track:
+            fields["快递单号"] = want_track
+    return {
+        "fields": fields,
+        "skip_tracking": skip_tracking,
+        "current_track": current_track,
+        "current_order": current_order,
+    }
 
 
 def build_product_id_to_sku_map(hero_data: dict[str, Any]) -> dict[str, str]:

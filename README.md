@@ -91,6 +91,23 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
 
 完整参数见 [AGENTS.md](./AGENTS.md#样品申请筛查screen_sample_requestspy)。
 
+### 可选：第 6–9 步（介绍私信 / 物流）
+
+默认都不发送、不写表。语言只看达人详情简介（英/西）。第 9 步发 **TikTok 物流单号**，不是订单 ID。回写运单后合作状态改为「待发布」。
+
+```bash
+# 第 6 步：只读预演
+python3 scripts/send_sample_intro.py --from-export exports/sample_screen_<ts>.json --max-rows 1
+
+# 第 7–9 步：只读预演（16:00 前须 --force）
+python3 scripts/sync_shipped_tracking.py --force --max-rows 1
+
+# 回写飞书（不发私信）
+python3 scripts/sync_shipped_tracking.py --write-feishu --force --max-rows 1
+```
+
+真发私信须 `--execute --yes`，细则见 [AGENTS.md · 第 6–9 步](./AGENTS.md#sop-第-69-步介绍私信--物流回写)。
+
 ---
 
 ## 脚本在干什么（最短）

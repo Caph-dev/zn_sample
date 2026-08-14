@@ -31,11 +31,11 @@
 ## 非协商纪律（先读）
 
 1. **默认禁止审批写操作**  
-   - **默认**绝不点击：「同意」「批准」「Approve」「拒绝」「Reject」「发货」。  
+   - **默认**绝不点击：「同意」「批准」「Approve」「拒绝」「Reject」「发货」、私信「发送」。  
    - 默认只做：**读列表 / 读达人详情 / 本地判定 / 导出名单**。  
-   - **例外（危险）**：仅当 CLI 同时带 `--execute --yes` 时，可对**筛查通过**行点「同意」（永不点拒绝）。  
+   - **例外（危险）**：仅当 CLI 同时带 `--execute --yes` 时，可对**筛查通过**行点「同意」（永不点拒绝），或发送 SOP 第 6 / 第 9 步私信。  
    - 测试环境默认 **不写飞书**；写「达人关系管理(新)」须再加 `--write-feishu`。  
-   - 默认 `--execute-limit 1`；批准前写本地备份；平台「同意」不可脚本撤销。
+   - 默认 `--execute-limit 1`；批准前写本地备份；平台「同意」与已发私信不可脚本撤销。
 
 2. **导航由用户完成**  
    - 脚本**不**负责：商家中心 → 联盟 → 样品申请入口。  
@@ -80,7 +80,9 @@ zn_sample/
 ├── AGENTS.md                          # 本文件（Agent 约定）
 ├── README.md                          # 人类向用法摘要
 ├── scripts/
-│   ├── screen_sample_requests.py      # CLI 入口
+│   ├── screen_sample_requests.py      # CLI 入口（第 1–5 步）
+│   ├── send_sample_intro.py           # 第 6 步介绍私信（默认不发送）
+│   ├── sync_shipped_tracking.py       # 第 7–9 步物流回写 + 可选私信
 │   └── lib/
 │       ├── zclaw.py                   # ziniao-cli / execute_script 薄封装
 │       ├── sample_dom.py              # 待审核列表扫表（假定已定位）
@@ -147,11 +149,17 @@ TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本�
 
 | 路径 | 说明 |
 |------|------|
-| `scripts/screen_sample_requests.py` | CLI 入口 |
+| `scripts/screen_sample_requests.py` | CLI 入口（第 1–5 步） |
+| `scripts/send_sample_intro.py` | 第 6 步：详情简介判语言 + 介绍私信 |
+| `scripts/sync_shipped_tracking.py` | 第 7–9 步：已发货 → TikTok 物流 → 飞书 → 可选私信 |
 | `scripts/lib/sample_dom.py` | 待审核扫表 / 翻页（假定页已定位） |
-| `scripts/lib/creator_detail.py` | 达人详情只读（GPM 等） |
+| `scripts/lib/shipped_dom.py` | 已发货扫表（读 `main_order_id`） |
+| `scripts/lib/order_dom.py` | 商家订单页只读抽 TikTok 物流单号 |
+| `scripts/lib/im_dom.py` | 达人消息打开会话 / 发送（仅 execute） |
+| `scripts/lib/detect_lang.py` | 详情页简介 → 英语 / 西班牙语 |
+| `scripts/lib/creator_detail.py` | 达人详情只读（GPM、简介） |
 | `scripts/lib/feishu_hero.py` | 飞书主推表只读（产品货号 / 是否主推） |
-| `scripts/lib/feishu_bitable.py` | 达人关系管理(新)：查重 / 写入（仅 `--write-feishu`） |
+| `scripts/lib/feishu_bitable.py` | 达人关系管理(新)：查重 / 写入 / 回写物流 |
 | `scripts/lib/approve_dom.py` | 全部展开 + 按 `apply_id` 点「同意」（仅 `--execute --yes`） |
 | `scripts/lib/hero_xlsx.py` | 已废弃；调用会报错并提示改用飞书 |
 | `scripts/lib/filters.py` | SOP 判定 |
@@ -306,6 +314,58 @@ execute 时另有：动作、批准状态/错误、飞书状态/`record_id`/错�
 
 ---
 
+## SOP 第 6–9 步（介绍私信 / 物流回写）
+
+与筛查脚本分开跑。发私信与批准同级：默认 dry-run，真发须 `--execute --yes`，默认 limit=1。
+
+### 第 6 步：介绍私信
+
+语言**只**从达人详情页简介识别（`#creator-detail-profile-container span.break-words`），仅英语 / 西班牙语。空简介默认英语。
+
+```bash
+# 只读预演（不发送）
+python3 scripts/send_sample_intro.py --from-export exports/sample_screen_<ts>.json --max-rows 1
+
+# 真发 1 条
+python3 scripts/send_sample_intro.py --from-export exports/sample_screen_<ts>.json \
+  --execute --yes --execute-limit 1
+
+# 也可指定人（须有 creator_id 才能打开详情）
+python3 scripts/send_sample_intro.py --creator-id <cid> --creator-name '<handle>'
+```
+
+`--from-export` 优先取 `approve_status=approved` 行，否则取筛查通过且有 `creator_id` 的行。  
+`--write-feishu` 只回写「使用语言」，不新建行。
+
+### 第 7–9 步：已发货 → 飞书 → 物流私信
+
+北京时间 **16:00 前拒绝跑**（测试加 `--force`）。用户店已开即可；脚本可切「已发货」tab。
+
+- 列表 React `main_order_id` = 飞书「订单号」
+- 商家订单页 **「TikTok 物流」** = 飞书「快递单号」= 第 9 步发给达人的单号（**不是**订单 ID）
+- 回写成功后：`是否已寄样=是`，`合作状态=待发布`
+- 已有不同快递单号默认不覆盖（`--overwrite` 才覆盖）
+- 飞书无匹配行（红人ID + 寄样产品）→ 不新建
+
+```bash
+# 只读预演（抽运单、匹配飞书，不写不发）
+python3 scripts/sync_shipped_tracking.py --force --max-rows 1
+
+# 回写飞书（不发私信）
+python3 scripts/sync_shipped_tracking.py --write-feishu --force --max-rows 1
+
+# 回写 + 发物流私信 1 条
+python3 scripts/sync_shipped_tracking.py --write-feishu --send-tracking \
+  --execute --yes --execute-limit 1
+```
+
+第 9 步话术接 **纯物流单号**：  
+`Dear, here is the tracking number:{单号}` / `Estimada, aquí tienes el número seguimiento:{单号}`。
+
+会话里已有介绍/物流话术指纹则跳过。禁止点「邀请」。
+
+---
+
 ## 辅助命令（排查用）
 
 ```bash
@@ -423,7 +483,7 @@ execute 时另含：批准/飞书状态列；批准前另有 `*_pre_execute.*` �
 2. **默认**禁止「一键同意 / 批量通过」。用户要批准时：仅允许走已有 `--execute --yes`（+ 可选 `--write-feishu`），并提醒 limit、备份、平台不可脚本撤销；勿另开无门闩路径。  
 3. 测试默认用 1 号店；勿默认操作 2 号店除非用户指定。  
 4. 飞书达人相关默认 **「达人关系管理(新)」→「达人管理总表」**（`tblWT2SRKJ3CEZ5e`，见「飞书数据源」）；勿默认写旧表「达人关系管理」；主推款仍走 wiki `tk产品图+货号`。  
-5. 探 DOM 时可用 `execute_script` 读结构；默认点击仅限：待审核 tab、翻页、头像/详情、返回；execute 时可点列表「同意」与确认弹窗。  
+5. 探 DOM 时可用 `execute_script` 读结构；默认点击仅限：待审核 / 已发货 tab、翻页、头像/详情、返回、达人消息入口。execute 时可点列表「同意」、确认弹窗、私信「发送」。永不点「邀请」。  
 6. 失败时优先检查：页面是否被留在详情页、Bridge 断连、tab 不是待审核、列表未「全部展开」。  
 7. 勿把 `apiKey`、账号密码写进仓库或聊天日志。  
 8. 改 SOP 阈值：改 `filters.Criteria` 并同步 README/本文件相关表。  
@@ -447,6 +507,11 @@ execute 时另含：批准/飞书状态列；批准前另有 `*_pre_execute.*` �
 | Bridge 连不上 | 紫鸟客户端启动；`ziniao-cli doctor` |
 | 误开 WEBDRIVER 无窗口 | `../zn_daren`：`ziniao-gui` |
 | 导出无 xlsx 样式 | 可选装 `openpyxl`；否则简易 xlsx |
+| 16:00 前跑物流同步 | 加 `--force`（仅测试） |
+| 无 TikTok 物流单号 | 订单页未出单 / 抽错成订单 ID；看导出 `tracking_raw` |
+| 飞书无匹配行 | 红人ID 与列表 handle 是否一致；寄样产品是否对上 |
+| 私信找不到会话 / 无输入框 | 详情 Message 可能 disabled；IM 搜索须 React `_valueTracker`；本周「只能给合作过的达人发信」会挡住新会话 |
+| 语言判错 | 看导出 `bio` / `lang_reason`；仅英/西，空简介默认英 |
 
 ---
 

@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""SOP 第 7–9 步：已发货 → TikTok 物流单号 → 回写飞书 → 可选发私信。
+
+默认只读预演。
+  --write-feishu     写订单号 / 快递单号 / 是否已寄样 / 合作状态=待发布
+  --send-tracking --execute --yes  发送物流私信（发的是物流单号，不是订单 ID）
+北京时间 16:00 前拒绝跑，测试加 --force。
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from lib.app_config import load_bitable_settings  # noqa: E402
+from lib.creator_detail import extract_creator_detail, open_creator_detail_by_url  # noqa: E402
+from lib.detect_lang import detect_creator_lang  # noqa: E402
+from lib.export_util import write_generic_reports  # noqa: E402
+from lib.feishu_bitable import (  # noqa: E402
+    DEFAULT_APP_TOKEN,
+    DEFAULT_TABLE_ID,
+    DEFAULT_VIEW_ID,
+    FeishuBitableError,
+    _field_plain,
+    build_product_id_to_sku_map,
+    build_shipping_fields,
+    get_bitable_access_token,
+    list_sample_product_options,
+    pick_shipping_target,
+    resolve_sample_product_for_row,
+    search_relation_records,
+    update_record_fields,
+)
+from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
+from lib.im_dom import (  # noqa: E402
+    fill_or_send_message,
+    inspect_im,
+    open_im_from_detail,
+    open_im_inbox,
+    search_and_open_conversation,
+)
+from lib.message_templates import looks_like_tracking, tracking_message  # noqa: E402
+from lib.order_dom import fetch_tiktok_tracking  # noqa: E402
+from lib.shipped_dom import SAMPLE_REQUEST_URL, scrape_shipped_list  # noqa: E402
+from lib.zclaw import resolve_store_id, visit_page  # noqa: E402
+
+DEFAULT_TEST_STORE_ID = "27437742526069"
+DEFAULT_EXECUTE_LIMIT = 1
+BEIJING = ZoneInfo("Asia/Shanghai")
+
+EXPORT_FIELDS = [
+    "creator_name",
+    "creator_id",
+    "apply_id",
+    "product_id",
+    "resolved_sku",
+    "sample_product_option",
+    "main_order_id",
+    "tracking_raw",
+    "tracking_no",
+    "lang",
+    "feishu_lang",
+    "feishu_record_id",
+    "feishu_status",
+    "send_status",
+    "message",
+    "error",
+]
+
+
+def _before_four_pm_beijing(now: datetime | None = None) -> bool:
+    current = now or datetime.now(BEIJING)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BEIJING)
+    return current.astimezone(BEIJING).hour < 16
+
+
+def _detect_lang(
+    store_id: str,
+    row: dict[str, Any],
+    *,
+    wait: float,
+) -> dict[str, Any]:
+    cid = str(row.get("creator_id") or "").strip()
+    name = str(row.get("creator_name") or "").strip()
+    if not cid:
+        return detect_creator_lang("")
+    opened = open_creator_detail_by_url(store_id, cid, creator_name=name, wait=wait)
+    if not opened.get("ok"):
+        return detect_creator_lang("")
+    detail = extract_creator_detail(store_id)
+    return detect_creator_lang(str(detail.get("bio") or ""))
+
+
+def _send_tracking_dm(
+    store_id: str,
+    row: dict[str, Any],
+    *,
+    lang: str,
+    tracking_no: str,
+    execute: bool,
+    wait: float,
+) -> dict[str, Any]:
+    name = str(row.get("creator_name") or "")
+    body = tracking_message(lang, tracking_no)
+    opened = open_im_from_detail(store_id, wait=wait)
+    if not opened.get("ok"):
+        inbox = open_im_inbox(store_id, shop_id=str(row.get("_shop_id") or ""))
+        if not inbox.get("ok"):
+            return {"ok": False, "error": "无法打开私信", "message": body}
+        clicked = search_and_open_conversation(store_id, name, wait=wait)
+        if not clicked.get("ok"):
+            return {"ok": False, "error": "找不到会话", "message": body}
+    else:
+        search_and_open_conversation(store_id, name, wait=wait)
+    probe = inspect_im(store_id)
+    if looks_like_tracking(str(probe.get("text") or ""), tracking_no):
+        return {"ok": True, "status": "already-sent", "message": body}
+    if not execute:
+        return {"ok": True, "status": "dry-run", "message": body}
+    sent = fill_or_send_message(store_id, body, execute=True)
+    if sent.get("ok") and sent.get("sent"):
+        return {"ok": True, "status": "sent", "message": body}
+    return {"ok": False, "error": sent.get("error") or str(sent), "message": body}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="SOP 第 7–9 步：同步已发货物流（默认不写不发）")
+    parser.add_argument("--store-id", default=None)
+    parser.add_argument("--store-name", default=None)
+    parser.add_argument("--no-default-store", action="store_true")
+    parser.add_argument("--max-pages", type=int, default=50)
+    parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--page-wait", type=float, default=2.5)
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--force", action="store_true", help="忽略北京时间 16:00 前门闩")
+    parser.add_argument("--overwrite", action="store_true", help="覆盖飞书已有快递单号")
+    parser.add_argument("--write-feishu", action="store_true")
+    parser.add_argument("--send-tracking", action="store_true", help="回写成功后再发物流私信")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--execute-limit", type=int, default=DEFAULT_EXECUTE_LIMIT)
+    parser.add_argument("--execute-delay", type=float, default=1.5)
+    parser.add_argument("--out", type=Path, default=None)
+    args = parser.parse_args()
+
+    if args.send_tracking and args.execute and not args.yes:
+        print("将真实发送物流私信。确认请加 --yes。", file=sys.stderr)
+        return 2
+    if args.send_tracking and args.execute and not args.write_feishu:
+        print("发物流私信须同时 --write-feishu（先有飞书单号再发）。", file=sys.stderr)
+        return 2
+    if _before_four_pm_beijing() and not args.force:
+        now = datetime.now(BEIJING).strftime("%H:%M")
+        print(
+            f"现在北京时间 {now}，早于 16:00。SOP 第 7 步须四点后跑；测试请加 --force。",
+            file=sys.stderr,
+        )
+        return 2
+
+    default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
+    store_id = resolve_store_id(
+        store_id=args.store_id,
+        store_name=args.store_name,
+        default_store_id=default_sid,
+    )
+
+    print("=" * 60)
+    print(
+        f"第7-9步物流同步 | 写飞书={'开' if args.write_feishu else '关'} | "
+        f"发私信={'开' if args.send_tracking and args.execute else '关'} | "
+        f"force={'是' if args.force else '否'}"
+    )
+    print("=" * 60)
+
+    hero_data: dict[str, Any] = {}
+    try:
+        hero_data = load_hero_from_feishu(config_path=args.config)
+        print(f"[主推] 已加载，货号映射用")
+    except FeishuHeroError as error:
+        print(f"[主推] 读取失败，寄样产品只能按货号模糊匹配: {error}", file=sys.stderr)
+
+    product_id_to_sku = build_product_id_to_sku_map(hero_data)
+    bitable_token = None
+    sample_options: list[str] = []
+    app_token = DEFAULT_APP_TOKEN
+    table_id = DEFAULT_TABLE_ID
+    try:
+        settings = load_bitable_settings(
+            config_path=args.config,
+            default_app_token=DEFAULT_APP_TOKEN,
+            default_table_id=DEFAULT_TABLE_ID,
+            default_view_id=DEFAULT_VIEW_ID,
+        )
+        app_token = settings.get("app_token") or DEFAULT_APP_TOKEN
+        table_id = settings.get("table_id") or DEFAULT_TABLE_ID
+        bitable_token = get_bitable_access_token(config_path=args.config)
+        sample_options = list_sample_product_options(
+            bitable_token, app_token=app_token, table_id=table_id
+        )
+        print(f"[飞书] 可读 table={table_id} 寄样选项={len(sample_options)}")
+    except Exception as error:
+        print(f"[飞书] 不可用，只做页面抽取: {error}", file=sys.stderr)
+        bitable_token = None
+
+    rows = scrape_shipped_list(
+        store_id,
+        max_pages=args.max_pages,
+        max_rows=args.max_rows,
+        page_wait=args.page_wait,
+    )
+    if not rows:
+        print("已发货 0 行")
+        return 0
+
+    limit = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
+    sent = 0
+    written = 0
+    results: list[dict[str, Any]] = []
+
+    for row in rows:
+        name = str(row.get("creator_name") or "")
+        order_id = str(row.get("main_order_id") or "").strip()
+        out: dict[str, Any] = {
+            "creator_name": name,
+            "creator_id": row.get("creator_id") or "",
+            "apply_id": row.get("apply_id") or "",
+            "product_id": row.get("product_id") or "",
+            "main_order_id": order_id,
+        }
+        if not order_id:
+            out["error"] = "列表无 main_order_id"
+            results.append(out)
+            print(f"  [跳过] {name}: 无订单号")
+            continue
+
+        tracking = fetch_tiktok_tracking(
+            store_id,
+            order_id,
+            shop_id=str(row.get("_shop_id") or ""),
+            wait=max(3.5, args.page_wait + 1.0),
+        )
+        # 回到样品申请，避免停在商家中心
+        visit_page(store_id, SAMPLE_REQUEST_URL)
+        time.sleep(1.2)
+
+        out["tracking_raw"] = tracking.get("tracking_raw") or ""
+        out["tracking_no"] = tracking.get("tracking_no") or ""
+        if not tracking.get("ok"):
+            out["error"] = tracking.get("error") or "无 TikTok 物流单号"
+            print(f"  [无运单] {name} order={order_id}: {out['error']}")
+            results.append(out)
+            continue
+        print(
+            f"  [物流] {name} order={order_id} "
+            f"track={out['tracking_no']} raw={out['tracking_raw']}"
+        )
+
+        option = ""
+        sku = ""
+        if sample_options:
+            resolved = resolve_sample_product_for_row(
+                row,
+                product_id_to_sku=product_id_to_sku,
+                sample_product_options=sample_options,
+            )
+            if resolved.get("ok"):
+                option = str(resolved.get("option") or "")
+                sku = str(resolved.get("sku") or "")
+        elif product_id_to_sku.get(str(row.get("product_id") or "")):
+            sku = product_id_to_sku[str(row.get("product_id"))]
+            option = sku
+        out["resolved_sku"] = sku
+        out["sample_product_option"] = option
+
+        record = None
+        if bitable_token:
+            try:
+                found = search_relation_records(
+                    bitable_token,
+                    creator_handle=name,
+                    sample_product=option or None,
+                    app_token=app_token,
+                    table_id=table_id,
+                )
+                if not found and option:
+                    found = search_relation_records(
+                        bitable_token,
+                        creator_handle=name,
+                        app_token=app_token,
+                        table_id=table_id,
+                    )
+                record = pick_shipping_target(found)
+            except FeishuBitableError as error:
+                out["feishu_status"] = "search-error"
+                out["error"] = str(error)
+                results.append(out)
+                continue
+        if record:
+            out["feishu_record_id"] = record.get("record_id")
+            existing_lang = _field_plain((record.get("fields") or {}).get("使用语言"))
+        else:
+            existing_lang = ""
+            if bitable_token:
+                out["feishu_status"] = "no-record"
+                print(f"    飞书无匹配行，不新建")
+
+        if existing_lang in {"英语", "西班牙语"}:
+            out["feishu_lang"] = existing_lang
+            out["lang"] = "es" if existing_lang == "西班牙语" else "en"
+        else:
+            detected = _detect_lang(store_id, row, wait=args.page_wait)
+            out["lang"] = detected.get("lang")
+            out["feishu_lang"] = detected.get("feishu_lang")
+            out["lang_reason"] = detected.get("reason")
+            visit_page(store_id, SAMPLE_REQUEST_URL)
+            time.sleep(1.0)
+
+        if args.write_feishu and bitable_token and record:
+            plan = build_shipping_fields(
+                order_no=order_id,
+                tracking_raw=str(out["tracking_raw"]),
+                language=out.get("feishu_lang"),
+                overwrite=args.overwrite,
+                current=record,
+            )
+            if plan.get("skip_tracking"):
+                out["feishu_status"] = "skip-existing-track"
+                print(f"    飞书已有不同运单 {plan.get('current_track')}，未覆盖")
+            else:
+                try:
+                    update_record_fields(
+                        bitable_token,
+                        str(record.get("record_id")),
+                        plan["fields"],
+                        app_token=app_token,
+                        table_id=table_id,
+                    )
+                    out["feishu_status"] = "updated"
+                    written += 1
+                    print("    飞书已更新：快递单号 + 待发布")
+                except FeishuBitableError as error:
+                    out["feishu_status"] = "update-error"
+                    out["error"] = str(error)
+                    print(f"    飞书更新失败: {error}")
+                    results.append(out)
+                    continue
+        elif not args.write_feishu:
+            if not out.get("feishu_status"):
+                out["feishu_status"] = "dry-run"
+
+        want_send = bool(args.send_tracking)
+        if want_send and out.get("feishu_status") not in {"updated", "skip-existing-track"} and args.execute:
+            out["send_status"] = "skipped-no-write"
+        elif want_send:
+            if args.execute and sent >= limit:
+                out["send_status"] = "skipped-limit"
+            else:
+                dm = _send_tracking_dm(
+                    store_id,
+                    row,
+                    lang=str(out.get("lang") or "en"),
+                    tracking_no=str(out["tracking_no"]),
+                    execute=bool(args.execute),
+                    wait=args.page_wait,
+                )
+                out["message"] = dm.get("message") or tracking_message(
+                    str(out.get("lang") or "en"), str(out["tracking_no"])
+                )
+                if dm.get("ok"):
+                    out["send_status"] = dm.get("status")
+                    if dm.get("status") == "sent":
+                        sent += 1
+                else:
+                    out["send_status"] = "send-failed"
+                    out["error"] = dm.get("error")
+                visit_page(store_id, SAMPLE_REQUEST_URL)
+                time.sleep(1.0)
+        if args.execute_delay:
+            time.sleep(args.execute_delay)
+        results.append(out)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = args.out or (ROOT / "exports" / f"sample_shipped_{ts}")
+    paths = write_generic_reports(results, prefix, fieldnames=EXPORT_FIELDS)
+    print("--- 导出 ---")
+    for key, path in paths.items():
+        print(f"  {key}: {path}")
+    print(f"完成 rows={len(results)} 飞书写入={written} 私信发送={sent}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

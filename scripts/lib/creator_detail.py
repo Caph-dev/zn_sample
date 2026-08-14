@@ -196,9 +196,21 @@ EXTRACT_DETAIL_JS = r"""
     if (i >= 0) video_block_head = text.slice(i, i + 220).replace(/\s+/g, ' ').trim();
   }
 
+  let bio = '';
+  const bioEl = document.querySelector(
+    '#creator-detail-profile-container span.text-body-s-regular.break-words.whitespace-pre-wrap'
+  );
+  if (bioEl) bio = (bioEl.innerText || '').trim();
+  if (!bio) {
+    const profile = document.querySelector('#creator-detail-profile-container');
+    const mid = profile && profile.querySelector('.flex-c.flex-grow.relative span');
+    if (mid) bio = (mid.innerText || '').trim();
+  }
+
   return JSON.stringify({
     href: location.href,
     title: document.title || '',
+    bio: bio || '',
     video_gpm: video_gpm || '',
     live_gpm: live_gpm || '',
     avg_video_views: avg_video_views || '',

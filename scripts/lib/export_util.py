@@ -285,3 +285,34 @@ def write_reports(rows: Iterable[dict], out_prefix: Path) -> dict[str, Path]:
         "json": write_json(rows, out_prefix.with_suffix(".json")),
     }
     return paths
+
+
+def write_generic_reports(
+    rows: list[dict],
+    out_prefix: Path,
+    *,
+    fieldnames: list[str] | None = None,
+) -> dict[str, Path]:
+    """任意列 json + csv（6–9 步导出用，不走筛查中文表头）。"""
+    out_prefix = Path(out_prefix)
+    out_prefix.parent.mkdir(parents=True, exist_ok=True)
+    names = list(fieldnames or [])
+    if not names:
+        seen: set[str] = set()
+        for row in rows:
+            for key in row:
+                if key not in seen:
+                    seen.add(key)
+                    names.append(key)
+    json_path = out_prefix.with_suffix(".json")
+    json_path.write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    csv_path = out_prefix.with_suffix(".csv")
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=names, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _cell(row.get(key)) for key in names})
+    return {"json": json_path, "csv": csv_path}

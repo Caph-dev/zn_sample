@@ -60,7 +60,11 @@
 
 ## 申请的样本必须是 [tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink) 里的“主推款”（是否主推=是）
 
-## 都满足条件的达人整理成名单
+## 找到都满足条件的达人后进入第五步
+
+# 第五步：记录达人信息，点击同意样品申请，并同步到表格
+
+同步到 [内部达人建联记录表](https://rsed6zggjt.feishu.cn/base/CJXSbLIQWahB8esVOiscX7j1nLc?from=from_copylink)
 
 - **默认**：只导出名单，**禁止**脚本执行「同意」。
 - **可选危险路径**（须显式参数，见 `AGENTS.md` / CLI）：`--execute --yes` 可对通过筛查的申请点「同意」；测试环境默认 **不写飞书**，写飞书须再加 `--write-feishu`。
@@ -68,7 +72,7 @@
 
 xlsx 格式 + csv 格式（同时）
 
-名单需要包含信息：
+需要记录信息：
 
 1\.达人名(网页中可能有多个类似的字段，如果你不确定，可以问我)
 
@@ -84,8 +88,49 @@ xlsx 格式 + csv 格式（同时）
 
 7\.粉丝数
 
+# 第六步：打开达人私信界面，发送话术
 
+英文
 
+Hi  , thanks for requesting our lingerie sample! We’re excited to work with you.
+
+To better coordinate the shipping and discuss the creative direction for the content, could you please share your WhatsApp or Gmail?
+
+Once the tracking number is available, I will send it to you right away.
+
+西语
+
+Hola , ¡gracias por solicitar nuestra muestra de lencería!
+
+Estamos muy emocionados de trabajar contigo. Para coordinar mejor el envío y hablar sobre la dirección creativa del contenido, ¿podrías compartirme tu WhatsApp o Gmail?
+
+Además, querida, ¿estarías abierta a hacer transmisiones en vivo de nuestros productos? En cuanto tenga el número de seguimiento, te lo envío inmediatamente.
+
+![image\.png](图片和附件/image%203.png)
+
+# 第七步：北京时间下午四点后点击【样品申请】--【已发货】--【查看物流】
+
+![image\.png](图片和附件/image%204.png)
+
+# 第八步：复制订单号、物流单号到【内部达人建联表】，填进下图2中红标中（要打勾）
+
+![image\.png](图片和附件/image%205.png)
+
+![image\.png](图片和附件/image%206.png)
+
+# 第九步：复制对应达人的物流单号打开私信发送给达人
+
+发给达人的是商家订单页 **「TikTok 物流」单号**（如 `UUS68…` / `9200…` / `1LSD…`），**不是**「订单 ID」。下图示例误把订单号贴进了话术，以本文为准。
+
+话术后接物流单号
+
+英语：Dear, here is the tracking number:
+
+西语：Estimada, aquí tienes el número seguimiento:
+
+示例图如下：
+
+![image\.png](图片和附件/image%207.png)
 
 
 
