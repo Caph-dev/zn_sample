@@ -316,7 +316,7 @@ python3 scripts/send_sample_intro.py --creator-id <cid> --creator-name '<handle>
 
 ### 第 7–9 步：已发货 → 飞书 → 物流私信
 
-北京时间 **16:00 前拒绝跑**（测试加 `--force`）。用户店已开即可。默认用样品列表 API `tab=30` 读已发货，再用商家订单页 GET `/api/v1/fulfillment/na/logistic_detail/list` 读物流单号。
+北京时间 **16:00 前拒绝跑**（测试加 `--force`）。这是脚本启动时的运行时门闩：用 `Asia/Shanghai` 看当前小时是否 `< 16`，不是 cron，也不会到点自动触发。16:00 后直接跑即可；`--force` 只绕过时间检查，不写飞书、不发私信。用户店已开即可。默认用样品列表 API `tab=30` 读已发货，再用商家订单页 GET `/api/v1/fulfillment/na/logistic_detail/list` 读物流单号。可用 `--creator-name` / `--creator-id` 只处理指定达人。
 
 - 已发货列表 `main_order_id` = 飞书「订单号」
 - 商家订单物流 API / 页面 **「TikTok 物流」** = 飞书「快递单号」= 第 9 步发给达人的单号（**不是**订单 ID）

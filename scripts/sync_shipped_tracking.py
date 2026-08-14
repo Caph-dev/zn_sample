@@ -54,6 +54,7 @@ from lib.sample_api import scrape_shipped_list_api  # noqa: E402
 from lib.shipped_dom import (  # noqa: E402
     SAMPLE_REQUEST_URL,
     ensure_on_sample_page,
+    ensure_sample_page_loaded,
     scrape_shipped_list,
 )
 from lib.zclaw import resolve_store_id, visit_page  # noqa: E402
@@ -195,6 +196,8 @@ def main() -> int:
     parser.add_argument("--no-default-store", action="store_true")
     parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--creator-name", default=None, help="只处理该达人 handle")
+    parser.add_argument("--creator-id", default=None, help="只处理该达人 creator_id")
     parser.add_argument("--page-wait", type=float, default=2.5)
     parser.add_argument(
         "--data-source",
@@ -296,8 +299,8 @@ def main() -> int:
         )
     else:
         try:
-            # API 读取仍需先把页面置于联盟中心样品页，以获得当前店铺上下文。
-            ensure_on_sample_page(store_id, page_wait=args.page_wait)
+            # API 读取只需样品申请页上下文，不依赖 DOM 切到「已发货」tab。
+            ensure_sample_page_loaded(store_id, page_wait=args.page_wait)
             rows = scrape_shipped_list_api(
                 store_id,
                 max_pages=args.max_pages,
@@ -315,6 +318,21 @@ def main() -> int:
                 max_rows=args.max_rows,
                 page_wait=args.page_wait,
             )
+    wanted_name = str(args.creator_name or "").strip().lower()
+    wanted_id = str(args.creator_id or "").strip()
+    if wanted_name or wanted_id:
+        rows = [
+            row
+            for row in rows
+            if (
+                (wanted_name and str(row.get("creator_name") or "").strip().lower() == wanted_name)
+                or (wanted_id and str(row.get("creator_id") or "").strip() == wanted_id)
+            )
+        ]
+        print(
+            f"[过滤] creator_name={args.creator_name or '-'} "
+            f"creator_id={args.creator_id or '-'} → {len(rows)} 行"
+        )
     if not rows:
         print("已发货 0 行")
         return 0

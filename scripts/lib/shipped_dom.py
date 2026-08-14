@@ -135,6 +135,28 @@ def shop_id_from_href(href: str) -> str:
     return (values[0] if values else "").strip()
 
 
+def ensure_sample_page_loaded(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
+    """只保证当前页在样品申请域，不点击「已发货」tab。API 读取走 tab=30。"""
+    probe = zclaw_exec(
+        store_id,
+        "(() => JSON.stringify({href: location.href, text: (document.body.innerText||'').slice(0,80)}))()",
+    )
+    href = ""
+    if isinstance(probe, dict):
+        href = str(probe.get("href") or "")
+    if "sample-request" not in href:
+        visit_page(store_id, SAMPLE_REQUEST_URL)
+        time.sleep(max(2.0, page_wait))
+        probe = zclaw_exec(
+            store_id,
+            "(() => JSON.stringify({href: location.href, text: (document.body.innerText||'').slice(0,80)}))()",
+        )
+        href = str(probe.get("href") or "") if isinstance(probe, dict) else ""
+    if "sample-request" not in href:
+        raise RuntimeError(f"无法进入样品申请页: {probe}")
+    return {"ok": True, "href": href, "clicked": False}
+
+
 def ensure_on_sample_page(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
     """若已在样品申请域则只切 tab；否则 visit 样品申请 URL（本任务允许）。"""
     probe = zclaw_exec(
