@@ -53,7 +53,29 @@ class OrderApiParserTests(unittest.TestCase):
         self.assertEqual(result["tracking_no"], "UUS68E5590171628828")
         self.assertEqual(result["tracking_raw"], "UUS68E5590171628828")
 
-    def test_prefixes_cbt_for_9200_tracking_numbers(self) -> None:
+    def test_uses_sibling_carrier_field_instead_of_guessing_cbt(self) -> None:
+        result = parse_logistics_payload(
+            {
+                "code": 0,
+                "data": {
+                    "package_list": [
+                        {
+                            "logistics_info": {
+                                "provider_name": "USPS",
+                                "tracking_number": "9200190412726311129185",
+                            }
+                        }
+                    ]
+                },
+            },
+            order_id="577524102614586321",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tracking_no"], "9200190412726311129185")
+        self.assertEqual(result["tracking_raw"], "USPS, 9200190412726311129185")
+
+    def test_bare_9200_number_stays_unprefixed_without_carrier(self) -> None:
         result = parse_logistics_payload(
             {
                 "code": 0,
@@ -72,7 +94,7 @@ class OrderApiParserTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["tracking_no"], "9200190412726311129185")
-        self.assertEqual(result["tracking_raw"], "CBT, 9200190412726311129185")
+        self.assertEqual(result["tracking_raw"], "9200190412726311129185")
 
     def test_rejects_payload_without_tracking_value(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "未找到运单号"):

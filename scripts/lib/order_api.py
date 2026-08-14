@@ -14,11 +14,15 @@ from .page_api import (
     get_seller_page_context,
     get_seller_read_json,
 )
-from .tracking_parse import parse_tiktok_logistics
+from .tracking_parse import normalize_carrier, normalize_tracking
 from .zclaw import visit_page
 
 TRACKING_KEY_PATTERN = re.compile(
     r"(?:tracking|waybill|logistic|express|shipment|shipping)",
+    re.IGNORECASE,
+)
+CARRIER_KEY_PATTERN = re.compile(
+    r"(?:carrier|provider|company|courier|shipping_name|logistics_name|provider_name)",
     re.IGNORECASE,
 )
 TRACKING_TOKEN_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9._-]{7,}", re.IGNORECASE)
@@ -55,22 +59,39 @@ def build_logistics_query(
     return query
 
 
-def _iter_tracking_values(value: Any, *, key_hint: str = "") -> Iterable[str]:
+def _iter_named_values(
+    value: Any,
+    *,
+    key_hint: str = "",
+    key_pattern: re.Pattern[str],
+) -> Iterable[tuple[str, str]]:
     if isinstance(value, dict):
+        sibling_carrier = ""
         for key, nested_value in value.items():
-            yield from _iter_tracking_values(
+            if CARRIER_KEY_PATTERN.search(str(key)) and isinstance(
+                nested_value, (str, int)
+            ):
+                sibling_carrier = normalize_carrier(str(nested_value))
+                if sibling_carrier:
+                    break
+        for key, nested_value in value.items():
+            if key_pattern.search(str(key)) and isinstance(nested_value, (str, int, float)):
+                normalized = str(nested_value).strip()
+                if normalized:
+                    yield normalized, sibling_carrier
+            yield from _iter_named_values(
                 nested_value,
                 key_hint=str(key),
+                key_pattern=key_pattern,
             )
         return
     if isinstance(value, list):
         for nested_value in value:
-            yield from _iter_tracking_values(nested_value, key_hint=key_hint)
-        return
-    if TRACKING_KEY_PATTERN.search(key_hint) and isinstance(value, (str, int, float)):
-        normalized = str(value).strip()
-        if normalized:
-            yield normalized
+            yield from _iter_named_values(
+                nested_value,
+                key_hint=key_hint,
+                key_pattern=key_pattern,
+            )
 
 
 def parse_logistics_payload(
@@ -78,16 +99,19 @@ def parse_logistics_payload(
     *,
     order_id: str,
 ) -> dict[str, Any]:
-    """从包裹详情响应中提取 TikTok 物流单号。"""
+    """从包裹详情响应中提取 TikTok 物流单号和承运商原文。"""
     data = payload.get("data")
     if not isinstance(data, dict):
         raise PageApiSchemaError("物流详情响应缺少 data 对象")
 
     candidates: list[str] = []
-    for value in _iter_tracking_values(data):
+    for value, sibling_carrier in _iter_named_values(
+        data,
+        key_pattern=TRACKING_KEY_PATTERN,
+    ):
         candidates.append(value)
-        parsed = parse_tiktok_logistics(value, order_id=order_id)
-        if parsed.get("tracking_no"):
+        parsed = normalize_tracking(value, carrier=sibling_carrier)
+        if parsed.get("tracking_no") and parsed.get("tracking_no") != str(order_id):
             return {
                 "ok": True,
                 "order_id": str(order_id),
@@ -98,7 +122,7 @@ def parse_logistics_payload(
 
         for token in TRACKING_TOKEN_PATTERN.findall(value):
             if token != str(order_id) and len(token) >= 8:
-                token_parsed = parse_tiktok_logistics(token, order_id=order_id)
+                token_parsed = normalize_tracking(token, carrier=sibling_carrier)
                 return {
                     "ok": True,
                     "order_id": str(order_id),

@@ -17,11 +17,24 @@ _TRACK_TOKEN_RE = re.compile(
     r")",
     re.I,
 )
+_CARRIER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 .&-]{0,19}$")
+_CARRIER_PREFIX_RE = re.compile(
+    r"^([A-Za-z][A-Za-z0-9 .&-]{0,19})[,，]\s*(.+)$"
+)
 _AFTER_LABEL_RE = re.compile(
-    r"TikTok\s*物流[^\n]{0,20}[\n\r\t :：]*"
-    r"((?:CBT|USPS|UPS|FedEx|DHL)[,，]?\s*)?"
-    r"([A-Z0-9][A-Z0-9]{7,})",
+    r"TikTok\s*物流[:：\s]*"
+    r"(?:([A-Za-z][A-Za-z0-9.&-]{1,19})[,，]\s*)?"
+    r"("
+    r"UUS[A-Z0-9]{10,}"
+    r"|GFUS[A-Z0-9]{8,}"
+    r"|1LSD[A-Z0-9]{6,}"
+    r"|9200\d{16,}"
+    r"|[A-Z]{2,4}\d[A-Z0-9]{8,}"
+    r")",
     re.I,
+)
+_NEARBY_CARRIER_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9.&-]{1,19})\b[,，]?\s*$"
 )
 
 
@@ -29,37 +42,51 @@ def is_order_id(value: str | None) -> bool:
     return bool(_ORDER_ID_RE.fullmatch((value or "").strip()))
 
 
-def normalize_tracking(raw: str | None) -> dict[str, str]:
+def normalize_carrier(value: str | None) -> str:
+    """保留页面/接口给出的承运商原文，不做单号猜测。"""
+    text = re.sub(r"\s+", " ", (value or "").strip())
+    text = text.replace("，", ",").strip(" ,")
+    text = re.sub(r"^TikTok\s*物流[:：\s]*", "", text, flags=re.I).strip()
+    if not text or not _CARRIER_NAME_RE.fullmatch(text):
+        return ""
+    if is_order_id(text) or _TRACK_TOKEN_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def format_tracking_display(number: str, *, carrier: str = "") -> str:
+    cleaned_number = re.sub(r"\s+", "", (number or "").strip())
+    cleaned_carrier = normalize_carrier(carrier)
+    if cleaned_carrier and cleaned_number:
+        return f"{cleaned_carrier}, {cleaned_number}"
+    return cleaned_number
+
+
+def normalize_tracking(raw: str | None, *, carrier: str = "") -> dict[str, str]:
     """拆成飞书/私信展示原文，以及用于比对的核心单号。
 
-    9200 开头的 TikTok 物流展示为「CBT, {单号}」。
+    展示格式为「承运商, 单号」；承运商只采用页面或接口原文，
+    不按单号形态猜测 CBT / USPS 等前缀。
     """
     text = re.sub(r"\s+", " ", (raw or "").strip())
     text = text.replace("，", ",").strip(" ,")
     if not text:
         return {"tracking_raw": "", "tracking_no": ""}
-    # 去掉标签残留
     text = re.sub(r"^TikTok\s*物流[:：\s]*", "", text, flags=re.I).strip()
-    carrier = ""
+    parsed_carrier = ""
     number = text
-    match = re.match(
-        r"^(CBT|USPS|UPS|FedEx|DHL)[, ]+(.+)$",
-        text,
-        flags=re.I,
-    )
+    match = _CARRIER_PREFIX_RE.match(text)
     if match:
-        carrier = match.group(1).upper()
+        parsed_carrier = normalize_carrier(match.group(1))
         number = match.group(2).strip(" ,")
     number = re.sub(r"\s+", "", number)
     if is_order_id(number):
         return {"tracking_raw": "", "tracking_no": ""}
-    if not carrier and number.upper().startswith("9200"):
-        carrier = "CBT"
-    if carrier:
-        raw_out = f"{carrier}, {number}"
-    else:
-        raw_out = number
-    return {"tracking_raw": raw_out, "tracking_no": number}
+    display_carrier = parsed_carrier or normalize_carrier(carrier)
+    return {
+        "tracking_raw": format_tracking_display(number, carrier=display_carrier),
+        "tracking_no": number,
+    }
 
 
 def tracking_core_number(value: str | None) -> str:
@@ -81,7 +108,8 @@ def parse_tiktok_logistics(page_text: str, *, order_id: str = "") -> dict[str, A
     labeled = _AFTER_LABEL_RE.search(text)
     if labeled:
         parsed = normalize_tracking(
-            f"{labeled.group(1) or ''}{labeled.group(2) or ''}"
+            labeled.group(2) or "",
+            carrier=labeled.group(1) or "",
         )
         if parsed["tracking_no"] and parsed["tracking_no"] != oid:
             parsed["via"] = "label"
@@ -91,16 +119,14 @@ def parse_tiktok_logistics(page_text: str, *, order_id: str = "") -> dict[str, A
     for token in _TRACK_TOKEN_RE.findall(text):
         parsed = normalize_tracking(token)
         if parsed["tracking_no"] and parsed["tracking_no"] != oid:
-            # 若 token 前 20 字内有 CBT/USPS，带上承运商
             idx = text.find(token)
-            window = text[max(0, idx - 24) : idx]
-            prefix = ""
-            if re.search(r"\bCBT\b", window, re.I):
-                prefix = "CBT, "
-            elif re.search(r"\bUSPS\b", window, re.I):
-                prefix = "USPS, "
-            if prefix and not parsed["tracking_raw"].startswith(("CBT", "USPS")):
-                parsed["tracking_raw"] = prefix + parsed["tracking_no"]
+            window = text[max(0, idx - 32) : idx]
+            nearby = _NEARBY_CARRIER_RE.search(window)
+            if nearby:
+                parsed = normalize_tracking(
+                    parsed["tracking_no"],
+                    carrier=nearby.group(1),
+                )
             parsed["via"] = "token"
             return parsed
 

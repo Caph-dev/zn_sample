@@ -338,8 +338,7 @@ python3 scripts/sync_shipped_tracking.py --write-feishu --send-tracking \
   --execute --yes --execute-limit 1
 ```
 
-第 9 步话术接飞书「快递单号」展示格式。`9200` 开头写成 `CBT, {单号}`：  
-`Dear, here is the tracking number:CBT, 9200…` / `Estimada, aquí tienes el número seguimiento:CBT, 9200…`。
+第 9 步话术接飞书「快递单号」展示格式。有承运商时写成 `{承运商}, {单号}`，例如页面/接口给出 CBT 时是 `CBT, 9200…`，给出 USPS 时是 `USPS, 9200…`；没有承运商就只发单号，不按单号猜测前缀。
 
 会话里已有介绍/物流话术指纹则跳过。禁止点「邀请」。
 
