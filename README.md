@@ -7,7 +7,7 @@ Agent / 完整约定见 **[AGENTS.md](./AGENTS.md)**。
 ## 硬性纪律
 
 1. **默认禁止**点「同意 / 批准 / 拒绝」——只读 + 导出。危险路径须 `--execute --yes`（默认 limit=1）；写飞书另加 `--write-feishu`。  
-2. **导航由你完成**：先把店铺页停在 **样品申请 → 待审核**。  
+2. **两阶段启动**：脚本 1 用 GUI + ZClaw 开店，登录后停在商家中心首页；脚本 2 可显式导航到 **样品申请 → 待审核**。旧的手动定位方式仍兼容。
 3. **测试默认 1 号店**：`跨境1号店（Lingerie Outlet）` / `27437742526069`。  
 4. **申请样品必须是主推款**：以飞书 `tk产品图+货号` 中「是否主推=是」为准（不再使用本地 xlsx）。
 5. **飞书达人表默认「达人关系管理(新)」→「达人管理总表」**（`tblWT2SRKJ3CEZ5e`；与主推 wiki 表不是同一张；勿默认写旧表「达人关系管理」）。  
@@ -16,9 +16,9 @@ Agent / 完整约定见 **[AGENTS.md](./AGENTS.md)**。
 
 ---
 
-## 怎么用（3 步）
+## 怎么用（4 步）
 
-**只读导出，不会点同意/拒绝。** 页必须先停在 **样品申请 → 待审核**。
+**只读导出，不会点同意/拒绝。** 推荐从商家中心首页显式自动导航；旧流程仍可手动停在 **样品申请 → 待审核**。
 
 ### 1. 首次配置（做一次即可）
 
@@ -30,28 +30,35 @@ cp -n config.toml.example config.toml
 
 也可用环境变量：`export FEISHU_APP_SECRET='...'`（勿提交 git）。
 
-### 2. 打开页面
+### 2. 脚本 1：打开店铺
 
 ```bash
 ziniao-status          # 建议 GUI
 ziniao-cli doctor
-# 紫鸟已登录 → 打开 1 号店 → 手动进入：联盟中心 → 样品申请 →【待审核】
+python3 scripts/open_sample_store.py --store-id 27506607043054
 ```
 
-店未开时：
+目标店已运行时，脚本不会关闭或重新打开。随后由你登录 TikTok Shop，并停在商家中心首页。
 
-```bash
-ziniao-cli zclaw invoke open_store --args '{"storeId":"27437742526069"}'
-```
+禁止用 `ziniao-cli page extract --mode running` 判断店铺；该快捷命令可能因缺少 debug port 触发 `runtime.reopen`。本项目统一使用 ZClaw `extract_data(mode=running)`。
 
-### 3. 跑筛查
+### 3. 脚本 2：自动导航并筛查
 
 ```bash
 cd ~/Projects/zn_sample
-python3 scripts/screen_sample_requests.py --with-detail --require-detail
+python3 scripts/screen_sample_requests.py \
+  --store-id 27506607043054 \
+  --from-seller-home \
+  --data-source auto --with-detail --require-detail
 ```
 
-结果在 `exports/`（csv / xlsx / json）。默认 1 号店；正式筛查必须带这两个参数 + 飞书密钥。
+`--from-seller-home` 必须显式传 `--store-id`。脚本会验证登录态、导航到样品申请页并切到待审核；失败时不会关闭或重开店铺。
+
+### 4. 查看结果
+
+结果在 `exports/`（csv / xlsx / json）。正式筛查必须带 `--with-detail --require-detail` + 飞书密钥。`auto` 仅用于只读筛查：API 失败时按列表或单达人回退 DOM。
+
+旧流程仍可用：如果你已手动停在“样品申请 → 待审核”，去掉 `--from-seller-home` 即可。
 
 ---
 
@@ -80,7 +87,7 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail --max-r
 
 ### 列表和达人详情 API 化试运行
 
-待审核列表和筛查所需的达人详情指标已接入页面同源 API。默认数据源仍保持 `dom`；`auto` 为 API 优先、按列表或单达人自动回退 DOM 的只读试运行模式。
+待审核列表和筛查所需的达人详情指标已接入页面同源 API。三轮六达人 shadow 验证后，只读推荐模式改为 `auto`；CLI 默认值仍保持 `dom`，批准等写操作也仍强制使用 `dom`。
 
 ```bash
 # 推荐验证：列表和详情双读，DOM 结果仍是筛选权威
@@ -91,9 +98,9 @@ python3 scripts/screen_sample_requests.py \
 python3 scripts/screen_sample_requests.py \
   --data-source api --with-detail --require-detail --max-rows 6
 
-# API 优先，列表或单达人读取失败时自动回退 DOM
+# 推荐日常只读：API 优先，列表或单达人读取失败时自动回退 DOM
 python3 scripts/screen_sample_requests.py \
-  --data-source auto --with-detail --require-detail --max-rows 6
+  --data-source auto --with-detail --require-detail
 ```
 
 `shadow` 会输出脱敏差异报告 `*_shadow.json`。Profile API 不返回达人简介；第 6 步语言识别和介绍私信仍按原流程读取详情 DOM。第一阶段禁止将非 DOM 数据源与 `--execute` 联用；真实批准仍必须使用默认 `--data-source dom`。
@@ -101,6 +108,8 @@ python3 scripts/screen_sample_requests.py \
 **不要**用：省略 `--with-detail` / `--require-detail`、`--skip-hero-check`，或 **`--detail-limit`**（已移除，禁止使用）。  
 
 ### 可选：批准（危险）
+
+批准前会用待审核列表 API 即时核对申请仍可批准；DOM 点击后还会只读确认申请已移出待审核。若状态无法确认，脚本标记 `unknown`、停止本轮且不写飞书。
 
 ```bash
 # 试批 1 条（默认 limit=1；不写飞书）
@@ -110,6 +119,8 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail --execu
 python3 scripts/screen_sample_requests.py --with-detail --require-detail \
   --execute --yes --write-feishu --execute-limit 1
 ```
+
+第二阶段批准接口发现仅在明确授权的单条测试中追加 `--observe-approve-network`。该开关只被动记录 endpoint、请求体结构和业务码，不会重放请求；默认关闭。
 
 完整参数见 [AGENTS.md](./AGENTS.md#样品申请筛查screen_sample_requestspy)。
 
@@ -139,7 +150,7 @@ python3 scripts/sync_shipped_tracking.py --write-feishu --force --max-rows 1
 可选：--execute --yes → 备份 → 同意（limit 默认 1）→（可选 --write-feishu）写达人关系管理(新)
 ```
 
-**默认不点同意/拒绝。** 导航须你先停在「待审核」。
+**默认不点同意/拒绝。** 带 `--from-seller-home` 时从商家中心首页导航；否则须先手动停在「待审核」。
 
 ### 非主推还会进详情吗？
 
@@ -182,6 +193,7 @@ python3 scripts/sync_shipped_tracking.py --write-feishu --force --max-rows 1
 config.toml.example                 # 密钥模板（含 [feishu] / [feishu.bitable]）
 config.toml                         # 本地密钥（gitignore）
 scripts/screen_sample_requests.py   # CLI
+scripts/open_sample_store.py        # 脚本 1：GUI + ZClaw 安全开店
 scripts/lib/feishu_hero.py          # 飞书主推表只读
 scripts/lib/feishu_bitable.py       # 达人关系管理(新) 可选写入
 scripts/lib/approve_dom.py          # 列表点「同意」（仅 execute）
@@ -189,6 +201,8 @@ scripts/lib/page_api.py             # 紫鸟页面上下文只读 API 传输
 scripts/lib/sample_api.py           # 待审核列表 API 适配
 scripts/lib/creator_api.py          # 达人 profile_types 详情 API 适配
 scripts/lib/sample_data_source.py   # dom/api/auto/shadow 编排
+scripts/lib/sample_navigation.py    # 商家中心首页 → 样品申请待审核
+scripts/lib/store_launcher.py       # 已运行不重开的开店编排
 scripts/lib/app_config.py           # 读 config.toml
 scripts/lib/                        # DOM / 判定 / 导出
 exports/                            # 输出（含可选 *_pre_execute 备份）

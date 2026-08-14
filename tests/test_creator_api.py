@@ -126,6 +126,13 @@ class CreatorProfileParserTests(unittest.TestCase):
         with self.assertRaises(PageApiSchemaError):
             parse_creator_profile_payloads(payloads)
 
+    def test_one_missing_gpm_side_requires_fallback(self) -> None:
+        payloads = load_fixture()
+        payloads[2]["creator_profile"]["ec_live_gpm"]["is_authorized"] = False
+
+        with self.assertRaises(PageApiSchemaError):
+            parse_creator_profile_payloads(payloads)
+
     def test_missing_core_gpm_is_schema_error(self) -> None:
         payloads = load_fixture()
         del payloads[2]["creator_profile"]["ec_video_gpm"]

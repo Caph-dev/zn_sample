@@ -63,6 +63,12 @@ from lib.feishu_hero import (  # noqa: E402
     load_hero_from_feishu,
 )
 from lib.filters import Criteria, evaluate_row  # noqa: E402
+from lib.network_observer import (  # noqa: E402
+    arm_network_observer,
+    drain_network_observer,
+)
+from lib.sample_navigation import navigate_from_seller_home_to_pending  # noqa: E402
+from lib.sample_api import check_pending_application_api  # noqa: E402
 from lib.sample_data_source import (  # noqa: E402
     DATA_SOURCE_CHOICES,
     load_creator_detail,
@@ -99,6 +105,7 @@ def _run_execute_pipeline(
     execute_delay: float,
     config_path: str | None,
     page_wait: float,
+    observe_approve_network: bool,
 ) -> list[dict[str, Any]]:
     """对筛查通过行执行：解析货号 →（可选查重）→ 同意 →（可选写飞书）。"""
     product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
@@ -240,33 +247,137 @@ def _run_execute_pipeline(
                 )
                 continue
 
+        try:
+            pending_status = check_pending_application_api(
+                store_id,
+                apply_id,
+                expected_creator_id=str(row.get("creator_id") or ""),
+                expected_product_id=str(row.get("product_id") or ""),
+            )
+        except Exception as error:
+            row["approve_status"] = "skipped"
+            row["approve_error"] = f"批准前只读状态预检失败: {error}"
+            row["action"] = "skipped-api-preflight-error"
+            print(f"  [跳过] {creator_name} 批准前状态预检失败: {error}")
+            continue
+
+        row["approve_preflight"] = pending_status
+        if not pending_status.get("ok") or pending_status.get("state") != "pending-approvable":
+            row["approve_status"] = "skipped"
+            row["approve_error"] = (
+                "批准前状态不再可批准: "
+                f"{pending_status.get('state') or 'unknown'}"
+            )
+            row["action"] = "skipped-api-preflight-state"
+            print(
+                f"  [跳过] {creator_name} 批准前状态="
+                f"{pending_status.get('state') or 'unknown'}"
+            )
+            continue
+
         print(
             f"  [批准] ({processed + 1}/{limit}) {creator_name} "
             f"apply={apply_id} sku={product_resolve.get('sku')} "
             f"option={product_resolve.get('option')}"
         )
+        observer_armed = False
+        approval_attempt_started = False
+        approve_exception: Exception | None = None
+        approve_result: dict[str, Any] = {}
         try:
             # doctor 绿 ≠ execute_script 可用；批准前先探活（含 network 重试）
             ensure_store_exec_ready(store_id, label="批准前")
+            if observe_approve_network:
+                arm_network_observer(store_id)
+                observer_armed = True
+            approval_attempt_started = True
             approve_result = click_approve_for_apply_id(
                 store_id,
                 apply_id,
                 page_wait=max(1.0, page_wait),
             )
         except Exception as error:
+            approve_exception = error
             row["approve_status"] = "error"
             row["approve_error"] = str(error)
             row["action"] = "approve-error"
             print(f"    批准异常: {error}")
+        finally:
+            if observer_armed:
+                try:
+                    time.sleep(0.5)
+                    network_trace = drain_network_observer(store_id, uninstall=True)
+                    row["approve_network_trace"] = network_trace
+                    print(f"    被动网络摘要: {len(network_trace)} 条")
+                except Exception as trace_error:
+                    row["approve_network_trace_error"] = str(trace_error)
+                    print(f"    被动网络摘要读取失败: {trace_error}")
+
+        if approve_exception is not None and not approval_attempt_started:
             continue
 
-        if not approve_result.get("ok"):
+        postcheck_status: dict[str, Any] | None = None
+        postcheck_error = ""
+        for postcheck_attempt in range(2):
+            try:
+                postcheck_status = check_pending_application_api(
+                    store_id,
+                    apply_id,
+                    expected_creator_id=str(row.get("creator_id") or ""),
+                    expected_product_id=str(row.get("product_id") or ""),
+                )
+                postcheck_error = ""
+            except Exception as error:
+                postcheck_status = None
+                postcheck_error = str(error)
+
+            if (
+                postcheck_status
+                and postcheck_status.get("ok")
+                and postcheck_status.get("state") == "not-found-in-pending"
+            ):
+                break
+            if postcheck_attempt == 0:
+                time.sleep(1.0)
+
+        row["approve_postcheck"] = postcheck_status or {
+            "ok": False,
+            "state": "verification-error",
+            "error": postcheck_error,
+        }
+        approval_is_confirmed = bool(
+            postcheck_status
+            and postcheck_status.get("ok")
+            and postcheck_status.get("state") == "not-found-in-pending"
+        )
+        approval_is_confirmed_failed = bool(
+            postcheck_status
+            and postcheck_status.get("ok")
+            and postcheck_status.get("state") == "pending-approvable"
+            and (approve_exception is not None or not approve_result.get("ok"))
+        )
+        if approval_is_confirmed_failed:
             row["approve_status"] = "failed"
-            row["approve_error"] = approve_result.get("error") or str(approve_result)
+            row["approve_error"] = (
+                str(approve_exception)
+                if approve_exception is not None
+                else approve_result.get("error") or str(approve_result)
+            )
             row["action"] = "approve-failed"
             row["approve_detail"] = approve_result
-            print(f"    批准失败: {row['approve_error']}")
+            print(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
             continue
+        if not approval_is_confirmed:
+            row["approve_status"] = "unknown"
+            row["approve_error"] = (
+                "DOM 点击后无法通过只读 API 确认批准状态；禁止重试及写飞书"
+            )
+            row["action"] = "approve-unknown"
+            print(
+                "    批准状态未知：已停止本轮，禁止自动重试；"
+                "请根据导出 approve_postcheck 人工核对。"
+            )
+            break
 
         row["approve_status"] = "approved"
         row["action"] = "approved"
@@ -276,7 +387,12 @@ def _run_execute_pipeline(
                 list(step.keys())[0] for step in (approve_result.get("steps") or [])
             ],
         }
-        print(f"    批准成功 note={approve_result.get('note')}")
+        approval_note = approve_result.get("note") or (
+            "postcheck-confirmed-after-exception"
+            if approve_exception is not None
+            else "postcheck-confirmed"
+        )
+        print(f"    批准成功 note={approval_note}")
         processed += 1
 
         if not write_feishu or not bitable_token:
@@ -335,6 +451,14 @@ def main() -> int:
     ap.add_argument("--max-pages", type=int, default=50)
     ap.add_argument("--max-rows", type=int, default=0, help="最多处理 N 条（0=不限；测试建议小）")
     ap.add_argument("--page-wait", type=float, default=2.0)
+    ap.add_argument(
+        "--from-seller-home",
+        action="store_true",
+        help=(
+            "从已登录的 TikTok Shop 商家中心首页自动导航到样品申请-待审核；"
+            "须显式传 --store-id"
+        ),
+    )
     ap.add_argument(
         "--data-source",
         choices=DATA_SOURCE_CHOICES,
@@ -420,12 +544,20 @@ def main() -> int:
         help="批准成功后写入飞书「达人关系管理(新)」（测试环境请勿默认开启）",
     )
     ap.add_argument(
+        "--observe-approve-network",
+        action="store_true",
+        help="仅 execute 时：被动记录批准相关请求的脱敏结构；不主动重放请求",
+    )
+    ap.add_argument(
         "--no-pre-backup",
         action="store_true",
         help="execute 时跳过批准前本地备份（不推荐）",
     )
     args = ap.parse_args()
 
+    if args.from_seller_home and not str(args.store_id or "").strip():
+        print("--from-seller-home 必须显式传 --store-id，避免导航错误店铺", file=sys.stderr)
+        return 2
     if args.execute and not args.yes:
         print(
             "将真实点击「同意」。确认请加 --yes，或去掉 --execute 做只读筛查。",
@@ -434,6 +566,9 @@ def main() -> int:
         return 2
     if args.write_feishu and not args.execute:
         print("--write-feishu 仅在 --execute --yes 时有效", file=sys.stderr)
+        return 2
+    if args.observe_approve_network and not args.execute:
+        print("--observe-approve-network 仅在 --execute --yes 时有效", file=sys.stderr)
         return 2
     if args.execute and args.data_source != "dom":
         print(
@@ -456,7 +591,10 @@ def main() -> int:
         print("  默认只读导出 | **未**启用同意")
     print(f"  列表和筛查详情数据源: {args.data_source}")
     print("主推表来源: 飞书云文档（不再使用本地 xlsx）")
-    print("前提：你已手动打开「样品申请 → 待审核」并停在该页")
+    if args.from_seller_home:
+        print("前提：目标店已登录，并停在 TikTok Shop 商家中心首页")
+    else:
+        print("前提：你已手动打开「样品申请 → 待审核」并停在该页")
     print("=" * 60)
 
     default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
@@ -472,6 +610,23 @@ def main() -> int:
 
     if store_id == DEFAULT_TEST_STORE_ID:
         print(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
+
+    if args.from_seller_home:
+        try:
+            navigation_result = navigate_from_seller_home_to_pending(
+                store_id,
+                navigation_timeout=45.0,
+                poll_interval=max(0.5, min(2.0, args.page_wait)),
+            )
+        except Exception as error:
+            print(f"自动导航失败: {error}", file=sys.stderr)
+            return 2
+        destination = navigation_result.get("destination") or {}
+        print(
+            f"[自动导航] 已进入样品申请-待审核 "
+            f"shop_id={destination.get('shop_id')} "
+            f"region={destination.get('shop_region')}"
+        )
 
     # 主推表：仅飞书
     hero_keys: set[str] = set()
@@ -575,6 +730,7 @@ def main() -> int:
     need_detail = args.with_detail or args.detail_all or args.require_detail
     detail_targets: list[dict] = []
     detail_shadow_reports: list[dict[str, Any]] = []
+    strict_api_detail_failure_count = 0
     if need_detail:
         if args.detail_all:
             detail_targets = list(pre)
@@ -614,6 +770,8 @@ def main() -> int:
             except Exception as e:
                 print(f"    失败: {e}")
                 target["detail_error"] = str(e)
+                if args.data_source == "api":
+                    strict_api_detail_failure_count += 1
                 continue
             print(f"    详情数据源={detail_result.source_used}")
             if detail_result.shadow_report:
@@ -621,6 +779,8 @@ def main() -> int:
             if not res.get("ok"):
                 print(f"    失败: {res.get('error')}")
                 target["detail_error"] = res.get("error")
+                if args.data_source == "api":
+                    strict_api_detail_failure_count += 1
             else:
                 d = res["detail"]
                 print(
@@ -788,6 +948,7 @@ def main() -> int:
             execute_delay=args.execute_delay,
             config_path=args.config,
             page_wait=args.page_wait,
+            observe_approve_network=bool(args.observe_approve_network),
         )
         # 非通过行保持 export-only
         for row in pre:
@@ -820,6 +981,14 @@ def main() -> int:
         )
     else:
         print("完成。未执行任何同意/批准/拒绝操作。")
+    if strict_api_detail_failure_count:
+        print(
+            "纯 API 模式存在详情读取失败："
+            f"{strict_api_detail_failure_count}/{len(detail_targets)}。"
+            "已保留导出用于排查，本次返回非零状态。",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

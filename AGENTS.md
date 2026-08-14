@@ -37,11 +37,12 @@
    - 测试环境默认 **不写飞书**；写「达人关系管理(新)」须再加 `--write-feishu`。  
    - 默认 `--execute-limit 1`；批准前写本地备份；平台「同意」与已发私信不可脚本撤销。
 
-2. **导航由用户完成**  
-   - 脚本**不**负责：商家中心 → 联盟 → 样品申请入口。  
-   - 用户须先把目标店铺浏览器停在：**样品申请 → 待审核**。  
-   - 脚本可做：校验是否在样品申请页、必要时点「待审核」tab、扫表翻页、进达人详情再返回。  
-   - 若不在正确页面：报错退出并提示手动定位，**不要**自动 `visit` 到样品申请入口当默认路径（除非用户明确要求恢复/调试）。
+2. **导航采用显式两阶段流程**
+   - 脚本 1 `open_sample_store.py` 只用 GUI + ZClaw 开店；目标店已运行时绝不关闭或重开。用户随后登录并停在商家中心首页。
+   - 脚本 2 仅在显式 `--from-seller-home --store-id <id>` 时，可从商家中心首页安排页面内延迟导航到样品申请并切「待审核」；先返回脚本结果再跳转，避免页面销毁造成 Bridge 假 network。
+   - 未带 `--from-seller-home` 时保持旧纪律：用户须先停在 **样品申请 → 待审核**，脚本不代进入口。
+   - 禁止用 `ziniao-cli page extract --mode running` 识别店铺；它可能因无 debug port 触发 `runtime.reopen`。统一用 ZClaw `extract_data(mode=running)`。
+   - 导航失败只报错退出，不关闭、不重开、不切换店铺。
 
 3. **测试环境默认 1 号店**  
    - 店名：`跨境1号店（Lingerie Outlet）`  
@@ -83,6 +84,7 @@ zn_sample/
 ├── README.md                          # 人类向用法摘要
 ├── scripts/
 │   ├── screen_sample_requests.py      # CLI 入口（第 1–5 步）
+│   ├── open_sample_store.py            # 脚本 1：GUI + ZClaw 开店（不重开已运行店）
 │   ├── send_sample_intro.py           # 第 6 步介绍私信（默认不发送）
 │   ├── sync_shipped_tracking.py       # 第 7–9 步物流回写 + 可选私信
 │   └── lib/
@@ -91,7 +93,10 @@ zn_sample/
 │       ├── page_api.py                # 页面上下文只读 API 传输（allowlist）
 │       ├── sample_api.py              # 待审核列表 API 适配
 │       ├── sample_data_source.py      # dom/api/auto/shadow 编排
+│       ├── sample_navigation.py       # 商家中心首页 → 样品申请待审核
+│       ├── store_launcher.py          # running 校验 / 安全开店编排
 │       ├── creator_api.py             # 达人 profile_types 详情 API 适配
+│       ├── network_observer.py        # 批准接口发现：被动脱敏网络摘要
 │       ├── creator_detail.py          # 达人详情只读
 │       ├── feishu_hero.py             # 飞书主推表只读（默认 wiki 链接）
 │       ├── feishu_bitable.py          # 达人关系管理(新) 查重/写入（可选）
@@ -164,6 +169,7 @@ TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本�
 | `scripts/lib/im_dom.py` | 达人消息打开会话 / 发送（仅 execute） |
 | `scripts/lib/detect_lang.py` | 详情页简介 → 英语 / 西班牙语 |
 | `scripts/lib/creator_api.py` | 达人详情 profile_types 2/3/4/5 API（筛查指标） |
+| `scripts/lib/network_observer.py` | 批准接口发现用被动观察器；不主动发请求，不保存完整请求/响应 |
 | `scripts/lib/creator_detail.py` | 达人详情只读（GPM、简介） |
 | `scripts/lib/feishu_hero.py` | 飞书主推表只读（产品货号 / 是否主推） |
 | `scripts/lib/feishu_bitable.py` | 达人关系管理(新)：查重 / 写入 / 回写物流 |
@@ -175,15 +181,18 @@ TikTok Shop **联盟中心 → 样品申请 → 待审核** 列表筛查脚本�
 ### 前提（跑前检查）
 
 1. 飞书：本机 `config.toml` 已填 `[feishu].app_secret`（或 `FEISHU_APP_SECRET`；**勿提交 git**）  
-2. 紫鸟：**GUI** 已登录，目标店已打开（默认 **1 号店**）  
-3. 页面：已手动停在 **样品申请 → 待审核**（脚本不代进入口）  
+2. 紫鸟：**GUI** 已启动；脚本 1 打开目标店后，由用户登录并停在商家中心首页
+3. 页面：推荐脚本 2 带 `--from-seller-home` 自动进入；旧流程可手动停在 **样品申请 → 待审核**
 4. 工具：`ziniao-cli doctor` 正常；Python 3.10+（`openpyxl` 可选）
 
 ```bash
 # 首次：cp -n config.toml.example config.toml  后填 app_secret
 ziniao-status && ziniao-cli doctor
-# 店未开：ziniao-cli zclaw invoke open_store --args '{"storeId":"27437742526069"}'
-# 再手动：联盟中心 → 样品申请 →【待审核】
+# 脚本 1：开店；用户登录后停在商家中心首页
+python3 scripts/open_sample_store.py --store-id 27437742526069
+# 脚本 2：自动导航并筛查
+python3 scripts/screen_sample_requests.py --store-id 27437742526069 \
+  --from-seller-home --data-source auto --with-detail --require-detail
 ```
 
 ### 店铺 storeId
@@ -204,7 +213,9 @@ ziniao-status && ziniao-cli doctor
 
 ```bash
 cd ~/Projects/zn_sample
-python3 scripts/screen_sample_requests.py --with-detail --require-detail
+python3 scripts/screen_sample_requests.py \
+  --store-id 27437742526069 --from-seller-home \
+  --data-source auto --with-detail --require-detail
 ```
 
 需要时在后面追加参数：
@@ -249,7 +260,8 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
 | `--out` | 可选 | 导出前缀（默认 `exports/sample_screen_<时间戳>`） |
 | `--store-id` / `--store-name` | 可选 | 店铺；默认 1 号店 |
 | `--max-rows` | 仅测试 | 扫表最多 N 行；正式全量勿限 |
-| `--data-source` | 可选 | 列表和筛查详情来源 `dom/api/auto/shadow`；默认 `dom`；第一阶段非 DOM 仅限只读 |
+| `--data-source` | 可选 | 列表和筛查详情来源 `dom/api/auto/shadow`；只读推荐 `auto`，CLI 默认仍为 `dom`；非 DOM 仅限只读 |
+| `--from-seller-home` | 可选 | 从已登录商家中心首页自动进入待审核；必须显式传 `--store-id`；失败不重开店铺 |
 | `--detail-limit` | **禁止使用** | 已移除；勿截断详情目标（限量请用 `--max-rows`） |
 | `--skip-hero-check` | **禁止正式用** | 跳过主推 |
 | `--execute` | 危险可选 | 对筛查通过行点「同意」；**须同时** `--yes` |
@@ -257,6 +269,7 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
 | `--execute-limit` | 危险可选 | 最多批准 N 条；**默认 1**（0 也按 1） |
 | `--execute-delay` | 可选 | 每条批准间隔秒（默认 1.5） |
 | `--write-feishu` | 危险可选 | 同意成功后再写「达人关系管理(新)」；测试默认**不要**开 |
+| `--observe-approve-network` | 危险调试 | 仅与 `--execute --yes` 联用；被动记录批准请求脱敏结构，不重放 |
 | `--no-pre-backup` | 不推荐 | execute 时跳过批准前本地备份 |
 
 较少用：`--max-pages`、`--page-wait`、`--detail-delay`、`--config`、`--hero-feishu-url`、`--hero-sheet`、`--feishu-app-id` / `--feishu-app-secret`、`--no-default-store`。
@@ -281,8 +294,10 @@ python3 scripts/screen_sample_requests.py --with-detail --require-detail \
    b. 对 eligible 行（最多 execute-limit，默认 1）：
       · product_id → 主推货号 → 寄样产品选项（可模糊）；失败则整单跳过
       · 若 --write-feishu：红人ID+寄样产品 去重，命中则跳过
+      · 用待审核列表 API 即时确认 apply_id / creator_id / product_id 仍一致且可批准
       · 全部展开 → 点「同意」→ 有弹窗则确认（永不点拒绝）
-      · 同意成功且 --write-feishu → 写达人关系管理(新)（人员=王良希（技术）、待发货、未寄样）
+      · DOM 返回成功后再用列表 API 确认已移出待审核；无法确认则标记 unknown、停止且不写飞书
+      · 状态确认成功且 --write-feishu → 写达人关系管理(新)（人员=王良希（技术）、待发货、未寄样）
    c. 再导出（含 approve_status / feishu_* 列）
 ```
 

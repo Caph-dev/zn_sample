@@ -207,3 +207,110 @@ def scrape_pending_list_api(
 
     print(f"[API扫表] 完成，去重后 {len(all_rows)} 行")
     return all_rows
+
+
+def locate_pending_application(
+    rows: list[dict[str, Any]],
+    apply_id: str,
+    *,
+    expected_creator_id: str = "",
+    expected_product_id: str = "",
+) -> dict[str, Any]:
+    """在标准待审核行中定位申请，并核对批准前不可变业务标识。"""
+    normalized_apply_id = str(apply_id or "").strip()
+    if not normalized_apply_id:
+        raise PageApiSchemaError("批准前状态预检缺少 apply_id")
+
+    matched_row: dict[str, Any] | None = None
+    for row in rows:
+        row_apply_ids = {
+            str(value)
+            for value in (row.get("apply_ids") or [])
+            if value is not None
+        }
+        primary_apply_id = str(row.get("apply_id") or "").strip()
+        if normalized_apply_id == primary_apply_id or normalized_apply_id in row_apply_ids:
+            matched_row = row
+            break
+
+    if matched_row is None:
+        return {
+            "ok": True,
+            "state": "not-found-in-pending",
+            "apply_id": normalized_apply_id,
+        }
+
+    actual_creator_id = str(matched_row.get("creator_id") or "").strip()
+    actual_product_id = str(matched_row.get("product_id") or "").strip()
+    identity_mismatches: list[str] = []
+    if expected_creator_id and actual_creator_id != str(expected_creator_id):
+        identity_mismatches.append("creator_id")
+    if expected_product_id and actual_product_id != str(expected_product_id):
+        identity_mismatches.append("product_id")
+    if identity_mismatches:
+        return {
+            "ok": False,
+            "state": "identity-mismatch",
+            "apply_id": normalized_apply_id,
+            "mismatched_fields": identity_mismatches,
+        }
+
+    can_be_approved = matched_row.get("can_be_approved")
+    return {
+        "ok": True,
+        "state": (
+            "pending-approvable"
+            if can_be_approved is True
+            else "pending-not-approvable"
+        ),
+        "apply_id": normalized_apply_id,
+        "can_be_approved": can_be_approved,
+        "review_status": matched_row.get("review_status"),
+    }
+
+
+def check_pending_application_api(
+    store_id: str,
+    apply_id: str,
+    *,
+    expected_creator_id: str = "",
+    expected_product_id: str = "",
+) -> dict[str, Any]:
+    """通过只读列表 API 即时确认申请仍处于待审核且身份一致。"""
+    assert_on_pending_list(store_id)
+    context = get_affiliate_page_context(store_id)
+    previous_page_signature: tuple[str, ...] | None = None
+
+    for page_number in range(1, 51):
+        payload = post_read_json(
+            store_id,
+            SAMPLE_LIST_ENDPOINT,
+            build_pending_list_request(page_number),
+            context=context,
+        )
+        page_rows = parse_pending_list_payload(payload, list_href=context.href)
+        page_signature = tuple(str(row.get("apply_id") or "") for row in page_rows)
+        if previous_page_signature is not None and page_signature == previous_page_signature:
+            raise PageApiSchemaError(
+                f"批准前预检分页未前进，page={page_number} 返回重复 apply_id 集合"
+            )
+        previous_page_signature = page_signature
+
+        page_status = locate_pending_application(
+            page_rows,
+            apply_id,
+            expected_creator_id=expected_creator_id,
+            expected_product_id=expected_product_id,
+        )
+        if page_status.get("state") != "not-found-in-pending":
+            page_status["page"] = page_number
+            return page_status
+
+        if not payload.get("has_more"):
+            return page_status
+        if not page_rows:
+            raise PageApiSchemaError(
+                f"批准前预检 API 声称 has_more=true，但 page={page_number} 为空"
+            )
+
+    raise PageApiSchemaError("批准前预检超过 50 页，未能确认完整待审核列表")

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,8 @@ READ_POST_ENDPOINTS = frozenset(
     }
 )
 DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
+DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 
 
 class PageApiError(RuntimeError):
@@ -101,76 +104,134 @@ def post_read_json(
     context: AffiliatePageContext,
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     retries: int = 2,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
 ) -> dict[str, Any]:
     """在当前页面中执行已登记的查询型 POST，并返回业务 payload。"""
     request_url = _build_read_url(endpoint, context=context)
-    script = f"""
+    attempts = max(1, int(retries) + 1)
+    last_error: PageApiError | None = None
+    for attempt in range(attempts):
+        request_id = uuid.uuid4().hex
+        start_script = f"""
 (() => {{
+  const requestId = {json.dumps(request_id)};
   const requestUrl = {json.dumps(request_url, ensure_ascii=False)};
   const requestBody = {json.dumps(body, ensure_ascii=False)};
   const maxResponseBytes = {int(max_response_bytes)};
-  const request = new XMLHttpRequest();
-  try {{
-    request.open('POST', requestUrl, false);
-    request.setRequestHeader('accept', 'application/json, text/plain, */*');
-    request.setRequestHeader('content-type', 'application/json');
-    request.send(JSON.stringify(requestBody));
-    const responseText = request.responseText || '';
+  const timeoutMilliseconds = {max(1000, int(request_timeout_seconds * 1000))};
+  const stateKey = '__znPageApiReadRequests';
+  const requestStates = window[stateKey] || (window[stateKey] = {{}});
+  const abortController = new AbortController();
+  const timeoutHandle = window.setTimeout(() => abortController.abort(), timeoutMilliseconds);
+  requestStates[requestId] = {{done: false}};
+
+  fetch(requestUrl, {{
+    method: 'POST',
+    headers: {{
+      'accept': 'application/json, text/plain, */*',
+      'content-type': 'application/json'
+    }},
+    body: JSON.stringify(requestBody),
+    signal: abortController.signal
+  }}).then(async response => {{
+    const responseText = await response.text();
     const responseByteLength = new TextEncoder().encode(responseText).length;
     if (responseByteLength > maxResponseBytes) {{
-      return JSON.stringify({{
+      requestStates[requestId] = {{
+        done: true,
         ok: false,
         error_type: 'response-too-large',
-        status: request.status,
+        status: response.status,
         response_length: responseByteLength
-      }});
+      }};
+      return;
     }}
     let payload = null;
     try {{
       payload = JSON.parse(responseText);
     }} catch (error) {{
-      return JSON.stringify({{
+      requestStates[requestId] = {{
+        done: true,
         ok: false,
         error_type: 'invalid-json',
-        status: request.status,
+        status: response.status,
         response_length: responseByteLength
-      }});
+      }};
+      return;
     }}
-    return JSON.stringify({{
-      ok: request.status >= 200 && request.status < 300,
-      status: request.status,
+    requestStates[requestId] = {{
+      done: true,
+      ok: response.ok,
+      status: response.status,
       payload
-    }});
-  }} catch (error) {{
-    return JSON.stringify({{
+    }};
+  }}).catch(error => {{
+    requestStates[requestId] = {{
+      done: true,
       ok: false,
-      error_type: 'request-exception',
+      error_type: error && error.name === 'AbortError' ? 'request-timeout' : 'request-exception',
       error: String(error)
-    }});
-  }}
+    }};
+  }}).finally(() => window.clearTimeout(timeoutHandle));
+
+  return JSON.stringify({{ok: true, started: true, request_id: requestId}});
 }})()
 """
-
-    attempts = max(1, int(retries) + 1)
-    last_error: PageApiError | None = None
-    for attempt in range(attempts):
         started_at = time.monotonic()
         try:
-            result = zclaw_exec(
+            start_result = zclaw_exec(
                 store_id,
-                script,
-                timeout=90,
-                retries=DEFAULT_EXEC_RETRIES,
+                start_script,
+                timeout=30,
+                retries=1,
             )
+            if not isinstance(start_result, dict) or not start_result.get("started"):
+                raise PageApiError(
+                    f"{endpoint} 无法启动页面异步请求: {start_result!r}"[:400]
+                )
+
+            poll_script = f"""
+(() => {{
+  const requestId = {json.dumps(request_id)};
+  const requestStates = window.__znPageApiReadRequests || {{}};
+  const requestState = requestStates[requestId];
+  if (!requestState) {{
+    return JSON.stringify({{done: true, ok: false, error_type: 'request-state-missing'}});
+  }}
+  if (!requestState.done) return JSON.stringify({{done: false}});
+  delete requestStates[requestId];
+  return JSON.stringify(requestState);
+}})()
+"""
+            deadline = time.monotonic() + max(1.0, request_timeout_seconds + 5.0)
+            result: dict[str, Any] | None = None
+            while time.monotonic() < deadline:
+                time.sleep(max(0.1, poll_interval_seconds))
+                poll_result = zclaw_exec(
+                    store_id,
+                    poll_script,
+                    timeout=30,
+                    retries=1,
+                )
+                if not isinstance(poll_result, dict):
+                    raise PageApiError(
+                        f"{endpoint} 轮询返回未知类型: {type(poll_result).__name__}"
+                    )
+                if poll_result.get("done"):
+                    result = poll_result
+                    break
+            if result is None:
+                raise PageApiError(f"{endpoint} 页面异步请求轮询超时")
         except Exception as error:
-            last_error = PageApiError(f"{endpoint} Bridge 请求失败: {error}")
+            last_error = (
+                error
+                if isinstance(error, PageApiError)
+                else PageApiError(f"{endpoint} Bridge 请求失败: {error}")
+            )
         else:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            if not isinstance(result, dict):
-                last_error = PageApiError(
-                    f"{endpoint} 返回未知封装类型: {type(result).__name__}"
-                )
-            elif not result.get("ok"):
+            if not result.get("ok"):
                 last_error = PageApiError(
                     f"{endpoint} 请求失败 status={result.get('status')} "
                     f"type={result.get('error_type')} elapsed_ms={elapsed_ms}"

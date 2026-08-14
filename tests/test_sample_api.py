@@ -18,6 +18,8 @@ from lib.page_api import (  # noqa: E402
 )
 from lib.sample_api import (  # noqa: E402
     build_pending_list_request,
+    check_pending_application_api,
+    locate_pending_application,
     parse_pending_list_payload,
     scrape_pending_list_api,
 )
@@ -100,16 +102,104 @@ class SampleApiParserTests(unittest.TestCase):
             "apply-test-003",
         ])
 
+    def test_locates_pending_application_and_checks_identity(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="test")
+
+        status = locate_pending_application(
+            rows,
+            "apply-test-002",
+            expected_creator_id="creator-test-001",
+            expected_product_id="product-test-001",
+        )
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["state"], "pending-approvable")
+
+    def test_pending_preflight_rejects_identity_change(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="test")
+
+        status = locate_pending_application(
+            rows,
+            "apply-test-001",
+            expected_creator_id="different-creator",
+            expected_product_id="product-test-001",
+        )
+
+        self.assertFalse(status["ok"])
+        self.assertEqual(status["state"], "identity-mismatch")
+        self.assertEqual(status["mismatched_fields"], ["creator_id"])
+
+    def test_pending_preflight_requires_explicit_approvable_state(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="test")
+        rows[0]["can_be_approved"] = None
+
+        status = locate_pending_application(rows, "apply-test-001")
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["state"], "pending-not-approvable")
+
+    def test_pending_preflight_reports_missing_application(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="test")
+
+        status = locate_pending_application(rows, "apply-test-missing")
+
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["state"], "not-found-in-pending")
+
+    def test_pending_preflight_stops_after_target_page(self) -> None:
+        first_payload = load_fixture()
+        first_payload["has_more"] = True
+        second_payload = copy.deepcopy(first_payload)
+        second_payload["has_more"] = False
+        second_payload["agg_info"][0]["apply_deatil"]["apply_info"]["apply_id"] = (
+            "target-apply-id"
+        )
+        second_payload["agg_info"][0]["apply_group"]["apply_ids"] = [
+            "target-apply-id"
+        ]
+        requested_pages: list[int] = []
+
+        def request_json(store_id: str, endpoint: str, body: dict, **kwargs) -> dict:
+            requested_pages.append(body["cur_page"])
+            return first_payload if body["cur_page"] == 1 else second_payload
+
+        with (
+            patch("lib.sample_api.assert_on_pending_list"),
+            patch(
+                "lib.sample_api.get_affiliate_page_context",
+                return_value=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+            ),
+            patch("lib.sample_api.post_read_json", side_effect=request_json),
+        ):
+            status = check_pending_application_api(
+                "store-test",
+                "target-apply-id",
+                expected_creator_id="creator-test-001",
+                expected_product_id="product-test-001",
+            )
+
+        self.assertEqual(requested_pages, [1, 2])
+        self.assertEqual(status["state"], "pending-approvable")
+        self.assertEqual(status["page"], 2)
+
 
 class PageApiTransportTests(unittest.TestCase):
     def test_transport_uses_only_allowlisted_endpoint_without_session_extraction(self) -> None:
         with patch(
             "lib.page_api.zclaw_exec",
-            return_value={
-                "ok": True,
-                "status": 200,
-                "payload": {"code": 0, "agg_info": [], "total_count": 0},
-            },
+            side_effect=[
+                {"ok": True, "started": True, "request_id": "request-test"},
+                {
+                    "done": True,
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"code": 0, "agg_info": [], "total_count": 0},
+                },
+            ],
         ) as execute:
             payload = post_read_json(
                 "store-test",
@@ -122,11 +212,42 @@ class PageApiTransportTests(unittest.TestCase):
                 ),
             )
 
-        script = execute.call_args.args[1]
-        self.assertNotIn("document.cookie", script.lower())
-        self.assertNotIn("cookie_enabled", script.lower())
-        self.assertIn("oec_seller_id=shop-test", script)
+        start_script = execute.call_args_list[0].args[1]
+        poll_script = execute.call_args_list[1].args[1]
+        self.assertNotIn("document.cookie", start_script.lower())
+        self.assertNotIn("cookie_enabled", start_script.lower())
+        self.assertIn("oec_seller_id=shop-test", start_script)
+        self.assertIn("fetch(requestUrl", start_script)
+        self.assertNotIn("XMLHttpRequest", start_script)
+        self.assertIn("delete requestStates[requestId]", poll_script)
         self.assertEqual(payload["code"], 0)
+
+    def test_transport_reports_async_response_size_failure(self) -> None:
+        with patch(
+            "lib.page_api.zclaw_exec",
+            side_effect=[
+                {"ok": True, "started": True, "request_id": "request-test"},
+                {
+                    "done": True,
+                    "ok": False,
+                    "status": 200,
+                    "error_type": "response-too-large",
+                },
+            ],
+        ):
+            with self.assertRaisesRegex(PageApiError, "response-too-large"):
+                post_read_json(
+                    "store-test",
+                    SAMPLE_LIST_ENDPOINT,
+                    build_pending_list_request(1),
+                    context=AffiliatePageContext(
+                        href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                        shop_id="shop-test",
+                        shop_region="US",
+                    ),
+                    retries=0,
+                    poll_interval_seconds=0.01,
+                )
 
     def test_transport_rejects_unregistered_endpoint(self) -> None:
         with self.assertRaises(PageApiError):

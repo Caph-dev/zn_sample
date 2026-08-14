@@ -409,4 +409,26 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 - [x] 真实样本覆盖视频达人、视频+直播达人、Live GPM 为 0、低于 1% 互动率；离线契约测试补齐直播达人、双侧 GPM 为 0、可选字段无权限、核心 GPM 无权限须回退；
 - [x] 完成两个不同达人详情 shadow（修复低于 1% 的 DOM 百分比放大问题后，8 个核心字段一致）；
 - [x] 验证两达人 `auto` 模式全程使用 API，并更新 README.md / AGENTS.md；
-- [ ] 扩大真实达人样本并稳定运行后，再考虑把默认数据源从 `dom` 改为 `auto`。
+- [x] 三轮真实 shadow 验证后，将文档中的日常只读推荐命令切为 `--data-source auto`；CLI 默认仍保留 `dom`，所有 TikTok 写操作继续强制 `dom`；
+- [x] 纯 `api` 模式任一目标详情失败时保留排查导出并返回非零；`auto` 要求视频和直播两侧 GPM 都存在，否则按达人回退 DOM；
+- [ ] 继续积累真实日常运行样本后，再考虑修改 CLI 的默认数据源。
+
+## 8. 第二阶段 2A 当前进度
+
+- [x] 新增按 `apply_id` 的待审核列表 API 状态预检，并核对 `creator_id` / `product_id`；只有明确 `can_be_approved=true` 才允许进入 DOM 批准；
+- [x] DOM 返回批准成功后，用列表 API 最多复查两次；仅确认申请已移出待审核时才写飞书，无法确认则标记 `unknown`、停止本轮且禁止自动重试；
+- [x] 新增 `network_observer.py` 被动 fetch/XHR 观察器；只记录 endpoint、query 键、请求体结构、必要业务 ID、HTTP/业务码和响应顶层键，不读取请求头、不保存完整请求/响应；
+- [x] 使用真实 1 号店的列表只读请求验证观察器可安装、捕获安全摘要并恢复页面原始网络函数，全程未触发批准；
+- [x] 新增 `--observe-approve-network` 门闩：默认关闭，仅能与 `--execute --yes` 联用，且只观察现有 DOM 批准，不重放请求；
+- [ ] 需要用户再次明确授权单条 `--execute --yes --execute-limit 1 --observe-approve-network` 后，才能捕获批准 endpoint/body 契约；捕获期间默认不写飞书；
+- [ ] 捕获并脱敏确认契约后，实现窄接口 `approve_application()`；在此之前不得猜测或登记写 endpoint。
+
+## 9. GUI + ZClaw 两阶段启动
+
+为避免 `ziniao-cli page extract --mode running` 在店铺无 debug port 时触发 `runtime.reopen`，项目统一改用 ZClaw running 数据，不依赖 WebDriver/CDP：
+
+1. `open_sample_store.py --store-id <id>` 只负责开店和 `execute_script` 探活；目标店已运行时不调用 `open_store`，其他店运行时也不自动关闭或切换；
+2. 用户登录并停在 TikTok Shop 商家中心首页；
+3. `screen_sample_requests.py --store-id <id> --from-seller-home ...` 通过 `execute_script` 先返回成功、再异步 `location.assign()` 到样品申请页；这规避了当前客户端 `visit_page` 导航时 Bridge 假 network/占用。随后验证 `shop_id` / `shop_region`、列表就绪并切到待审核，再进入现有筛查；
+4. 未传 `--from-seller-home` 时继续兼容用户手动停在待审核的旧流程；
+5. 导航失败只报错退出，绝不关闭或重开店铺，也不改变批准/飞书门闩。
