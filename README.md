@@ -71,7 +71,7 @@ python3 scripts/screen_sample_requests.py \
   --require-detail
 ```
 
-`auto` 表示只读 API 优先，接口异常时回退页面读取；批准等写操作仍必须使用 `--data-source dom`，批准来源另由 `--write-source dom|api` 控制，默认是 `api`。如果已经手动停在待审核页，可去掉 `--from-seller-home`。
+`auto` 表示只读 API 优先，接口异常时回退页面读取。批准时列表和详情也可以用 `auto` 或 `api`；批准写来源另由 `--write-source dom|api` 控制，默认是 `api`。如果已经手动停在待审核页，可去掉 `--from-seller-home`。
 
 结果默认写入 `exports/`：
 
@@ -127,7 +127,7 @@ python3 scripts/screen_sample_requests.py \
 当前默认使用已捕获的批准 API；页面 DOM 仍保留为显式备用路径。两条路径都必须使用：
 
 ```bash
---data-source dom --execute --yes --execute-limit 1
+--data-source auto --execute --yes --execute-limit 1
 ```
 
 如需使用页面 DOM 备用路径，增加：

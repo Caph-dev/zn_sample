@@ -639,9 +639,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.execute and args.data_source != "dom":
+    if args.execute and args.data_source == "shadow":
         print(
-            "第一阶段 API 化仅限只读；真实批准时 --data-source 必须为 dom。",
+            "真实批准不能使用 --data-source shadow；请改用 auto 或 api。",
             file=sys.stderr,
         )
         return 2

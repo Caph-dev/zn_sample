@@ -216,7 +216,7 @@ Agent 只需在执行前确认：
 
 | 参数 | 约束 |
 |------|------|
-| `--data-source dom|api|auto|shadow` | 控制列表/详情读路径；正式批准时仍必须为 `dom`，不控制批准写来源 |
+| `--data-source dom|api|auto|shadow` | 控制列表/详情读路径；正式批准推荐 `auto`，也可用 `api` / `dom`；`shadow` 禁止配合 `--execute` |
 | `--write-source dom|api` | 批准写路径；默认 `api`；`dom` 是显式页面备用路径，两者都需全部 execute 门闩 |
 | `--from-seller-home --store-id <id>` | 允许从商家中心首页自动导航；失败不重开、不切店 |
 | `--with-detail --require-detail` | 正式筛查必须同时使用；缺少核心详情指标不能通过 |
@@ -285,7 +285,7 @@ execute 时另有：动作、批准状态/错误、飞书状态/`record_id`/错�
 2. 正式筛查必须：`config.toml`/`FEISHU_APP_SECRET` + `--with-detail` + `--require-detail`；测试可用 `--max-rows` 限扫表行数  
 3. 禁止文档推荐「仅列表」、本地 xlsx 或 `--skip-hero-check` 作为正式路径；**禁止使用 `--detail-limit`**  
 4. **默认**禁止同意；仅 `--execute --yes` 可批；测试默认**不要** `--write-feishu`；默认 `--execute-limit 1`  
-5. 第一阶段 API 化覆盖待审核列表和筛查详情；当前页面 API 使用异步 `fetch` + request_id 轮询，兼容 2 号店同步 XHR 空响应；批准默认走 API，`--write-source dom` 可显式使用 DOM；简介仍走详情 DOM，第 6/9 步发送默认走 IM SDK API；`--execute` 必须使用 `--data-source dom`，shadow 始终以 DOM 为权威
+5. 列表和筛查详情可用 `auto` / `api` / `dom`；当前页面 API 使用异步 `fetch` + request_id 轮询，兼容 2 号店同步 XHR 空响应；批准默认走 API，`--write-source dom` 可显式使用 DOM；简介仍走详情 DOM，第 6/9 步发送默认走 IM SDK API；`--execute` 推荐 `--data-source auto`，禁止 `shadow`
 6. 店掉线 / 停在详情页：手动回到待审核列表后重跑
 7. 勿把 `app_secret` / `config.toml` 提交 git 或写入聊天记录
 
