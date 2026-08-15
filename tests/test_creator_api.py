@@ -118,28 +118,39 @@ class CreatorProfileParserTests(unittest.TestCase):
         self.assertIsNone(detail["video_engagement_n"])
         self.assertEqual(detail["creator_type"], "视频达人")
 
-    def test_unauthorized_core_gpm_requires_fallback(self) -> None:
+    def test_unauthorized_core_gpm_is_complete_api_result(self) -> None:
         payloads = load_fixture()
         payloads[2]["creator_profile"]["ec_video_gpm"]["is_authorized"] = False
         payloads[2]["creator_profile"]["ec_live_gpm"]["is_authorized"] = False
 
-        with self.assertRaises(PageApiSchemaError):
-            parse_creator_profile_payloads(payloads)
+        detail = parse_creator_profile_payloads(payloads)
 
-    def test_one_missing_gpm_side_requires_fallback(self) -> None:
+        self.assertEqual(detail["video_gpm"], "")
+        self.assertIsNone(detail["video_gpm_n"])
+        self.assertEqual(detail["live_gpm"], "")
+        self.assertIsNone(detail["live_gpm_n"])
+        self.assertEqual(detail["creator_type"], "")
+
+    def test_one_missing_gpm_side_keeps_the_authorized_side(self) -> None:
         payloads = load_fixture()
         payloads[2]["creator_profile"]["ec_live_gpm"]["is_authorized"] = False
 
-        with self.assertRaises(PageApiSchemaError):
-            parse_creator_profile_payloads(payloads)
+        detail = parse_creator_profile_payloads(payloads)
 
-    def test_missing_core_gpm_is_schema_error(self) -> None:
+        self.assertEqual(detail["video_gpm_n"], 12.5)
+        self.assertIsNone(detail["live_gpm_n"])
+        self.assertEqual(detail["creator_type"], "视频达人")
+
+    def test_missing_core_gpm_is_not_a_transport_error(self) -> None:
         payloads = load_fixture()
         del payloads[2]["creator_profile"]["ec_video_gpm"]
         del payloads[2]["creator_profile"]["ec_live_gpm"]
 
-        with self.assertRaises(PageApiSchemaError):
-            parse_creator_profile_payloads(payloads)
+        detail = parse_creator_profile_payloads(payloads)
+
+        self.assertIsNone(detail["video_gpm_n"])
+        self.assertIsNone(detail["live_gpm_n"])
+        self.assertEqual(detail["creator_type"], "")
 
     def test_request_contract_allows_only_known_profile_types(self) -> None:
         request = build_creator_profile_request("creator-test-001", 3)

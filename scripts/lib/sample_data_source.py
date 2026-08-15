@@ -368,7 +368,7 @@ def load_creator_detail(
             )
         fallback_reason = str(api_result.get("error") or "unknown-api-detail-error")
         print(
-            f"    [详情数据源] API 失败，回退 DOM: {fallback_reason}",
+            f"    [详情数据源] API 传输/结构失败，回退 DOM: {fallback_reason}",
             flush=True,
         )
         dom_result = fetch_detail_for_row(

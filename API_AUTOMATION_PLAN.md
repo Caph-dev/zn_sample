@@ -193,7 +193,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 - `_list_href`；
 - 新增内部诊断字段 `_data_source=api`，导出时默认不暴露原始响应。
 
-若 API 字段缺失，不得从字段位置猜测；应抛出 `ApiSchemaError`，由 `auto` 模式回退 DOM。
+若 API 传输失败或响应结构损坏，不得从字段位置猜测；应抛出错误，由 `auto` 模式回退 DOM。GPM 未授权或为空是接口已成功的业务结果，交给 `--require-detail` 判定失败，不回退 DOM。
 
 ### 4.3 里程碑 C：实现详情 API 客户端
 
@@ -203,7 +203,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 2. 支持合并请求的能力探测；若服务端不支持，保持四个小请求；
 3. 将响应合并成现有 `fetch_detail_for_row()` 的标准字段；
 4. 不再打开详情页面，不再 `history.back()`；
-5. 缺少关键指标时，`auto` 模式按达人回退到 DOM 详情；
+5. 传输失败或响应结构损坏时，`auto` 模式按达人回退到 DOM 详情；GPM 未授权或为空不回退；
 6. 保留 `require_detail=True` 的现有语义。
 
 必须映射和核对的字段：
@@ -220,7 +220,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 - `bio`；
 - `creator_type`。
 
-实测 profile API 不返回 `bio`。简介不属于筛查条件，第 6 步语言识别和介绍私信继续显式使用详情 DOM；筛查 API 适配器将 `bio` 留空，不把缺失值伪装成接口数据。其他筛查核心指标缺失时，`auto` 必须按达人回退 DOM。
+实测 profile API 不返回 `bio`。简介不属于筛查条件，第 6 步语言识别和介绍私信继续显式使用详情 DOM；筛查 API 适配器将 `bio` 留空，不把缺失值伪装成接口数据。GPM 未授权或为空时，`auto` 不得为此打开详情页。
 
 ### 4.4 里程碑 D：数据源编排和 CLI
 
@@ -247,7 +247,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 - 响应 JSON 无法解析；
 - 标准字段缺失或类型异常；
 - 列表重复、分页不前进或总数明显不一致；
-- 详情缺少正式筛查所需的核心 GPM 数据。
+- 详情响应缺少 `creator_profile` 或无法解析；GPM 未授权或为空不回退。
 
 ### 4.5 里程碑 E：一致性和性能验证
 
@@ -454,7 +454,7 @@ approve_application(store_id, apply_id, expected_creator_id, expected_product_id
 - [x] 新增数据源编排和 `--data-source`；
 - [x] 新增 shadow 差异报告；
 - [x] 用 1 号店 `shadow --detail-all --max-rows 6` 做三轮只读对比：三轮列表均为 6/6 且零字段差异；详情可比较数据没有不可解释的数值差异。第 1 轮有一行 DOM 卡片显示 `--` 而 API 返回完整指标；第 2 轮有一行 DOM 遭遇 Bridge 瞬断；加入待审核页加载重试、详情只读网络重试和容差边界修复后，第 3 轮 6/6 达人的 8 个核心字段全部一致；
-- [x] 真实样本覆盖视频达人、视频+直播达人、Live GPM 为 0、低于 1% 互动率；离线契约测试补齐直播达人、双侧 GPM 为 0、可选字段无权限、核心 GPM 无权限须回退；
+- [x] 真实样本覆盖视频达人、视频+直播达人、Live GPM 为 0、低于 1% 互动率；离线契约测试补齐直播达人、双侧 GPM 为 0、可选字段无权限、核心 GPM 未授权按正式筛查失败处理且不回退 DOM；
 - [x] 完成两个不同达人详情 shadow（修复低于 1% 的 DOM 百分比放大问题后，8 个核心字段一致）；
 - [x] 验证两达人 `auto` 模式全程使用 API，并更新 README.md / AGENTS.md；
 - [x] 三轮真实 shadow 验证后，将文档中的日常只读推荐命令切为 `--data-source auto`；CLI 默认仍保留 `dom`，批准读路径仍强制 `dom`，批准写来源由 `--write-source dom|api` 显式选择；

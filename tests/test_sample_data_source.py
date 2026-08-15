@@ -118,6 +118,35 @@ class CreatorDetailDataSourceTests(unittest.TestCase):
 
     @patch("lib.sample_data_source.fetch_detail_for_row")
     @patch("lib.sample_data_source.fetch_creator_detail_api")
+    def test_detail_auto_does_not_open_dom_when_gpm_is_missing(
+        self,
+        api_fetcher,
+        dom_fetcher,
+    ) -> None:
+        api_fetcher.return_value = {
+            "ok": True,
+            "detail": {
+                "video_gpm": "",
+                "live_gpm": "",
+                "video_gpm_n": None,
+                "live_gpm_n": None,
+            },
+        }
+
+        result = load_creator_detail(
+            "store-test",
+            {"apply_id": "apply-test-001", "creator_id": "creator-test-001"},
+            data_source="auto",
+            list_href="https://example.test/sample-request",
+            wait=0,
+        )
+
+        self.assertEqual(result.source_used, "api")
+        self.assertIsNone(result.result["detail"]["video_gpm_n"])
+        dom_fetcher.assert_not_called()
+
+    @patch("lib.sample_data_source.fetch_detail_for_row")
+    @patch("lib.sample_data_source.fetch_creator_detail_api")
     def test_detail_auto_falls_back_to_dom_when_api_fails(
         self,
         api_fetcher,

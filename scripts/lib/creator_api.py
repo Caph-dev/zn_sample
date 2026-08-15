@@ -164,20 +164,8 @@ def parse_creator_profile_payloads(
         "avg_revenue_per_buyer",
     )
 
-    missing_gpm_fields = [
-        field_name
-        for field_name, field_value in (
-            ("ec_video_gpm", video_gpm_number),
-            ("ec_live_gpm", live_gpm_number),
-        )
-        if field_value is None
-    ]
-    if missing_gpm_fields:
-        raise PageApiSchemaError(
-            "profile_type=2 缺少正式筛查所需 GPM 字段: "
-            + ", ".join(missing_gpm_fields)
-        )
-
+    # GPM 缺失是接口已成功、该达人没有授权或没有这项数据。
+    # 交给 require_detail 判定失败，不要当成传输失败去回退 DOM。
     creator_type = ""
     has_video_activity = bool(video_gpm_number is not None and video_gpm_number > 0)
     has_live_activity = bool(live_gpm_number is not None and live_gpm_number > 0)
