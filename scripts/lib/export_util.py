@@ -7,6 +7,32 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_EXPORT_DIR = REPO_ROOT / "exports"
+
+
+def latest_screen_export(exports_dir: Path | None = None) -> Path:
+    """exports/ 里最新一份正式筛查 json，排除批准前备份。"""
+    directory = Path(exports_dir or DEFAULT_EXPORT_DIR)
+    candidates = [
+        path
+        for path in directory.glob("sample_screen_*.json")
+        if path.is_file() and "_pre_execute" not in path.name
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"{directory} 下没有 sample_screen_*.json")
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def resolve_from_export_arg(value: str | Path | None) -> Path | None:
+    """--from-export 不写路径或写 latest 时，用最新筛查导出。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "latest":
+        return latest_screen_export()
+    return Path(text)
+
 
 EXPORT_FIELDS = [
     "creator_name",

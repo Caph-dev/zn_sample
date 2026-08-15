@@ -1,7 +1,7 @@
 # zn_sample · AGENTS.md
 
 本文件给 **Agent / 技术维护**：纪律、数据 ID、实现契约。  
-**不写**业务员逐步教程、不堆常用命令。命令清单和 SOP 停点见 [README.md](./README.md)；复制操作见 [使用方法.md](./使用方法.md)；规则原文见 `样品申请筛查sop/样品申请筛查sop.md`。
+**不写**业务员逐步教程、不堆常用命令。业务员操作和命令清单见 [README.md](./README.md)；规则原文见 `样品申请筛查sop/样品申请筛查sop.md`。
 
 紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。勿混用 `zn_daren` 的 `--execute` 取消逻辑。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
 
@@ -18,7 +18,7 @@
 
 2. **两阶段导航**  
    `open_sample_store.py` 只开店；目标店已运行绝不关闭/重开。用户登录后停在商家中心首页。  
-   仅 `--from-seller-home --store-id` 允许从首页进待审核；先返回脚本结果再跳转。  
+   仅 `--from-seller-home` 允许从首页进待审核；未传 `--store-id` 时必须 running 恰好一家，不回落到测试 1 号店。先返回脚本结果再跳转。  
    未带该开关：用户须已停在 **样品申请 → 待审核**。  
    导航失败只报错退出，不重开、不切店。
 
@@ -83,7 +83,7 @@
 |---|---|
 | `--data-source` | `dom\|api\|auto\|shadow`。批准推荐 `auto`。`shadow` 禁止 `--execute` |
 | `--write-source` | 批准/私信写路径；默认 `api`；`dom` 须显式。都要 execute 门闩 |
-| `--from-seller-home --store-id` | 才允许从首页导航；失败不重开不切店 |
+| `--from-seller-home` | 才允许从首页导航；未写 `--store-id` 时须 running 唯一店。失败不重开不切店 |
 | `--from-export` | 跳过扫表/详情。筛查脚本：批准或补写。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
 | `--confirm-export` | 只补写/核对，不重批 |
 | `--with-detail --require-detail` | 正式筛查必须成对；禁止 `--detail-limit`、`--skip-hero-check` |
@@ -142,4 +142,4 @@
 2. 用户要批准：只走已有 `--execute --yes`（+ 可选 `--write-feishu`）。提醒 limit、备份、不可撤销。勿另开无门闩路径。
 3. 探 DOM 只用 `execute_script`；失败先查：留在详情页、Bridge、错 tab、未全部展开。
 4. 与 zn_daren 共用时引用、不复制大段 `zclaw_dom`。
-5. 同一错误第二次 → 补一条可验证规则。纪律变更同步 README / 使用方法。删冗长：删掉会不会更容易犯错？不会就删。
+5. 同一错误第二次 → 补一条可验证规则。纪律变更同步 README。删冗长：删掉会不会更容易犯错？不会就删。

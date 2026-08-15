@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.store_launcher import ensure_sample_store_open  # noqa: E402
+from lib.zclaw import resolve_store_id  # noqa: E402
 
 
 def main() -> int:
@@ -19,8 +20,8 @@ def main() -> int:
     )
     argument_parser.add_argument(
         "--store-id",
-        required=True,
-        help="目标紫鸟店铺 storeId（必须显式提供，避免误开默认店）",
+        default=None,
+        help="目标紫鸟店铺 storeId；只开着一家时可省略",
     )
     argument_parser.add_argument(
         "--store-name",
@@ -34,10 +35,14 @@ def main() -> int:
         help="新开店后探活前等待秒数（默认 2）",
     )
     arguments = argument_parser.parse_args()
-
     try:
+        store_id = resolve_store_id(
+            store_id=arguments.store_id,
+            store_name=arguments.store_name or None,
+            default_store_id=None,
+        )
         result = ensure_sample_store_open(
-            arguments.store_id,
+            store_id,
             store_name=arguments.store_name,
             wait_seconds=max(0.0, arguments.wait),
         )

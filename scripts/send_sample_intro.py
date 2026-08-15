@@ -24,7 +24,7 @@ from lib.creator_detail import (  # noqa: E402
     open_creator_detail_by_url,
 )
 from lib.detect_lang import detect_creator_lang  # noqa: E402
-from lib.export_util import write_generic_reports  # noqa: E402
+from lib.export_util import resolve_from_export_arg, write_generic_reports  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
@@ -116,7 +116,13 @@ def main() -> int:
     parser.add_argument("--store-id", default=None)
     parser.add_argument("--store-name", default=None)
     parser.add_argument("--no-default-store", action="store_true")
-    parser.add_argument("--from-export", type=Path, default=None, help="筛查/批准导出 json")
+    parser.add_argument(
+        "--from-export",
+        nargs="?",
+        const="latest",
+        default=None,
+        help="筛查/批准导出 json；不写路径则用 exports/ 最新一份",
+    )
     parser.add_argument("--creator-id", default=None)
     parser.add_argument("--creator-name", default=None)
     parser.add_argument("--max-rows", type=int, default=0)
@@ -139,6 +145,11 @@ def main() -> int:
     )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    try:
+        args.from_export = resolve_from_export_arg(args.from_export)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
     if args.execute and not args.yes:
         print("将真实发送私信。确认请加 --yes，或去掉 --execute 做只读预演。", file=sys.stderr)

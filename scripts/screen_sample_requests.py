@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
-from lib.export_util import write_reports  # noqa: E402
+from lib.export_util import resolve_from_export_arg, write_reports  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
@@ -868,9 +868,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument(
         "--from-export",
-        type=Path,
+        nargs="?",
+        const="latest",
         default=None,
-        help="用已有筛查导出 json 直接批准；不再扫表/拉详情（须同时 --execute --yes）",
+        help="用已有筛查导出 json 直接批准；不写路径则用 exports/ 最新一份",
     )
     ap.add_argument(
         "--confirm-export",
@@ -932,10 +933,12 @@ def main() -> int:
         help="execute 时跳过批准前本地备份（不推荐）",
     )
     args = ap.parse_args()
-
-    if args.from_seller_home and not str(args.store_id or "").strip():
-        print("--from-seller-home 必须显式传 --store-id，避免导航错误店铺", file=sys.stderr)
+    try:
+        args.from_export = resolve_from_export_arg(args.from_export)
+    except FileNotFoundError as error:
+        print(str(error), file=sys.stderr)
         return 2
+
     if args.confirm_export and not args.from_export:
         print("--confirm-export 必须配合 --from-export", file=sys.stderr)
         return 2
@@ -1021,7 +1024,13 @@ def main() -> int:
         print("前提：你已手动打开「样品申请 → 待审核」并停在该页")
     print("=" * 60)
 
+    explicit_store = bool(
+        str(args.store_id or "").strip() or str(args.store_name or "").strip()
+    )
+    # 从首页导航时：只开着一家店就用那家，不要静默落到测试 1 号店。
     default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
+    if args.from_seller_home and not explicit_store:
+        default_sid = None
     try:
         store_id = resolve_store_id(
             store_id=args.store_id,
