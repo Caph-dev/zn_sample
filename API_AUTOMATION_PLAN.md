@@ -321,7 +321,7 @@ filters.py -> export_util.py -> 可选 execute 流水线
 ```text
 POST /api/v1/affiliate/sample/group/action
 type=1                         # approve
-status_type=11                 # CreatorOrderPending
+status_type=<curr_status>      # 待审核常见为 10 或 11
 apply_ids=[目标 apply_id]
 group_ids=[]
 is_use_cross_regions=false

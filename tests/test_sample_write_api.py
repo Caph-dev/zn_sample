@@ -45,9 +45,17 @@ class SampleWriteRequestTests(unittest.TestCase):
             },
         )
 
-    def test_approval_requires_captured_pending_status(self) -> None:
-        with self.assertRaisesRegex(Exception, "status_type=11"):
+    def test_approval_requires_pending_status(self) -> None:
+        with self.assertRaisesRegex(Exception, "status_type=10/11"):
             build_approve_application_request("apply-test-001", status_type=20)
+
+    def test_builds_request_with_observed_pending_status_ten(self) -> None:
+        request = build_approve_application_request(
+            "apply-test-001",
+            status_type=10,
+        )
+        self.assertEqual(request["status_type"], 10)
+        self.assertEqual(request["type"], 1)
 
     def test_approval_runs_preflight_and_accepts_one_success(self) -> None:
         preflight = {
@@ -79,6 +87,33 @@ class SampleWriteRequestTests(unittest.TestCase):
         self.assertEqual(result["state"], "action-accepted")
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["status_type"], 11)
+
+    def test_approval_sends_preflight_status_ten(self) -> None:
+        preflight = {
+            "ok": True,
+            "state": "pending-approvable",
+            "apply_id": "apply-test-001",
+            "can_be_approved": True,
+            "curr_status": 10,
+        }
+        requests: list[dict] = []
+
+        def request_json(store_id: str, body: dict, **kwargs) -> dict:
+            requests.append(body)
+            return {"code": 0, "success_count": 1, "failed_count": 0}
+
+        result = approve_application_api(
+            "store-test",
+            "apply-test-001",
+            expected_creator_id="creator-test-001",
+            expected_product_id="product-test-001",
+            context=TEST_CONTEXT,
+            preflight_status=preflight,
+            request_json=request_json,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(requests[0]["status_type"], 10)
 
     def test_approval_blocks_preflight_without_sending(self) -> None:
         request_calls = 0

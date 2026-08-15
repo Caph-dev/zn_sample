@@ -409,7 +409,8 @@ def _run_execute_pipeline(
             row["action"] = "approve-failed"
             row["approve_detail"] = approve_result
             print(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
-            continue
+            print("    已停止本轮，禁止自动改试下一条申请。")
+            break
         if not approval_is_confirmed:
             row["approve_status"] = "unknown"
             row["approve_error"] = (

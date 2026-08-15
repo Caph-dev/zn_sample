@@ -145,6 +145,58 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(candidate["approve_status"], "failed")
         self.assertEqual(candidate["action"], "approve-failed")
 
+    @patch("screen_sample_requests.resolve_sample_product_for_row")
+    @patch("screen_sample_requests.ensure_store_exec_ready")
+    @patch("screen_sample_requests.confirm_application_approved_api")
+    @patch("screen_sample_requests.check_pending_application_api")
+    @patch("screen_sample_requests.approve_application_api")
+    def test_failed_api_approval_stops_without_trying_next_candidate(
+        self,
+        approve_api,
+        check_pending,
+        confirm_approved,
+        ensure_ready,
+        resolve_product,
+    ) -> None:
+        resolve_product.return_value = {
+            "ok": True,
+            "sku": "sku-test",
+            "option": "sku-test",
+        }
+        check_pending.return_value = {
+            "ok": True,
+            "state": "pending-approvable",
+            "curr_status": 10,
+        }
+        confirm_approved.return_value = {
+            "ok": False,
+            "state": "still-pending",
+        }
+        approve_api.side_effect = RuntimeError(
+            "批准 API 只接受待审核状态 status_type=10/11，实际为 10"
+        )
+        first = build_candidate()
+        second = build_candidate()
+        second["apply_id"] = "apply-test-002"
+        second["creator_name"] = "creator_test_2"
+
+        _run_execute_pipeline(
+            store_id="store-test",
+            candidates=[first, second],
+            hero_data={"rows": []},
+            write_feishu=False,
+            execute_limit=1,
+            execute_delay=0,
+            config_path=None,
+            page_wait=0,
+            observe_approve_network=False,
+            write_source="api",
+        )
+
+        approve_api.assert_called_once()
+        self.assertEqual(first["approve_status"], "failed")
+        self.assertNotIn("approve_status", second)
+
 
 if __name__ == "__main__":
     unittest.main()

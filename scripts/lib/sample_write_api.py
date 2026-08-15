@@ -5,7 +5,8 @@
 
 * endpoint: ``/api/v1/affiliate/sample/group/action``
 * ``type=1`` 表示批准；
-* 待审核申请的 ``status_type`` 使用当前申请状态 ``curr_status=11``；
+* 待审核申请的 ``status_type`` 使用当前申请的 ``curr_status``；
+* 只允许待审核状态 ``10`` / ``11``，禁止把已发货等后续状态写进批准请求；
 * 单条申请使用 ``apply_ids=[apply_id]``、``group_ids=[]``；
 * 非跨区域申请使用 ``is_use_cross_regions=false``。
 
@@ -32,6 +33,7 @@ from .sample_api import (
 )
 
 APPROVE_ACTION_TYPE = 1
+CREATOR_ORDER_PENDING_STATUSES = frozenset({10, 11})
 CREATOR_ORDER_PENDING_STATUS = 11
 READY_TO_SHIP_STATUS = 20
 DEFAULT_APPROVAL_CONFIRM_ATTEMPTS = 6
@@ -49,16 +51,16 @@ def build_approve_application_request(
     normalized_apply_id = str(apply_id or "").strip()
     if not normalized_apply_id:
         raise PageApiSchemaError("批准 API 请求缺少 apply_id")
-    if int(status_type) != CREATOR_ORDER_PENDING_STATUS:
+    if int(status_type) not in CREATOR_ORDER_PENDING_STATUSES:
         raise PageApiSchemaError(
-            "批准 API 只接受已捕获的待审核状态 status_type=11，"
+            "批准 API 只接受待审核状态 status_type=10/11，"
             f"实际为 {status_type!r}"
         )
     return {
         "apply_ids": [normalized_apply_id],
         "group_ids": [],
         "is_use_cross_regions": False,
-        "status_type": CREATOR_ORDER_PENDING_STATUS,
+        "status_type": int(status_type),
         "type": APPROVE_ACTION_TYPE,
     }
 
