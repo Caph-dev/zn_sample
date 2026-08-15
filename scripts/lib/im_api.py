@@ -27,12 +27,26 @@ SEND_TEXT_VIA_SDK_JS_TMPL = r"""
   };
   stateMap[requestId] = baseState;
 
-  if (!/\/seller\/im(?:[/?#]|$)/.test(location.pathname)) {
+  const composer = document.querySelector('textarea, [placeholder*="发送消息"], [placeholder*="Send a message"]');
+  const onImPage = /\/seller\/im(?:[/?#]|$)/.test(location.pathname);
+  if (!composer && !onImPage) {
     return JSON.stringify({ok: false, reason: 'not-on-im-page'});
   }
+  const want = String(expectedCreatorName || '').trim().toLowerCase();
+  const selectedCard = [...document.querySelectorAll('div')].find(el => {
+    const cls = String(el.className || '');
+    return /contactCard/.test(cls) && /selected/.test(cls);
+  });
+  const selectedText = selectedCard ? String(selectedCard.innerText || '').toLowerCase() : '';
   const pageText = String(document.body && document.body.innerText || '').toLowerCase();
-  if (expectedCreatorName && !pageText.includes(expectedCreatorName.toLowerCase())) {
-    return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+  if (want) {
+    if (selectedText) {
+      if (!selectedText.includes(want)) {
+        return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+      }
+    } else if (!pageText.includes(want)) {
+      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+    }
   }
 
   const textarea = document.querySelector('textarea');

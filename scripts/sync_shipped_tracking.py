@@ -42,9 +42,7 @@ from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
 from lib.im_dom import (  # noqa: E402
     fill_or_send_message,
     inspect_im,
-    open_im_from_detail,
-    open_im_inbox,
-    search_and_open_conversation,
+    open_target_conversation,
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import looks_like_tracking, tracking_message  # noqa: E402
@@ -122,19 +120,16 @@ def _send_tracking_dm(
 ) -> dict[str, Any]:
     name = str(row.get("creator_name") or "")
     body = tracking_message(lang, tracking_no)
-    clicked: dict[str, Any] = {}
-    opened = open_im_from_detail(store_id, wait=wait)
+    opened = open_target_conversation(
+        store_id,
+        name,
+        creator_id=str(row.get("creator_id") or ""),
+        shop_id=str(row.get("_shop_id") or ""),
+        wait=wait,
+    )
     if not opened.get("ok"):
-        inbox = open_im_inbox(store_id, shop_id=str(row.get("_shop_id") or ""))
-        if not inbox.get("ok"):
-            return {"ok": False, "error": "无法打开私信", "message": body}
-        clicked = search_and_open_conversation(store_id, name, wait=wait)
-        if not clicked.get("ok"):
-            return {"ok": False, "error": "找不到会话", "message": body}
-    else:
-        clicked = search_and_open_conversation(store_id, name, wait=wait)
-        if not clicked.get("ok"):
-            return {"ok": False, "error": "找不到会话", "message": body}
+        return {"ok": False, "error": opened.get("error") or "找不到会话", "message": body}
+    clicked = opened.get("click") if isinstance(opened.get("click"), dict) else {}
     probe = inspect_im(store_id)
     if looks_like_tracking(str(probe.get("text") or ""), tracking_no):
         return {"ok": True, "status": "already-sent", "message": body}

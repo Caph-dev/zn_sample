@@ -44,8 +44,11 @@ class ImSdkSendTests(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs["retries"], 0)
         script = execute.call_args.args[1]
         self.assertIn("onSendText", script)
+        self.assertIn("contactCard", script)
+        self.assertIn("selectedText", script)
         self.assertNotIn(".click()", script)
         self.assertNotIn("document.cookie", script.lower())
+        self.assertLess(script.index("composer"), script.index("not-on-im-page"))
 
     @patch("lib.im_api.zclaw_exec")
     def test_rejects_message_longer_than_platform_limit(self, execute) -> None:

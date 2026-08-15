@@ -37,9 +37,7 @@ from lib.feishu_bitable import (  # noqa: E402
 from lib.im_dom import (  # noqa: E402
     fill_or_send_message,
     inspect_im,
-    open_im_from_detail,
-    open_im_inbox,
-    search_and_open_conversation,
+    open_target_conversation,
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import intro_message, looks_like_intro  # noqa: E402
@@ -105,34 +103,12 @@ def _detect_from_detail(store_id: str, row: dict[str, Any], *, wait: float) -> d
 
 
 def _open_conversation(store_id: str, row: dict[str, Any], *, wait: float) -> dict[str, Any]:
-    from_detail = open_im_from_detail(store_id, wait=wait)
-    if from_detail.get("ok"):
-        clicked = search_and_open_conversation(
-            store_id, str(row.get("creator_name") or ""), wait=wait
-        )
-        if clicked.get("ok"):
-            return {"ok": True, "via": "detail+search", "detail": from_detail, "click": clicked}
-        # 详情气泡有时已直接打开该会话
-        probe = inspect_im(store_id)
-        name = str(row.get("creator_name") or "")
-        if name and name.lower() in str(probe.get("text") or "").lower():
-            return {"ok": True, "via": "detail-direct", "detail": from_detail}
-        return {
-            "ok": False,
-            "error": "私信会话未确认打开",
-            "detail": from_detail,
-            "click": clicked,
-            "probe": probe,
-        }
-    inbox = open_im_inbox(store_id)
-    if not inbox.get("ok"):
-        return {"ok": False, "error": "无法打开私信页", "detail": from_detail, "inbox": inbox}
-    clicked = search_and_open_conversation(
-        store_id, str(row.get("creator_name") or ""), wait=wait
+    return open_target_conversation(
+        store_id,
+        str(row.get("creator_name") or ""),
+        creator_id=str(row.get("creator_id") or ""),
+        wait=wait,
     )
-    if not clicked.get("ok"):
-        return {"ok": False, "error": "私信中找不到会话", "inbox": inbox, "click": clicked}
-    return {"ok": True, "via": "inbox-search", "inbox": inbox, "click": clicked}
 
 
 def main() -> int:

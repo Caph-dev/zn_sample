@@ -18,13 +18,14 @@
   # 只读筛查
   python3 scripts/screen_sample_requests.py --with-detail --require-detail
 
-  # 试批 1 条（默认 limit=1；不写飞书）
+  # 用已有筛查导出批准 1 条（不再扫表/拉详情）
   python3 scripts/screen_sample_requests.py \\
-    --with-detail --require-detail --execute --yes
+    --from-export exports/sample_screen_<时间戳>.json --execute --yes
 
   # 批 + 写飞书（生产/明确要求时）
   python3 scripts/screen_sample_requests.py \\
-    --with-detail --require-detail --execute --yes --write-feishu --execute-limit 1
+    --from-export exports/sample_screen_<时间戳>.json \\
+    --execute --yes --write-feishu --execute-limit 1
 """
 from __future__ import annotations
 
@@ -83,6 +84,134 @@ from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
 DEFAULT_EXECUTE_LIMIT = 1
+PLATFORM_STATUS_LAG_MINUTES = 10
+ALREADY_EXECUTED_APPROVE_STATUSES = {"approved", "unknown"}
+
+
+def _load_export_rows(path: Path) -> list[dict[str, Any]]:
+    """读取筛查导出 json（数组或 {rows/items}）。"""
+    export_path = Path(path)
+    data = json.loads(export_path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        data = data.get("rows") or data.get("items") or []
+    if not isinstance(data, list):
+        raise RuntimeError(f"导出不是数组: {export_path}")
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _select_execute_candidates_from_export(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从已有筛查结果里挑可批准行；已批准或状态未知的不再自动重试。"""
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("eligible"):
+            continue
+        if not str(row.get("apply_id") or "").strip():
+            continue
+        approve_status = str(row.get("approve_status") or "").strip()
+        if approve_status in ALREADY_EXECUTED_APPROVE_STATUSES:
+            continue
+        candidates.append(row)
+    return candidates
+
+
+def _parse_approved_at(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _looks_like_already_approved_skip(row: dict[str, Any]) -> bool:
+    """上一轮已批后，下一轮预检常会把同一申请标成「待审核找不到」。"""
+    if str(row.get("approve_status") or "").strip() != "skipped":
+        return False
+    if str(row.get("action") or "").strip() != "skipped-api-preflight-state":
+        return False
+    approve_error = str(row.get("approve_error") or "")
+    return "not-found-in-pending" in approve_error
+
+
+def _select_confirm_candidates_from_export(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """挑出已批但列表确认仍待延后的行；默认等满平台约 10 分钟刷新窗口。"""
+    current_time = now or datetime.now()
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        apply_id = str(row.get("apply_id") or "").strip()
+        if not apply_id:
+            continue
+        approve_status = str(row.get("approve_status") or "").strip()
+        confirmation = str(row.get("approve_confirmation") or "").strip()
+        if approve_status not in {"approved", "unknown"} and not _looks_like_already_approved_skip(row):
+            continue
+        if confirmation == "confirmed":
+            continue
+        if str(row.get("feishu_status") or "").strip() in {"created", "duplicate"}:
+            continue
+        approved_at = _parse_approved_at(row.get("approved_at"))
+        if (
+            not force
+            and approved_at is not None
+            and (current_time - approved_at).total_seconds()
+            < PLATFORM_STATUS_LAG_MINUTES * 60
+        ):
+            row["approve_confirmation"] = "waiting-platform-lag"
+            continue
+        candidates.append(row)
+    return candidates
+
+
+def decide_api_approval_outcome(
+    *,
+    approve_result: dict[str, Any],
+    approve_exception: Exception | None = None,
+    pending_recheck: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """根据批准 API 写结果判定，不等待「待发货」列表刷新。
+
+    平台联盟中心列表大约 10 分钟后才会从待审核转到待发货。
+    写接口 ``success_count=1`` 即视为批准成功；只有写失败且仍待审核
+    才判失败。超时/身份不一致等才标 unknown。
+    """
+    write_accepted = bool(approve_result.get("ok")) and approve_exception is None
+    if write_accepted:
+        return {
+            "approve_status": "approved",
+            "action": "approved",
+            "approve_confirmation": "deferred",
+            "stop_round": False,
+        }
+
+    pending_state = str((pending_recheck or {}).get("state") or "")
+    if pending_state == "pending-approvable":
+        return {
+            "approve_status": "failed",
+            "action": "approve-failed",
+            "approve_confirmation": "still-pending",
+            "stop_round": True,
+        }
+    if pending_state == "identity-mismatch":
+        return {
+            "approve_status": "unknown",
+            "action": "approve-unknown",
+            "approve_confirmation": "identity-mismatch",
+            "stop_round": True,
+        }
+    return {
+        "approve_status": "unknown",
+        "action": "approve-unknown",
+        "approve_confirmation": pending_state or "write-uncertain",
+        "stop_round": True,
+    }
 
 
 def _write_backup(rows: list[dict[str, Any]], prefix: Path) -> dict[str, Path]:
@@ -336,19 +465,27 @@ def _run_execute_pipeline(
         if approve_exception is not None and not approval_attempt_started:
             continue
 
-        postcheck_status: dict[str, Any] | None = None
-        postcheck_error = ""
+        pending_recheck: dict[str, Any] | None = None
+        pending_recheck_error = ""
+        write_accepted = bool(approve_result.get("ok")) and approve_exception is None
         if write_source == "api":
-            try:
-                postcheck_status = confirm_application_approved_api(
-                    store_id,
-                    apply_id,
-                    expected_creator_id=str(row.get("creator_id") or ""),
-                    expected_product_id=str(row.get("product_id") or ""),
-                )
-            except Exception as error:
-                postcheck_error = str(error)
+            if not write_accepted:
+                try:
+                    pending_recheck = check_pending_application_api(
+                        store_id,
+                        apply_id,
+                        expected_creator_id=str(row.get("creator_id") or ""),
+                        expected_product_id=str(row.get("product_id") or ""),
+                    )
+                except Exception as error:
+                    pending_recheck_error = str(error)
+            outcome = decide_api_approval_outcome(
+                approve_result=approve_result,
+                approve_exception=approve_exception,
+                pending_recheck=pending_recheck,
+            )
         else:
+            postcheck_status: dict[str, Any] | None = None
             for postcheck_attempt in range(2):
                 try:
                     postcheck_status = check_pending_application_api(
@@ -357,10 +494,10 @@ def _run_execute_pipeline(
                         expected_creator_id=str(row.get("creator_id") or ""),
                         expected_product_id=str(row.get("product_id") or ""),
                     )
-                    postcheck_error = ""
+                    pending_recheck_error = ""
                 except Exception as error:
                     postcheck_status = None
-                    postcheck_error = str(error)
+                    pending_recheck_error = str(error)
 
                 if (
                     postcheck_status
@@ -370,62 +507,43 @@ def _run_execute_pipeline(
                     break
                 if postcheck_attempt == 0:
                     time.sleep(1.0)
-
-        row["approve_postcheck"] = postcheck_status or {
-            "ok": False,
-            "state": "verification-error",
-            "error": postcheck_error,
-        }
-        if write_source == "api":
-            approval_is_confirmed = bool(
-                postcheck_status
-                and postcheck_status.get("ok")
-                and postcheck_status.get("state") == "approved"
-            )
-            approval_is_confirmed_failed = bool(
-                postcheck_status
-                and postcheck_status.get("state") == "still-pending"
-                and (approve_exception is not None or not approve_result.get("ok"))
-            )
-        else:
-            approval_is_confirmed = bool(
+            pending_recheck = postcheck_status
+            if write_accepted or (
                 postcheck_status
                 and postcheck_status.get("ok")
                 and postcheck_status.get("state") == "not-found-in-pending"
-            )
-            approval_is_confirmed_failed = bool(
+            ):
+                outcome = {
+                    "approve_status": "approved",
+                    "action": "approved",
+                    "approve_confirmation": "deferred",
+                    "stop_round": False,
+                }
+            elif (
                 postcheck_status
                 and postcheck_status.get("ok")
                 and postcheck_status.get("state") == "pending-approvable"
-                and (approve_exception is not None or not approve_result.get("ok"))
-            )
-        if approval_is_confirmed_failed:
-            row["approve_status"] = "failed"
-            row["approve_error"] = (
-                str(approve_exception)
-                if approve_exception is not None
-                else approve_result.get("error") or str(approve_result)
-            )
-            row["action"] = "approve-failed"
-            row["approve_detail"] = approve_result
-            print(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
-            print("    已停止本轮，禁止自动改试下一条申请。")
-            break
-        if not approval_is_confirmed:
-            row["approve_status"] = "unknown"
-            row["approve_error"] = (
-                f"{write_source} 批准后无法通过只读 API 确认批准状态；"
-                "禁止重试及写飞书"
-            )
-            row["action"] = "approve-unknown"
-            print(
-                "    批准状态未知：已停止本轮，禁止自动重试；"
-                "请根据导出 approve_postcheck 人工核对。"
-            )
-            break
+            ):
+                outcome = {
+                    "approve_status": "failed",
+                    "action": "approve-failed",
+                    "approve_confirmation": "still-pending",
+                    "stop_round": True,
+                }
+            else:
+                outcome = {
+                    "approve_status": "unknown",
+                    "action": "approve-unknown",
+                    "approve_confirmation": "write-uncertain",
+                    "stop_round": True,
+                }
 
-        row["approve_status"] = "approved"
-        row["action"] = "approved"
+        row["approve_pending_recheck"] = pending_recheck or {
+            "ok": False,
+            "state": "skipped" if write_accepted else "verification-error",
+            "error": pending_recheck_error,
+        }
+        row["approve_confirmation"] = outcome["approve_confirmation"]
         if write_source == "api":
             row["approve_detail"] = {
                 "write_source": "api",
@@ -441,12 +559,43 @@ def _run_execute_pipeline(
                     for step in (approve_result.get("steps") or [])
                 ],
             }
+
+        if outcome["approve_status"] == "failed":
+            row["approve_status"] = "failed"
+            row["approve_error"] = (
+                str(approve_exception)
+                if approve_exception is not None
+                else approve_result.get("error") or str(approve_result)
+            )
+            row["action"] = "approve-failed"
+            print(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
+            print("    已停止本轮，禁止自动改试下一条申请。")
+            break
+        if outcome["approve_status"] != "approved":
+            row["approve_status"] = "unknown"
+            row["approve_error"] = (
+                f"{write_source} 批准写结果不确定；禁止重试及写飞书"
+            )
+            row["action"] = "approve-unknown"
+            print(
+                "    批准状态未知：已停止本轮，禁止自动重试；"
+                "请根据导出 approve_pending_recheck 人工核对。"
+            )
+            break
+
+        row["approve_status"] = "approved"
+        row["action"] = "approved"
+        row["approved_at"] = datetime.now().isoformat(timespec="seconds")
         approval_note = approve_result.get("note") or (
-            "postcheck-confirmed-after-exception"
-            if approve_exception is not None
-            else "postcheck-confirmed"
+            "write-accepted"
+            if write_source == "api"
+            else "dom-accepted"
         )
-        print(f"    批准成功 note={approval_note}")
+        print(
+            f"    批准成功 note={approval_note}；"
+            f"平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新，"
+            "列表确认已延后"
+        )
         processed += 1
 
         if not write_feishu or not bitable_token:
@@ -489,6 +638,153 @@ def _run_execute_pipeline(
             f"[回退提示] 本轮新建飞书 record_id: {', '.join(feishu_created_ids)}；"
             f"如需撤销可调用 delete_record / 在表中删除"
         )
+    return candidates
+
+
+def _run_confirm_pipeline(
+    *,
+    store_id: str,
+    candidates: list[dict[str, Any]],
+    hero_data: dict[str, Any] | None,
+    write_feishu: bool,
+    execute_limit: int,
+    config_path: str | None,
+) -> list[dict[str, Any]]:
+    """延后确认平台列表是否已转入待发货；可选补写飞书。"""
+    product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
+    sample_options: list[str] = []
+    bitable_token: str | None = None
+    app_token = DEFAULT_APP_TOKEN
+    table_id = DEFAULT_TABLE_ID
+
+    if write_feishu:
+        try:
+            from lib.app_config import load_bitable_settings
+
+            bitable_settings = load_bitable_settings(
+                config_path=config_path,
+                default_app_token=DEFAULT_APP_TOKEN,
+                default_table_id=DEFAULT_TABLE_ID,
+                default_view_id=DEFAULT_VIEW_ID,
+            )
+            app_token = bitable_settings.get("app_token") or DEFAULT_APP_TOKEN
+            table_id = bitable_settings.get("table_id") or DEFAULT_TABLE_ID
+            bitable_token = get_bitable_access_token(config_path=config_path)
+            sample_options = list_sample_product_options(
+                bitable_token,
+                app_token=app_token,
+                table_id=table_id,
+            )
+            print(
+                f"[飞书] 延后确认可补写 table={table_id} "
+                f"寄样产品选项={len(sample_options)} 个"
+            )
+        except (FeishuBitableError, Exception) as error:
+            print(f"[飞书] 初始化失败，将只确认不写表: {error}", file=sys.stderr)
+            write_feishu = False
+
+    limit = execute_limit if execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
+    processed = 0
+    for row in candidates:
+        if processed >= limit:
+            row["approve_confirmation"] = "skipped-limit"
+            continue
+
+        apply_id = str(row.get("apply_id") or "").strip()
+        creator_name = str(row.get("creator_name") or "").strip()
+        print(f"  [延后确认] {creator_name} apply={apply_id}")
+        try:
+            confirmation = confirm_application_approved_api(
+                store_id,
+                apply_id,
+                expected_creator_id=str(row.get("creator_id") or ""),
+                expected_product_id=str(row.get("product_id") or ""),
+                max_attempts=1,
+            )
+        except Exception as error:
+            row["approve_confirmation"] = "error"
+            row["approve_postcheck"] = {"ok": False, "error": str(error)}
+            print(f"    列表确认失败: {error}")
+            continue
+
+        row["approve_postcheck"] = confirmation
+        if confirmation.get("state") == "approved":
+            row["approve_status"] = "approved"
+            row["approve_confirmation"] = "confirmed"
+            row["approve_error"] = ""
+            print("    平台列表已转入待发货")
+            processed += 1
+        elif confirmation.get("state") == "still-pending":
+            row["approve_confirmation"] = "still-pending"
+            print("    仍在待审核；请人工核对，不自动重批")
+            processed += 1
+            continue
+        else:
+            row["approve_confirmation"] = str(confirmation.get("state") or "unknown")
+            print(
+                f"    列表仍未确认 state={row['approve_confirmation']}；"
+                "不改写批准结论，也不自动重批"
+            )
+            processed += 1
+            continue
+
+        already_written = row.get("feishu_status") in {"created", "approved+feishu"}
+        if not write_feishu or not bitable_token or already_written:
+            continue
+
+        product_resolve = resolve_sample_product_for_row(
+            row,
+            product_id_to_sku=product_id_to_sku,
+            sample_product_options=sample_options
+            or list(product_id_to_sku.values()),
+        )
+        if sample_options:
+            product_resolve = resolve_sample_product_for_row(
+                row,
+                product_id_to_sku=product_id_to_sku,
+                sample_product_options=sample_options,
+            )
+        if not product_resolve.get("ok"):
+            row["feishu_status"] = "skipped"
+            row["feishu_error"] = product_resolve.get("reason")
+            print(f"    飞书补写跳过: {product_resolve.get('reason')}")
+            continue
+        try:
+            dup = find_duplicate_record(
+                bitable_token,
+                creator_handle=creator_name,
+                sample_product=str(product_resolve.get("option")),
+                app_token=app_token,
+                table_id=table_id,
+            )
+        except FeishuBitableError as error:
+            row["feishu_status"] = "error"
+            row["feishu_error"] = f"查重失败: {error}"
+            print(f"    飞书补写查重失败: {error}")
+            continue
+        if dup:
+            row["feishu_status"] = "duplicate"
+            row["feishu_record_id"] = dup.get("record_id")
+            print(f"    飞书已存在 record={dup.get('record_id')}")
+            continue
+        try:
+            created = create_creator_relation_record(
+                bitable_token,
+                creator_handle=creator_name,
+                followers_raw=format_followers_raw(row),
+                fulfillment_raw=format_fulfillment_raw(row),
+                sample_product=str(product_resolve.get("option")),
+                app_token=app_token,
+                table_id=table_id,
+            )
+            row["feishu_status"] = "created"
+            row["feishu_record_id"] = created.get("record_id")
+            row["action"] = "approved+feishu"
+            print(f"    飞书补写成功 record_id={created.get('record_id')}")
+        except FeishuBitableError as error:
+            row["feishu_status"] = "error"
+            row["feishu_error"] = str(error)
+            print(f"    飞书补写失败: {error}", file=sys.stderr)
     return candidates
 
 
@@ -571,6 +867,25 @@ def main() -> int:
     ap.add_argument("--eligible-only", action="store_true")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument(
+        "--from-export",
+        type=Path,
+        default=None,
+        help="用已有筛查导出 json 直接批准；不再扫表/拉详情（须同时 --execute --yes）",
+    )
+    ap.add_argument(
+        "--confirm-export",
+        action="store_true",
+        help=(
+            "只对 --from-export 里已批行做延后列表确认（默认等满约 "
+            f"{PLATFORM_STATUS_LAG_MINUTES} 分钟）；不重新批准"
+        ),
+    )
+    ap.add_argument(
+        "--force-confirm",
+        action="store_true",
+        help="延后确认时忽略平台约 10 分钟刷新窗口",
+    )
+    ap.add_argument(
         "--execute",
         action="store_true",
         help="危险：对筛查通过行批准（默认调用 API；须同时 --yes；默认仍只导出）",
@@ -621,14 +936,33 @@ def main() -> int:
     if args.from_seller_home and not str(args.store_id or "").strip():
         print("--from-seller-home 必须显式传 --store-id，避免导航错误店铺", file=sys.stderr)
         return 2
+    if args.confirm_export and not args.from_export:
+        print("--confirm-export 必须配合 --from-export", file=sys.stderr)
+        return 2
+    if args.confirm_export and args.execute:
+        print("--confirm-export 只做延后确认，不能同时 --execute", file=sys.stderr)
+        return 2
+    if args.from_export and not args.execute and not args.confirm_export:
+        print(
+            "--from-export 仅用于批准或延后确认；"
+            "请加 --execute --yes，或改用 --confirm-export",
+            file=sys.stderr,
+        )
+        return 2
+    if args.from_export and args.observe_approve_network:
+        print("--from-export 不支持 --observe-approve-network", file=sys.stderr)
+        return 2
+    if args.force_confirm and not args.confirm_export:
+        print("--force-confirm 仅适用于 --confirm-export", file=sys.stderr)
+        return 2
     if args.execute and not args.yes:
         print(
             "将真实点击「同意」。确认请加 --yes，或去掉 --execute 做只读筛查。",
             file=sys.stderr,
         )
         return 2
-    if args.write_feishu and not args.execute:
-        print("--write-feishu 仅在 --execute --yes 时有效", file=sys.stderr)
+    if args.write_feishu and not args.execute and not args.confirm_export:
+        print("--write-feishu 仅在 --execute --yes 或 --confirm-export 时有效", file=sys.stderr)
         return 2
     if args.observe_approve_network and not args.execute:
         print("--observe-approve-network 仅在 --execute --yes 时有效", file=sys.stderr)
@@ -647,20 +981,39 @@ def main() -> int:
         )
         return 2
 
-    mode = "EXECUTE" if args.execute else "DRY-RUN/只读导出"
+    if args.confirm_export:
+        mode = "CONFIRM"
+    elif args.execute:
+        mode = "EXECUTE"
+    else:
+        mode = "DRY-RUN/只读导出"
     print("=" * 60)
     print(f"样品申请筛查 | 模式={mode}")
-    if args.execute:
+    if args.confirm_export:
+        limit_show = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
+        print(
+            f"  延后确认: 开 | limit={limit_show} | "
+            f"写飞书={'开' if args.write_feishu else '关（测试默认）'} | "
+            f"强制忽略等待={'开' if args.force_confirm else '关'}"
+        )
+        print(
+            f"  说明: 不重新批准；平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新"
+        )
+        print(f"  输入: 复用导出 {args.from_export}")
+    elif args.execute:
         limit_show = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
         print(
             f"  批准: 开 | limit={limit_show} | "
             f"写入路径={args.write_source} | "
             f"写飞书={'开' if args.write_feishu else '关（测试默认）'}"
         )
-        print("  顺序: 同意成功 → 再写飞书；去重命中/货号无法映射 → 整单跳过")
+        print("  顺序: 写接口接受即视为同意成功 → 再写飞书；列表确认延后")
+        if args.from_export:
+            print(f"  输入: 复用导出 {args.from_export}（跳过扫表/详情）")
     else:
         print("  默认只读导出 | **未**启用同意")
-    print(f"  列表和筛查详情数据源: {args.data_source}")
+    if not args.from_export:
+        print(f"  列表和筛查详情数据源: {args.data_source}")
     print("主推表来源: 飞书云文档（不再使用本地 xlsx）")
     if args.from_seller_home:
         print("前提：目标店已登录，并停在 TikTok Shop 商家中心首页")
@@ -750,186 +1103,215 @@ def main() -> int:
             )
 
     criteria = Criteria(require_hero_sku=not args.skip_hero_check)
-
     t0 = time.time()
-    try:
-        pending_result = load_pending_rows(
-            store_id,
-            data_source=args.data_source,
-            max_pages=args.max_pages,
-            max_rows=args.max_rows,
-            page_wait=args.page_wait,
-        )
-        raw_rows = pending_result.rows
-    except Exception as e:
-        print(f"扫表失败: {e}", file=sys.stderr)
-        return 1
-
-    print(f"[数据源] 实际使用={pending_result.source_used}")
-    if pending_result.fallback_reason:
-        print(f"[数据源] fallback={pending_result.fallback_reason}")
-
-    if not raw_rows:
-        print("未读到待审核行", file=sys.stderr)
-        return 1
-
-    list_href = (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "") if raw_rows else ""
-
-    # 先做列表层初筛，并保留阶段结果供后续导出。初筛淘汰者不会因为未拉详情，
-    # 被追加“缺少达人详情”等与其实际淘汰原因无关的终筛失败。
-    pre = [
-        evaluate_row(
-            r,
-            criteria=criteria,
-            hero_keys=hero_keys,
-            skip_hero_check=args.skip_hero_check,
-            require_detail=False,
-        )
-        for r in raw_rows
-    ]
-    for row in pre:
-        initial_failure_reason = "; ".join(row.get("fail_reasons") or [])
-        row["initial_screen_eligible"] = bool(row.get("eligible"))
-        row["initial_screen_failure_reason"] = initial_failure_reason
-        if row["initial_screen_eligible"]:
-            row["screening_stage"] = "初筛通过，待详情复筛"
-        else:
-            row["screening_stage"] = "初筛淘汰"
-            row["reason"] = f"初筛淘汰：{initial_failure_reason}"
-
-    # 详情：只读
-    need_detail = args.with_detail or args.detail_all or args.require_detail
+    pending_result = None
+    raw_rows: list[dict[str, Any]] = []
+    pre: list[dict[str, Any]] = []
     detail_targets: list[dict] = []
     detail_shadow_reports: list[dict[str, Any]] = []
     strict_api_detail_failure_count = 0
-    if need_detail:
-        if args.detail_all:
-            detail_targets = list(pre)
-        else:
-            # 列表层已过的再拉详情（禁止 --detail-limit 截断；要限量用 --max-rows）
-            detail_targets = [x for x in pre if x.get("eligible")]
-        print(f"--- 拉详情(只读) 目标 {len(detail_targets)} 人 ---")
 
-        by_key = {
-            (x.get("apply_id") or x.get("creator_name")): x for x in pre
-        }
-        for i, target in enumerate(detail_targets, 1):
-            key = target.get("apply_id") or target.get("creator_name")
-            print(
-                f"  [{i}/{len(detail_targets)}] 详情 {target.get('creator_name')} "
-                f"cid={target.get('creator_id')} …"
+    if args.from_export:
+        try:
+            pre = _load_export_rows(args.from_export)
+        except Exception as error:
+            print(f"读取导出失败: {error}", file=sys.stderr)
+            return 2
+        if not pre:
+            print("导出没有可用行", file=sys.stderr)
+            return 1
+        raw_rows = pre
+        print(
+            f"[输入] 导出 {args.from_export} → {len(pre)} 行；"
+            + (
+                "跳过扫表和详情，仅做延后列表确认"
+                if args.confirm_export
+                else "跳过扫表和详情，仅对通过行做批准前状态预检"
             )
-            # 合并 raw 字段给 fetch
-            src = next(
-                (
-                    r
-                    for r in raw_rows
-                    if str(r.get("apply_id")) == str(target.get("apply_id"))
-                    or r.get("creator_name") == target.get("creator_name")
-                ),
-                target,
+        )
+        if args.with_detail or args.detail_all or args.require_detail:
+            print("[输入] --from-export 已忽略 --with-detail / --detail-all / --require-detail")
+    else:
+        try:
+            pending_result = load_pending_rows(
+                store_id,
+                data_source=args.data_source,
+                max_pages=args.max_pages,
+                max_rows=args.max_rows,
+                page_wait=args.page_wait,
             )
-            try:
-                detail_result = load_creator_detail(
-                    store_id,
-                    src,
-                    data_source=args.data_source,
-                    list_href=list_href,
-                    wait=max(3.5, args.page_wait + 1.5),
-                )
-                res = detail_result.result
-            except Exception as e:
-                print(f"    失败: {e}")
-                target["detail_error"] = str(e)
-                if args.data_source == "api":
-                    strict_api_detail_failure_count += 1
-                continue
-            print(f"    详情数据源={detail_result.source_used}")
-            if detail_result.shadow_report:
-                detail_shadow_reports.append(detail_result.shadow_report)
-            if not res.get("ok"):
-                print(f"    失败: {res.get('error')}")
-                target["detail_error"] = res.get("error")
-                if args.data_source == "api":
-                    strict_api_detail_failure_count += 1
-            else:
-                d = res["detail"]
-                print(
-                    f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
-                    f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
-                    f"type={d.get('creator_type')}"
-                )
-                # 写回 pre 行
-                row = by_key.get(key) or target
-                for k in (
-                    "video_gpm",
-                    "live_gpm",
-                    "avg_video_views",
-                    "video_engagement",
-                    "avg_live_views",
-                    "live_engagement",
-                    "est_post_rate",
-                    "overall_gpm",
-                    "revenue_per_buyer",
-                    "creator_type",
-                    "video_gpm_n",
-                    "live_gpm_n",
-                    "avg_video_views_n",
-                    "avg_live_views_n",
-                    "video_engagement_n",
-                    "live_engagement_n",
-                    "overall_gpm_n",
-                    "aov_detail_n",
-                    "est_post_rate_n",
-                    "has_cn_video_card",
-                    "has_en_video_card",
-                    "extract_via",
-                    "text_head",
-                    "profile_type_field_counts",
-                    "_detail_data_source",
-                    "_detail_fallback_reason",
-                ):
-                    if k in d:
-                        row[k] = d[k]
-                row["detail_checked"] = True
-                if not d.get("video_gpm") and not d.get("live_gpm"):
-                    print(
-                        f"    警告: 视频/直播GPM仍为空 "
-                        f"cn_card={d.get('has_cn_video_card')} "
-                        f"en_card={d.get('has_en_video_card')} "
-                        f"overall={d.get('overall_gpm')} "
-                        f"via={d.get('extract_via')}"
-                    )
-            if args.detail_delay:
-                time.sleep(args.detail_delay)
+            raw_rows = pending_result.rows
+        except Exception as e:
+            print(f"扫表失败: {e}", file=sys.stderr)
+            return 1
 
-        # 带详情重判。只有初筛通过者才要求详情指标；初筛淘汰者保留原始原因，
-        # 避免导出出现并未获取详情所产生的额外 failure。
-        reevaluated_rows: list[dict[str, Any]] = []
-        for row in pre:
-            if not row.get("initial_screen_eligible"):
-                reevaluated_rows.append(row)
-                continue
+        print(f"[数据源] 实际使用={pending_result.source_used}")
+        if pending_result.fallback_reason:
+            print(f"[数据源] fallback={pending_result.fallback_reason}")
 
-            reevaluated_row = evaluate_row(
-                row,
+        if not raw_rows:
+            print("未读到待审核行", file=sys.stderr)
+            return 1
+
+    if not args.from_export:
+        list_href = (
+            (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "")
+            if raw_rows
+            else ""
+        )
+
+        # 先做列表层初筛，并保留阶段结果供后续导出。初筛淘汰者不会因为未拉详情，
+        # 被追加“缺少达人详情”等与其实际淘汰原因无关的终筛失败。
+        pre = [
+            evaluate_row(
+                r,
                 criteria=criteria,
                 hero_keys=hero_keys,
                 skip_hero_check=args.skip_hero_check,
-                require_detail=args.require_detail,
+                require_detail=False,
             )
-            reevaluated_row["initial_screen_eligible"] = True
-            reevaluated_row["initial_screen_failure_reason"] = ""
-            if reevaluated_row.get("eligible"):
-                reevaluated_row["screening_stage"] = "终筛通过"
+            for r in raw_rows
+        ]
+        for row in pre:
+            initial_failure_reason = "; ".join(row.get("fail_reasons") or [])
+            row["initial_screen_eligible"] = bool(row.get("eligible"))
+            row["initial_screen_failure_reason"] = initial_failure_reason
+            if row["initial_screen_eligible"]:
+                row["screening_stage"] = "初筛通过，待详情复筛"
             else:
-                reevaluated_row["screening_stage"] = "详情复筛淘汰"
-                final_failure_reason = "; ".join(
-                    reevaluated_row.get("fail_reasons") or []
+                row["screening_stage"] = "初筛淘汰"
+                row["reason"] = f"初筛淘汰：{initial_failure_reason}"
+
+        # 详情：只读
+        need_detail = args.with_detail or args.detail_all or args.require_detail
+        if need_detail:
+            if args.detail_all:
+                detail_targets = list(pre)
+            else:
+                # 列表层已过的再拉详情（禁止 --detail-limit 截断；要限量用 --max-rows）
+                detail_targets = [x for x in pre if x.get("eligible")]
+            print(f"--- 拉详情(只读) 目标 {len(detail_targets)} 人 ---")
+
+            by_key = {
+                (x.get("apply_id") or x.get("creator_name")): x for x in pre
+            }
+            for i, target in enumerate(detail_targets, 1):
+                key = target.get("apply_id") or target.get("creator_name")
+                print(
+                    f"  [{i}/{len(detail_targets)}] 详情 {target.get('creator_name')} "
+                    f"cid={target.get('creator_id')} …"
                 )
-                reevaluated_row["reason"] = f"详情复筛淘汰：{final_failure_reason}"
-            reevaluated_rows.append(reevaluated_row)
-        pre = reevaluated_rows
+                # 合并 raw 字段给 fetch
+                src = next(
+                    (
+                        r
+                        for r in raw_rows
+                        if str(r.get("apply_id")) == str(target.get("apply_id"))
+                        or r.get("creator_name") == target.get("creator_name")
+                    ),
+                    target,
+                )
+                try:
+                    detail_result = load_creator_detail(
+                        store_id,
+                        src,
+                        data_source=args.data_source,
+                        list_href=list_href,
+                        wait=max(3.5, args.page_wait + 1.5),
+                    )
+                    res = detail_result.result
+                except Exception as e:
+                    print(f"    失败: {e}")
+                    target["detail_error"] = str(e)
+                    if args.data_source == "api":
+                        strict_api_detail_failure_count += 1
+                    continue
+                print(f"    详情数据源={detail_result.source_used}")
+                if detail_result.shadow_report:
+                    detail_shadow_reports.append(detail_result.shadow_report)
+                if not res.get("ok"):
+                    print(f"    失败: {res.get('error')}")
+                    target["detail_error"] = res.get("error")
+                    if args.data_source == "api":
+                        strict_api_detail_failure_count += 1
+                else:
+                    d = res["detail"]
+                    print(
+                        f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
+                        f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
+                        f"type={d.get('creator_type')}"
+                    )
+                    # 写回 pre 行
+                    row = by_key.get(key) or target
+                    for k in (
+                        "video_gpm",
+                        "live_gpm",
+                        "avg_video_views",
+                        "video_engagement",
+                        "avg_live_views",
+                        "live_engagement",
+                        "est_post_rate",
+                        "overall_gpm",
+                        "revenue_per_buyer",
+                        "creator_type",
+                        "video_gpm_n",
+                        "live_gpm_n",
+                        "avg_video_views_n",
+                        "avg_live_views_n",
+                        "video_engagement_n",
+                        "live_engagement_n",
+                        "overall_gpm_n",
+                        "aov_detail_n",
+                        "est_post_rate_n",
+                        "has_cn_video_card",
+                        "has_en_video_card",
+                        "extract_via",
+                        "text_head",
+                        "profile_type_field_counts",
+                        "_detail_data_source",
+                        "_detail_fallback_reason",
+                    ):
+                        if k in d:
+                            row[k] = d[k]
+                    row["detail_checked"] = True
+                    if not d.get("video_gpm") and not d.get("live_gpm"):
+                        print(
+                            f"    警告: 视频/直播GPM仍为空 "
+                            f"cn_card={d.get('has_cn_video_card')} "
+                            f"en_card={d.get('has_en_video_card')} "
+                            f"overall={d.get('overall_gpm')} "
+                            f"via={d.get('extract_via')}"
+                        )
+                if args.detail_delay:
+                    time.sleep(args.detail_delay)
+
+            # 带详情重判。只有初筛通过者才要求详情指标；初筛淘汰者保留原始原因，
+            # 避免导出出现并未获取详情所产生的额外 failure。
+            reevaluated_rows: list[dict[str, Any]] = []
+            for row in pre:
+                if not row.get("initial_screen_eligible"):
+                    reevaluated_rows.append(row)
+                    continue
+
+                reevaluated_row = evaluate_row(
+                    row,
+                    criteria=criteria,
+                    hero_keys=hero_keys,
+                    skip_hero_check=args.skip_hero_check,
+                    require_detail=args.require_detail,
+                )
+                reevaluated_row["initial_screen_eligible"] = True
+                reevaluated_row["initial_screen_failure_reason"] = ""
+                if reevaluated_row.get("eligible"):
+                    reevaluated_row["screening_stage"] = "终筛通过"
+                else:
+                    reevaluated_row["screening_stage"] = "详情复筛淘汰"
+                    final_failure_reason = "; ".join(
+                        reevaluated_row.get("fail_reasons") or []
+                    )
+                    reevaluated_row["reason"] = f"详情复筛淘汰：{final_failure_reason}"
+                reevaluated_rows.append(reevaluated_row)
+            pre = reevaluated_rows
 
     passed = [x for x in pre if x.get("eligible")]
     print(
@@ -948,7 +1330,7 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_prefix = args.out or (ROOT / "exports" / f"sample_screen_{ts}")
 
-    if pending_result.shadow_report:
+    if pending_result and pending_result.shadow_report:
         pending_result.shadow_report["detail_reports"] = detail_shadow_reports
         pending_result.shadow_report["detail_summary"] = {
             "count": len(detail_shadow_reports),
@@ -986,7 +1368,24 @@ def main() -> int:
         )
         print(f"[shadow] 差异报告: {shadow_path}")
 
-    if args.execute:
+    if args.confirm_export:
+        candidates = _select_confirm_candidates_from_export(
+            pre,
+            force=bool(args.force_confirm),
+        )
+        print(
+            f"--- CONFIRM 目标 {len(candidates)}"
+            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---"
+        )
+        _run_confirm_pipeline(
+            store_id=store_id,
+            candidates=candidates,
+            hero_data=hero_data,
+            write_feishu=bool(args.write_feishu),
+            execute_limit=args.execute_limit,
+            config_path=args.config,
+        )
+    elif args.execute:
         # 批准前备份（可回看筛查结果；平台侧「同意」不可自动撤销）
         if not args.no_pre_backup:
             backup_paths = _write_backup(pre, out_prefix)
@@ -1008,8 +1407,14 @@ def main() -> int:
             if not row.get("fulfillment_rate") and source.get("fulfillment_rate") is not None:
                 row["fulfillment_rate"] = source.get("fulfillment_rate")
 
-        candidates = [row for row in pre if row.get("eligible")]
-        print(f"--- EXECUTE 目标通过行 {len(candidates)}（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---")
+        if args.from_export:
+            candidates = _select_execute_candidates_from_export(pre)
+        else:
+            candidates = [row for row in pre if row.get("eligible")]
+        print(
+            f"--- EXECUTE 目标通过行 {len(candidates)}"
+            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---"
+        )
         _run_execute_pipeline(
             store_id=store_id,
             candidates=candidates,
@@ -1042,7 +1447,15 @@ def main() -> int:
     print("--- 导出 ---")
     for key, path in paths.items():
         print(f"  {key}: {path}")
-    if args.execute:
+    if args.confirm_export:
+        confirmed_count = sum(
+            1 for row in pre if row.get("approve_confirmation") == "confirmed"
+        )
+        print(
+            f"完成。模式=CONFIRM 列表已确认={confirmed_count} "
+            f"写飞书={'开' if args.write_feishu else '关'}。"
+        )
+    elif args.execute:
         approved_count = sum(1 for row in pre if row.get("approve_status") == "approved")
         print(
             f"完成。模式=EXECUTE 批准成功={approved_count} "
@@ -1050,6 +1463,8 @@ def main() -> int:
         )
         print(
             "回退：平台「同意」无法脚本撤销；飞书新建行见导出列 feishu_record_id / 控制台提示。"
+            f"「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新，"
+            "可用 --confirm-export 延后核对。"
         )
     else:
         print("完成。未执行任何同意/批准/拒绝操作。")

@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from screen_sample_requests import _run_execute_pipeline  # noqa: E402
+from screen_sample_requests import (  # noqa: E402
+    _run_execute_pipeline,
+    _select_confirm_candidates_from_export,
+    _select_execute_candidates_from_export,
+    decide_api_approval_outcome,
+)
 
 
 def build_candidate() -> dict:
@@ -64,7 +70,7 @@ class ExecuteSafetyTests(unittest.TestCase):
     @patch("screen_sample_requests.ensure_store_exec_ready")
     @patch("screen_sample_requests.check_pending_application_api")
     @patch("screen_sample_requests.click_approve_for_apply_id")
-    def test_unknown_postcheck_stops_without_confirming_approval(
+    def test_dom_click_accepted_does_not_wait_for_list_refresh(
         self,
         click_approve,
         check_pending,
@@ -99,9 +105,9 @@ class ExecuteSafetyTests(unittest.TestCase):
 
         ensure_ready.assert_called_once()
         click_approve.assert_called_once()
-        self.assertEqual(candidate["approve_status"], "unknown")
-        self.assertEqual(candidate["action"], "approve-unknown")
-        self.assertEqual(candidate["approve_postcheck"]["state"], "verification-error")
+        self.assertEqual(candidate["approve_status"], "approved")
+        self.assertEqual(candidate["action"], "approved")
+        self.assertEqual(candidate["approve_confirmation"], "deferred")
 
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.ensure_store_exec_ready")
@@ -168,10 +174,6 @@ class ExecuteSafetyTests(unittest.TestCase):
             "state": "pending-approvable",
             "curr_status": 10,
         }
-        confirm_approved.return_value = {
-            "ok": False,
-            "state": "still-pending",
-        }
         approve_api.side_effect = RuntimeError(
             "批准 API 只接受待审核状态 status_type=10/11，实际为 10"
         )
@@ -194,8 +196,108 @@ class ExecuteSafetyTests(unittest.TestCase):
         )
 
         approve_api.assert_called_once()
+        confirm_approved.assert_not_called()
+        self.assertEqual(check_pending.call_count, 2)
         self.assertEqual(first["approve_status"], "failed")
         self.assertNotIn("approve_status", second)
+
+    def test_from_export_skips_approved_and_unknown_rows(self) -> None:
+        rows = [
+            {"eligible": False, "apply_id": "skip-fail", "creator_name": "a"},
+            {
+                "eligible": True,
+                "apply_id": "already-approved",
+                "approve_status": "approved",
+                "creator_name": "b",
+            },
+            {
+                "eligible": True,
+                "apply_id": "unknown-status",
+                "approve_status": "unknown",
+                "creator_name": "c",
+            },
+            {
+                "eligible": True,
+                "apply_id": "ready-to-approve",
+                "approve_status": None,
+                "creator_name": "d",
+            },
+            {
+                "eligible": True,
+                "apply_id": "skipped-limit",
+                "approve_status": "skipped",
+                "creator_name": "e",
+            },
+        ]
+        candidates = _select_execute_candidates_from_export(rows)
+        self.assertEqual(
+            [row["apply_id"] for row in candidates],
+            ["ready-to-approve", "skipped-limit"],
+        )
+
+    def test_api_write_accepted_is_approved_without_ready_to_ship(self) -> None:
+        outcome = decide_api_approval_outcome(
+            approve_result={"ok": True, "state": "action-accepted"},
+            pending_recheck=None,
+        )
+        self.assertEqual(outcome["approve_status"], "approved")
+        self.assertEqual(outcome["approve_confirmation"], "deferred")
+        self.assertFalse(outcome["stop_round"])
+
+    def test_api_write_failed_and_still_pending_is_failed(self) -> None:
+        outcome = decide_api_approval_outcome(
+            approve_result={"ok": False, "state": "action-failed"},
+            pending_recheck={"state": "pending-approvable"},
+        )
+        self.assertEqual(outcome["approve_status"], "failed")
+        self.assertTrue(outcome["stop_round"])
+
+    def test_confirm_export_waits_for_platform_lag(self) -> None:
+        now = datetime(2026, 8, 15, 10, 20, 0)
+        rows = [
+            {
+                "apply_id": "too-soon",
+                "approve_status": "approved",
+                "approved_at": "2026-08-15T10:15:00",
+            },
+            {
+                "apply_id": "ready",
+                "approve_status": "unknown",
+                "approved_at": "2026-08-15T10:05:00",
+            },
+            {
+                "apply_id": "already-confirmed",
+                "approve_status": "approved",
+                "approve_confirmation": "confirmed",
+                "approved_at": "2026-08-15T10:00:00",
+            },
+        ]
+        candidates = _select_confirm_candidates_from_export(rows, now=now)
+        self.assertEqual([row["apply_id"] for row in candidates], ["ready"])
+        self.assertEqual(rows[0]["approve_confirmation"], "waiting-platform-lag")
+
+    def test_confirm_export_includes_skipped_not_found_after_prior_approval(self) -> None:
+        rows = [
+            {
+                "apply_id": "varela-skip",
+                "approve_status": "skipped",
+                "action": "skipped-api-preflight-state",
+                "approve_error": "批准前状态不再可批准: not-found-in-pending",
+            },
+            {
+                "apply_id": "true-skip",
+                "approve_status": "skipped",
+                "action": "skipped-cannot-approve",
+                "approve_error": "can_be_approved=false",
+            },
+            {
+                "apply_id": "already-written",
+                "approve_status": "unknown",
+                "feishu_status": "created",
+            },
+        ]
+        candidates = _select_confirm_candidates_from_export(rows, force=True)
+        self.assertEqual([row["apply_id"] for row in candidates], ["varela-skip"])
 
 
 if __name__ == "__main__":
