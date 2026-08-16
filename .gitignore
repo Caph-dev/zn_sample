@@ -13,5 +13,6 @@ venv/
 
 # 导出与本机杂项（含达人筛查数据，默认不提交）
 exports/
+.exports/
 .DS_Store
 *.log
