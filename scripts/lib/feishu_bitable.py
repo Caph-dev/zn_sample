@@ -445,6 +445,41 @@ def build_shipping_fields(
     }
 
 
+def cooperation_status_unchanged(transition: str) -> bool:
+    """合作状态没有实质变化：已是待发布，或已发布等后续状态保持不动。"""
+    text = str(transition or "").strip()
+    return text == "already-pending-post" or text.startswith("preserved:")
+
+
+def feishu_shipping_already_current(plan: dict[str, Any], tracking_raw: str) -> bool:
+    """单号已一致且合作状态不用改：不要报「飞书已更新」，也不计入写入条数。"""
+    if not cooperation_status_unchanged(str(plan.get("status_transition") or "")):
+        return False
+    current = str(plan.get("current_track") or "").strip()
+    want = str(tracking_raw or "").strip()
+    if not current or not want:
+        return False
+    return current == want or tracking_numbers_equivalent(current, want)
+
+
+def describe_cooperation_transition(transition: str) -> str:
+    """把合作状态机码译成业务员能看懂的中文。"""
+    text = str(transition or "").strip()
+    if text == "already-pending-post":
+        return "合作状态已是「待发布」，不用再改"
+    if text.startswith("preserved:"):
+        current = text.split(":", 1)[1].strip() or "当前值"
+        return f"合作状态保持「{current}」，不回退"
+    if "->" in text:
+        left, right = text.split("->", 1)
+        return f"合作状态：{left} → {right}"
+    if text == "skipped-different-tracking":
+        return "飞书已有不同运单，合作状态未改"
+    if text and text != "not-applicable":
+        return f"合作状态：{text}"
+    return "未改合作状态"
+
+
 def build_product_id_to_sku_map(hero_data: dict[str, Any]) -> dict[str, str]:
     """从 feishu_hero.load_hero_from_feishu 结果构建 product_id → 产品货号。"""
     mapping: dict[str, str] = {}

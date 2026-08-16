@@ -305,12 +305,10 @@ def write_reports(rows: Iterable[dict], out_prefix: Path) -> dict[str, Path]:
     rows = list(rows)
     out_prefix = Path(out_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
-    paths = {
+    return {
         "csv": write_csv(rows, out_prefix.with_suffix(".csv")),
-        "xlsx": write_xlsx(rows, out_prefix.with_suffix(".xlsx")),
         "json": write_json(rows, out_prefix.with_suffix(".json")),
     }
-    return paths
 
 
 def write_generic_reports(

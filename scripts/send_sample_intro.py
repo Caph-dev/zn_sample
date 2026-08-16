@@ -24,7 +24,9 @@ from lib.creator_detail import (  # noqa: E402
     open_creator_detail_by_url,
 )
 from lib.detect_lang import detect_creator_lang  # noqa: E402
+from lib.console import set_verbose  # noqa: E402
 from lib.export_util import resolve_from_export_arg, write_generic_reports  # noqa: E402
+from lib.run_summary import format_job_summary  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
@@ -36,11 +38,12 @@ from lib.feishu_bitable import (  # noqa: E402
 )
 from lib.im_dom import (  # noqa: E402
     fill_or_send_message,
-    inspect_im,
+    inspect_current_thread,
     open_target_conversation,
+    thread_has_named_intro,
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
-from lib.message_templates import intro_message, looks_like_intro  # noqa: E402
+from lib.message_templates import intro_message  # noqa: E402
 from lib.zclaw import resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
@@ -86,6 +89,27 @@ def _load_export_targets(path: Path) -> list[dict[str, Any]]:
     return picked
 
 
+def _filter_targets(
+    rows: list[dict[str, Any]],
+    *,
+    creator_id: str = "",
+    creator_name: str = "",
+) -> list[dict[str, Any]]:
+    """从导出候选里挑指定人。不要用只有名字的空壳覆盖整行（会丢掉 creator_id）。"""
+    wanted_id = str(creator_id or "").strip()
+    wanted_name = str(creator_name or "").strip().lower()
+    if not wanted_id and not wanted_name:
+        return list(rows)
+    picked: list[dict[str, Any]] = []
+    for row in rows:
+        if wanted_id and str(row.get("creator_id") or "").strip() == wanted_id:
+            picked.append(row)
+            continue
+        if wanted_name and str(row.get("creator_name") or "").strip().lower() == wanted_name:
+            picked.append(row)
+    return picked
+
+
 def _detect_from_detail(store_id: str, row: dict[str, Any], *, wait: float) -> dict[str, Any]:
     cid = str(row.get("creator_id") or "").strip()
     name = str(row.get("creator_name") or "").strip()
@@ -100,6 +124,36 @@ def _detect_from_detail(store_id: str, row: dict[str, Any], *, wait: float) -> d
     detected["ok"] = True
     detected["detail_href"] = detail.get("href") or ""
     return detected
+
+
+def _write_feishu_lang(
+    out: dict[str, Any],
+    *,
+    bitable_token: str | None,
+    feishu_lang: str,
+    creator_name: str,
+) -> None:
+    if not bitable_token or not feishu_lang:
+        return
+    try:
+        record_id = str(out.get("feishu_record_id") or "").strip()
+        if not record_id:
+            found = search_relation_records(bitable_token, creator_handle=creator_name)
+            picked = pick_shipping_target(found)
+            record_id = str((picked or {}).get("record_id") or "")
+        if record_id:
+            update_record_fields(
+                bitable_token,
+                record_id,
+                {"使用语言": feishu_lang},
+            )
+            out["feishu_record_id"] = record_id
+            out["feishu_status"] = "lang-updated"
+        else:
+            out["feishu_status"] = "no-record"
+    except FeishuBitableError as error:
+        out["feishu_status"] = "error"
+        out["error"] = str(error)
 
 
 def _open_conversation(store_id: str, row: dict[str, Any], *, wait: float) -> dict[str, Any]:
@@ -123,8 +177,8 @@ def main() -> int:
         default=None,
         help="筛查/批准导出 json；不写路径则用 exports/ 最新一份",
     )
-    parser.add_argument("--creator-id", default=None)
-    parser.add_argument("--creator-name", default=None)
+    parser.add_argument("--creator-id", default=None, help="只处理该达人；配合 --from-export 时从导出里筛，不覆盖行")
+    parser.add_argument("--creator-name", default=None, help="只处理该达人 handle；配合 --from-export 时从导出里筛")
     parser.add_argument("--max-rows", type=int, default=0)
     parser.add_argument("--page-wait", type=float, default=3.0)
     parser.add_argument("--config", default=None)
@@ -144,7 +198,9 @@ def main() -> int:
         help="把识别到的「使用语言」写回达人关系管理(新)",
     )
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    set_verbose(bool(args.verbose))
     try:
         args.from_export = resolve_from_export_arg(args.from_export)
     except FileNotFoundError as error:
@@ -159,7 +215,24 @@ def main() -> int:
     if args.from_export:
         targets = _load_export_targets(args.from_export)
         print(f"[输入] 导出 {args.from_export} → {len(targets)} 条候选")
-    if args.creator_id or args.creator_name:
+        if args.creator_id or args.creator_name:
+            targets = _filter_targets(
+                targets,
+                creator_id=args.creator_id or "",
+                creator_name=args.creator_name or "",
+            )
+            print(
+                f"[过滤] creator_name={args.creator_name or '-'} "
+                f"creator_id={args.creator_id or '-'} → {len(targets)} 条"
+            )
+            if not targets:
+                print(
+                    "导出里没有这个达人。核对 --creator-name / --creator-id，"
+                    "或改用带 creator_id 的筛查/批准 json。",
+                    file=sys.stderr,
+                )
+                return 2
+    elif args.creator_id or args.creator_name:
         targets = [
             {
                 "creator_id": args.creator_id or "",
@@ -242,10 +315,16 @@ def main() -> int:
             click_detail = opened_click.get("click") or {}
         else:
             click_detail = opened_click if isinstance(opened_click, dict) else {}
-        probe = inspect_im(store_id)
-        if looks_like_intro(str(probe.get("text") or "")):
+        probe = inspect_current_thread(store_id, name, wait=args.page_wait)
+        if thread_has_named_intro(probe, name):
             out["send_status"] = "already-sent"
             print(f"    已有介绍话术，跳过")
+            _write_feishu_lang(
+                out,
+                bitable_token=bitable_token,
+                feishu_lang=str(detected.get("feishu_lang") or ""),
+                creator_name=name,
+            )
             results.append(out)
             continue
 
@@ -264,10 +343,12 @@ def main() -> int:
                 )
                 if sent_ret.get("ok"):
                     time.sleep(max(1.5, args.page_wait))
-                    post_probe = inspect_im(store_id)
+                    post_probe = inspect_current_thread(
+                        store_id, name, wait=args.page_wait
+                    )
                     out["send_postcheck"] = (
                         "confirmed"
-                        if looks_like_intro(str(post_probe.get("text") or ""))
+                        if thread_has_named_intro(post_probe, name)
                         else "unknown"
                     )
                     if out["send_postcheck"] == "confirmed":
@@ -286,10 +367,12 @@ def main() -> int:
                 sent_ret = fill_or_send_message(store_id, body, execute=True)
                 if sent_ret.get("ok") and sent_ret.get("sent"):
                     time.sleep(1.0)
-                    post_probe = inspect_im(store_id)
+                    post_probe = inspect_current_thread(
+                        store_id, name, wait=args.page_wait
+                    )
                     out["send_postcheck"] = (
                         "confirmed"
-                        if looks_like_intro(str(post_probe.get("text") or ""))
+                        if thread_has_named_intro(post_probe, name)
                         else "unknown"
                     )
                     if out["send_postcheck"] == "confirmed":
@@ -305,26 +388,12 @@ def main() -> int:
                     out["error"] = sent_ret.get("error") or str(sent_ret)
                     print(f"    发送失败: {out['error']}")
 
-        if bitable_token and detected.get("feishu_lang"):
-            try:
-                record_id = str(out.get("feishu_record_id") or "").strip()
-                if not record_id:
-                    found = search_relation_records(bitable_token, creator_handle=name)
-                    picked = pick_shipping_target(found)
-                    record_id = str((picked or {}).get("record_id") or "")
-                if record_id:
-                    update_record_fields(
-                        bitable_token,
-                        record_id,
-                        {"使用语言": detected["feishu_lang"]},
-                    )
-                    out["feishu_record_id"] = record_id
-                    out["feishu_status"] = "lang-updated"
-                else:
-                    out["feishu_status"] = "no-record"
-            except FeishuBitableError as error:
-                out["feishu_status"] = "error"
-                out["error"] = str(error)
+        _write_feishu_lang(
+            out,
+            bitable_token=bitable_token,
+            feishu_lang=str(detected.get("feishu_lang") or ""),
+            creator_name=name,
+        )
 
         if args.execute_delay:
             time.sleep(args.execute_delay)
@@ -337,6 +406,23 @@ def main() -> int:
     for key, path in paths.items():
         print(f"  {key}: {path}")
     print(f"完成 sent={sent} / {len(results)}")
+    print(
+        "\n"
+        + format_job_summary(
+            title="「发介绍私信」完成" if args.execute else "「介绍私信预演」完成",
+            stats=[
+                f"已发送 : {sent}",
+                f"已查看 : {len(results)}",
+                f"模式   : {'发送' if args.execute else '预演（不会发送）'}",
+            ],
+            csv_path=paths.get("csv"),
+            json_path=paths.get("json"),
+            xlsx_path=paths.get("xlsx"),
+            root=ROOT,
+            hint="物流请北京时间 16:00 后再双击「3-获取物流信息写飞书发单号」。",
+        ),
+        flush=True,
+    )
     return 0
 
 

@@ -11,8 +11,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from lib.im_dom import (  # noqa: E402
     composer_ready,
     conversation_matches,
+    im_thread_text,
+    inspect_current_thread,
     open_im_from_detail,
     open_target_conversation,
+    thread_has_named_intro,
+    thread_looks_stale,
 )
 
 
@@ -38,6 +42,58 @@ class ImOpenPathTests(unittest.TestCase):
         self.assertTrue(
             conversation_matches(probe, "informateymas0721", "7495187564109793532")
         )
+
+    def test_conversation_matches_ignores_whole_page_text(self) -> None:
+        probe = {
+            "hasComposer": True,
+            "onIm": True,
+            "text": "dani_lynn_colors\nHola rayma2691, gracias por solicitar nuestra muestra",
+            "selected_preview": "rayma2691\nHola rayma2691,...",
+            "selected_user_id": "111",
+        }
+        self.assertFalse(
+            conversation_matches(probe, "dani_lynn_colors", "7496160321889208868")
+        )
+
+    def test_named_intro_ignores_other_creator_thread_and_page_blob(self) -> None:
+        leftover = {
+            "text": (
+                "dani_lynn_colors\n"
+                "Hola rayma2691, ¡gracias por solicitar nuestra muestra de lencería!"
+            ),
+            "thread_text": (
+                "Hola rayma2691, ¡gracias por solicitar nuestra muestra de lencería!"
+            ),
+        }
+        self.assertTrue(thread_looks_stale(leftover, "dani_lynn_colors"))
+        self.assertFalse(thread_has_named_intro(leftover, "dani_lynn_colors"))
+        empty_thread = {
+            "text": leftover["text"],
+            "thread_text": "无法提供超过 365 天的消息。\n发送消息",
+        }
+        self.assertFalse(thread_has_named_intro(empty_thread, "dani_lynn_colors"))
+        self.assertEqual(im_thread_text(empty_thread), empty_thread["thread_text"])
+        own = {
+            "thread_text": (
+                "Hi dani_lynn_colors, thanks for requesting our lingerie sample!"
+            )
+        }
+        self.assertTrue(thread_has_named_intro(own, "dani_lynn_colors"))
+
+    @patch("lib.im_dom.time.sleep", return_value=None)
+    @patch("lib.im_dom.inspect_im")
+    def test_inspect_current_thread_waits_out_stale_intro(self, inspect, _sleep) -> None:
+        inspect.side_effect = [
+            {
+                "thread_text": (
+                    "Hola rayma2691, ¡gracias por solicitar nuestra muestra de lencería!"
+                )
+            },
+            {"thread_text": "无法提供超过 365 天的消息。"},
+        ]
+        probe = inspect_current_thread("sid", "dani_lynn_colors", wait=1.0)
+        self.assertEqual(inspect.call_count, 2)
+        self.assertFalse(thread_has_named_intro(probe, "dani_lynn_colors"))
 
     def test_conversation_matches_creator_id_even_if_preview_truncated(self) -> None:
         probe = {

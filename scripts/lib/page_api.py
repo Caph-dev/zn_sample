@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from .console import verbose_print
 from .zclaw import DEFAULT_EXEC_RETRIES, zclaw_exec
 
 AFFILIATE_HOST = "affiliate.tiktokshopglobalselling.com"
@@ -331,7 +332,7 @@ def _post_page_json(
                         f"{endpoint} 业务失败 code={business_code} "
                         f"message={str(payload.get('message') or '')[:160]}"
                     )
-                print(
+                verbose_print(
                     f"[页面API] {operation_label} {http_method.upper()} {endpoint} "
                     f"status={result.get('status')} code={business_code} "
                     f"elapsed_ms={elapsed_ms}",

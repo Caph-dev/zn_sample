@@ -119,6 +119,18 @@ INSPECT_IM_JS = r"""
       break;
     }
   }
+  let threadText = '';
+  if (input) {
+    let node = input.parentElement;
+    for (let depth = 0; depth < 14 && node; depth++, node = node.parentElement) {
+      const cardCount = [...node.querySelectorAll('div')].filter(el =>
+        /contactCard/.test(String(el.className || ''))
+      ).length;
+      if (cardCount > 0) break;
+      const chunk = String(node.innerText || '').replace(/\u00a0/g, ' ').trim();
+      if (chunk) threadText = chunk;
+    }
+  }
   const search = document.querySelector('input[placeholder*="搜索"], input.core-input');
   const dock = document.querySelector('[class*="entryWrapper"]');
   return JSON.stringify({
@@ -132,6 +144,7 @@ INSPECT_IM_JS = r"""
     selected_user_id: selectedUserId,
     selected_conversation_id: selectedConversationId,
     sendBtns,
+    thread_text: threadText.slice(0, 4000),
     text: text.slice(0, 4000)
   });
 })()
@@ -307,9 +320,48 @@ def conversation_matches(
         return True
     if name and name in selected_preview:
         return True
-    if probe.get("onIm") and name and name in str(probe.get("text") or "").lower():
-        return True
     return False
+
+
+def im_thread_text(probe: dict[str, Any] | None) -> str:
+    """当前会话气泡区正文。不要用整页 text：侧栏里别人的介绍会被误判成已发送。"""
+    if not isinstance(probe, dict):
+        return ""
+    return str(probe.get("thread_text") or "").strip()
+
+
+def thread_has_named_intro(probe: dict[str, Any] | None, creator_name: str) -> bool:
+    from .message_templates import looks_like_intro
+
+    thread = im_thread_text(probe)
+    if not looks_like_intro(thread):
+        return False
+    name = (creator_name or "").strip().lower()
+    if not name:
+        return True
+    return name in thread.lower()
+
+
+def thread_looks_stale(probe: dict[str, Any] | None, creator_name: str) -> bool:
+    """会话区有介绍话术，但问候的不是当前达人：多半是上一条会话残留。"""
+    from .message_templates import looks_like_intro
+
+    thread = im_thread_text(probe)
+    name = (creator_name or "").strip().lower()
+    return bool(name and looks_like_intro(thread) and name not in thread.lower())
+
+
+def inspect_current_thread(
+    store_id: str,
+    creator_name: str,
+    *,
+    wait: float = 1.5,
+) -> dict[str, Any]:
+    probe = inspect_im(store_id)
+    if thread_looks_stale(probe, creator_name):
+        time.sleep(max(0.8, wait))
+        probe = inspect_im(store_id)
+    return probe
 
 
 def _expand_chat_dock(store_id: str, *, wait: float) -> dict[str, Any]:
@@ -527,5 +579,4 @@ def fill_or_send_message(
 
 def conversation_already_has(store_id: str, predicate) -> bool:
     probe = inspect_im(store_id)
-    text = str(probe.get("text") or "")
-    return bool(predicate(text))
+    return bool(predicate(im_thread_text(probe)))

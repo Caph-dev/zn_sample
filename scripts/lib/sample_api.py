@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .console import is_verbose, progress_done, progress_line, verbose_print
 from .page_api import (
     SAMPLE_LIST_ENDPOINT,
     AffiliatePageContext,
@@ -187,6 +188,7 @@ def scrape_pending_list_api(
     if ensure_page:
         assert_on_pending_list(store_id)
     resolved_context = context or get_affiliate_page_context(store_id)
+    stage = "初步筛查" if tab == PENDING_TAB else "读取已发货"
 
     all_rows: list[dict[str, Any]] = []
     seen_apply_ids: set[str] = set()
@@ -215,7 +217,7 @@ def scrape_pending_list_api(
             )
         previous_page_signature = page_signature
 
-        print(
+        verbose_print(
             f"[API扫表] page={page_number} rows={len(page_rows)} "
             f"total={payload.get('total_count')} has_more={bool(payload.get('has_more'))}",
             flush=True,
@@ -227,8 +229,12 @@ def scrape_pending_list_api(
             seen_apply_ids.add(apply_id)
             all_rows.append(row)
             if max_rows and len(all_rows) >= max_rows:
-                print(f"[API扫表] 达到 max_rows={max_rows}，停止")
+                verbose_print(f"[API扫表] 达到 max_rows={max_rows}，停止")
+                if not is_verbose():
+                    progress_done(_list_progress_text(stage, page_number, all_rows, payload, done=True))
                 return all_rows
+        if not is_verbose():
+            progress_line(_list_progress_text(stage, page_number, all_rows, payload, done=False))
 
         if not payload.get("has_more"):
             break
@@ -237,8 +243,24 @@ def scrape_pending_list_api(
                 f"列表 API 声称 has_more=true，但 page={page_number} 为空"
             )
 
-    print(f"[API扫表] 完成，去重后 {len(all_rows)} 行")
+    verbose_print(f"[API扫表] 完成，去重后 {len(all_rows)} 行")
+    if not is_verbose():
+        progress_done(_list_progress_text(stage, 0, all_rows, payload, done=True))
     return all_rows
+
+
+def _list_progress_text(
+    stage: str,
+    page_number: int,
+    rows: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    done: bool,
+) -> str:
+    counted = str(len(rows))
+    if done:
+        return f"{stage}：列表读完，共 {counted} 人"
+    return f"{stage}：已读第 {page_number} 页，累计 {counted} 人"
 
 
 def scrape_shipped_list_api(

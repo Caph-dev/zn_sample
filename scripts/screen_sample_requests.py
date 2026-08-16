@@ -41,7 +41,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
+from lib.console import is_verbose, set_verbose  # noqa: E402
 from lib.export_util import resolve_from_export_arg, write_reports  # noqa: E402
+from lib.run_summary import format_job_summary  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
@@ -932,7 +934,13 @@ def main() -> int:
         action="store_true",
         help="execute 时跳过批准前本地备份（不推荐）",
     )
+    ap.add_argument(
+        "--verbose",
+        action="store_true",
+        help="终端打印页面 API / 扫表明细（业务员入口默认不打）",
+    )
     args = ap.parse_args()
+    set_verbose(bool(args.verbose))
     try:
         args.from_export = resolve_from_export_arg(args.from_export)
     except FileNotFoundError as error:
@@ -1199,7 +1207,7 @@ def main() -> int:
             else:
                 # 列表层已过的再拉详情（禁止 --detail-limit 截断；要限量用 --max-rows）
                 detail_targets = [x for x in pre if x.get("eligible")]
-            print(f"--- 拉详情(只读) 目标 {len(detail_targets)} 人 ---")
+            print(f"详情复筛：共 {len(detail_targets)} 人")
 
             by_key = {
                 (x.get("apply_id") or x.get("creator_name")): x for x in pre
@@ -1207,8 +1215,7 @@ def main() -> int:
             for i, target in enumerate(detail_targets, 1):
                 key = target.get("apply_id") or target.get("creator_name")
                 print(
-                    f"  [{i}/{len(detail_targets)}] 详情 {target.get('creator_name')} "
-                    f"cid={target.get('creator_id')} …"
+                    f"  [{i}/{len(detail_targets)}] {target.get('creator_name')}"
                 )
                 # 合并 raw 字段给 fetch
                 src = next(
@@ -1235,7 +1242,8 @@ def main() -> int:
                     if args.data_source == "api":
                         strict_api_detail_failure_count += 1
                     continue
-                print(f"    详情数据源={detail_result.source_used}")
+                if is_verbose():
+                    print(f"    详情数据源={detail_result.source_used}")
                 if detail_result.shadow_report:
                     detail_shadow_reports.append(detail_result.shadow_report)
                 if not res.get("ok"):
@@ -1245,11 +1253,12 @@ def main() -> int:
                         strict_api_detail_failure_count += 1
                 else:
                     d = res["detail"]
-                    print(
-                        f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
-                        f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
-                        f"type={d.get('creator_type')}"
-                    )
+                    if is_verbose():
+                        print(
+                            f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
+                            f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
+                            f"type={d.get('creator_type')}"
+                        )
                     # 写回 pre 行
                     row = by_key.get(key) or target
                     for k in (
@@ -1283,7 +1292,7 @@ def main() -> int:
                         if k in d:
                             row[k] = d[k]
                     row["detail_checked"] = True
-                    if not d.get("video_gpm") and not d.get("live_gpm"):
+                    if not d.get("video_gpm") and not d.get("live_gpm") and is_verbose():
                         print(
                             f"    警告: 视频/直播GPM仍为空 "
                             f"cn_card={d.get('has_cn_video_card')} "
@@ -1456,6 +1465,7 @@ def main() -> int:
     print("--- 导出 ---")
     for key, path in paths.items():
         print(f"  {key}: {path}")
+    passed_count = sum(1 for row in pre if row.get("eligible"))
     if args.confirm_export:
         confirmed_count = sum(
             1 for row in pre if row.get("approve_confirmation") == "confirmed"
@@ -1464,6 +1474,13 @@ def main() -> int:
             f"完成。模式=CONFIRM 列表已确认={confirmed_count} "
             f"写飞书={'开' if args.write_feishu else '关'}。"
         )
+        summary_title = "「核对补写」完成"
+        summary_stats = [
+            f"列表已确认 : {confirmed_count}",
+            f"已查看     : {len(pre)}",
+            f"写飞书     : {'开' if args.write_feishu else '关'}",
+        ]
+        summary_hint = "日常请双击「2-筛查批准写飞书发私信」，不要拆开补写。"
     elif args.execute:
         approved_count = sum(1 for row in pre if row.get("approve_status") == "approved")
         print(
@@ -1475,8 +1492,38 @@ def main() -> int:
             f"「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新，"
             "可用 --confirm-export 延后核对。"
         )
+        summary_title = "「批准写飞书」完成"
+        summary_stats = [
+            f"批准成功 : {approved_count}",
+            f"已查看   : {len(pre)}",
+            f"写飞书   : {'开' if args.write_feishu else '关'}",
+        ]
+        summary_hint = (
+            f"平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后才刷新；"
+            "日常请双击「2-筛查批准写飞书发私信」，它会自动等。"
+        )
     else:
         print("完成。未执行任何同意/批准/拒绝操作。")
+        summary_title = "「筛查名单」完成"
+        summary_stats = [
+            f"通过   : {passed_count}",
+            f"已查看 : {len(pre)}",
+            "模式   : 筛查（不会批准）",
+        ]
+        summary_hint = "若要批准并发介绍，双击「2-筛查批准写飞书发私信」。"
+    print(
+        "\n"
+        + format_job_summary(
+            title=summary_title,
+            stats=summary_stats,
+            csv_path=paths.get("csv"),
+            json_path=paths.get("json"),
+            xlsx_path=paths.get("xlsx"),
+            root=ROOT,
+            hint=summary_hint,
+        ),
+        flush=True,
+    )
     if strict_api_detail_failure_count:
         print(
             "纯 API 模式存在详情读取失败："

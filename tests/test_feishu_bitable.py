@@ -9,6 +9,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.feishu_bitable import (  # noqa: E402
+    describe_cooperation_transition,
+    feishu_shipping_already_current,
     DEFAULT_RECORD_OWNER,
     build_shipping_fields,
     create_creator_relation_record,
@@ -138,6 +140,30 @@ class BuildShippingFieldsTests(unittest.TestCase):
         self.assertNotIn("是否已寄样", result["fields"])
         self.assertNotIn("合作状态", result["fields"])
         self.assertEqual(result["status_transition"], "not-applicable")
+
+
+class DescribeCooperationTransitionTests(unittest.TestCase):
+    def test_common_codes_are_chinese(self) -> None:
+        self.assertIn("待发布", describe_cooperation_transition("already-pending-post"))
+        self.assertIn("已发布", describe_cooperation_transition("preserved:已发布"))
+        self.assertIn("不回退", describe_cooperation_transition("preserved:已发布"))
+        self.assertIn("待发货", describe_cooperation_transition("待发货->待发布"))
+        self.assertNotIn("already-pending-post", describe_cooperation_transition("already-pending-post"))
+        self.assertNotIn("preserved:", describe_cooperation_transition("preserved:已发布"))
+
+    def test_same_track_and_pending_post_is_already_current(self) -> None:
+        plan = build_shipping_fields(
+            order_no="order-1",
+            tracking_raw="tracking-1",
+            current={
+                "fields": {
+                    "快递单号": "tracking-1",
+                    "合作状态": ["待发布"],
+                }
+            },
+        )
+        self.assertTrue(feishu_shipping_already_current(plan, "tracking-1"))
+        self.assertFalse(feishu_shipping_already_current(plan, "tracking-new"))
 
 
 if __name__ == "__main__":

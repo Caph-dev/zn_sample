@@ -8,7 +8,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from lib.export_util import latest_screen_export, resolve_from_export_arg  # noqa: E402
+from lib.export_util import (  # noqa: E402
+    latest_screen_export,
+    resolve_from_export_arg,
+    write_reports,
+)
 
 
 class LatestScreenExportTests(unittest.TestCase):
@@ -31,6 +35,17 @@ class LatestScreenExportTests(unittest.TestCase):
 
     def test_blank_or_latest_uses_helper(self) -> None:
         self.assertIsNone(resolve_from_export_arg(None))
+
+    def test_write_reports_skips_xlsx(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            prefix = Path(raw) / "sample_screen_x"
+            paths = write_reports([{"creator_name": "a", "eligible": True}], prefix)
+            self.assertIn("csv", paths)
+            self.assertIn("json", paths)
+            self.assertNotIn("xlsx", paths)
+            self.assertTrue(paths["csv"].is_file())
+            self.assertTrue(paths["json"].is_file())
+            self.assertFalse(prefix.with_suffix(".xlsx").exists())
 
 
 if __name__ == "__main__":

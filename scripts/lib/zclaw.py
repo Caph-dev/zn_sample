@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from typing import Any
+
+from .zclaw_cli import run_ziniao_cli
 
 # 长跑后 execute_script 偶发 network 假阳性（doctor 仍绿）；批准前会探活+重试
 DEFAULT_EXEC_RETRIES = 4
@@ -58,10 +59,8 @@ def is_bridge_network_error(error: BaseException | str | dict | None) -> bool:
 
 def zclaw_invoke(tool: str, arguments: dict | None = None, *, timeout: int = 120) -> dict:
     args = json.dumps(arguments or {}, ensure_ascii=False)
-    proc = subprocess.run(
-        ["ziniao-cli", "zclaw", "invoke", tool, "--args", args],
-        capture_output=True,
-        text=True,
+    proc = run_ziniao_cli(
+        ["zclaw", "invoke", tool, "--args", args],
         timeout=timeout,
     )
     stdout = (proc.stdout or "").strip()

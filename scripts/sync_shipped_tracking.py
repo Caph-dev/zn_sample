@@ -11,10 +11,9 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -22,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.app_config import load_bitable_settings  # noqa: E402
 from lib.creator_detail import extract_creator_detail, open_creator_detail_by_url  # noqa: E402
 from lib.detect_lang import detect_creator_lang  # noqa: E402
+from lib.console import set_verbose  # noqa: E402
 from lib.export_util import write_generic_reports  # noqa: E402
+from lib.run_summary import format_job_summary  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
@@ -31,6 +32,8 @@ from lib.feishu_bitable import (  # noqa: E402
     _field_plain,
     build_product_id_to_sku_map,
     build_shipping_fields,
+    describe_cooperation_transition,
+    feishu_shipping_already_current,
     get_bitable_access_token,
     list_sample_product_options,
     pick_shipping_target,
@@ -41,7 +44,8 @@ from lib.feishu_bitable import (  # noqa: E402
 from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
 from lib.im_dom import (  # noqa: E402
     fill_or_send_message,
-    inspect_im,
+    im_thread_text,
+    inspect_current_thread,
     open_target_conversation,
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
@@ -58,7 +62,12 @@ from lib.zclaw import resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
-BEIJING = ZoneInfo("Asia/Shanghai")
+try:
+    from zoneinfo import ZoneInfo
+
+    BEIJING = ZoneInfo("Asia/Shanghai")
+except Exception:
+    BEIJING = timezone(timedelta(hours=8))
 
 EXPORT_FIELDS = [
     "creator_name",
@@ -130,8 +139,8 @@ def _send_tracking_dm(
     if not opened.get("ok"):
         return {"ok": False, "error": opened.get("error") or "找不到会话", "message": body}
     clicked = opened.get("click") if isinstance(opened.get("click"), dict) else {}
-    probe = inspect_im(store_id)
-    if looks_like_tracking(str(probe.get("text") or ""), tracking_no):
+    probe = inspect_current_thread(store_id, name, wait=wait)
+    if looks_like_tracking(im_thread_text(probe), tracking_no):
         return {"ok": True, "status": "already-sent", "message": body}
     if not execute:
         return {"ok": True, "status": "dry-run", "message": body}
@@ -152,8 +161,8 @@ def _send_tracking_dm(
                 "send_source": write_source,
             }
         time.sleep(max(1.5, wait))
-        post_probe = inspect_im(store_id)
-        confirmed = looks_like_tracking(str(post_probe.get("text") or ""), tracking_no)
+        post_probe = inspect_current_thread(store_id, name, wait=wait)
+        confirmed = looks_like_tracking(im_thread_text(post_probe), tracking_no)
         return {
             "ok": confirmed,
             "status": "sent" if confirmed else "send-unknown",
@@ -165,8 +174,8 @@ def _send_tracking_dm(
     sent = fill_or_send_message(store_id, body, execute=True)
     if sent.get("ok") and sent.get("sent"):
         time.sleep(1.0)
-        post_probe = inspect_im(store_id)
-        confirmed = looks_like_tracking(str(post_probe.get("text") or ""), tracking_no)
+        post_probe = inspect_current_thread(store_id, name, wait=wait)
+        confirmed = looks_like_tracking(im_thread_text(post_probe), tracking_no)
         return {
             "ok": confirmed,
             "status": "sent" if confirmed else "send-unknown",
@@ -212,7 +221,12 @@ def main() -> int:
     parser.add_argument("--send-tracking", action="store_true", help="回写成功后再发物流私信")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--execute-limit", type=int, default=DEFAULT_EXECUTE_LIMIT)
+    parser.add_argument(
+        "--execute-limit",
+        type=int,
+        default=DEFAULT_EXECUTE_LIMIT,
+        help=f"最多发送物流私信 N 条（默认 {DEFAULT_EXECUTE_LIMIT}；0=不限制）",
+    )
     parser.add_argument("--execute-delay", type=float, default=1.5)
     parser.add_argument(
         "--write-source",
@@ -221,7 +235,9 @@ def main() -> int:
         help="物流私信发送方式：api=页面内 IM SDK（默认）；dom=点击发送按钮备用路径",
     )
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    set_verbose(bool(args.verbose))
 
     if args.send_tracking and args.execute and not args.yes:
         print("将真实发送物流私信。确认请加 --yes。", file=sys.stderr)
@@ -336,14 +352,17 @@ def main() -> int:
         print("已发货 0 行")
         return 0
 
-    limit = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
+    unlimited_send = args.execute_limit <= 0
+    limit = 0 if unlimited_send else args.execute_limit
     sent = 0
     written = 0
     results: list[dict[str, Any]] = []
+    total_rows = len(rows)
 
-    for row in rows:
+    for index, row in enumerate(rows, 1):
         name = str(row.get("creator_name") or "")
         order_id = str(row.get("main_order_id") or "").strip()
+        seq = f"[{index}/{total_rows}]"
         out: dict[str, Any] = {
             "creator_name": name,
             "creator_id": row.get("creator_id") or "",
@@ -354,7 +373,7 @@ def main() -> int:
         if not order_id:
             out["error"] = "列表无 main_order_id"
             results.append(out)
-            print(f"  [跳过] {name}: 无订单号")
+            print(f"  {seq} [跳过] {name}: 无订单号")
             continue
 
         if args.tracking_source == "dom":
@@ -392,11 +411,11 @@ def main() -> int:
         out["tracking_source"] = tracking.get("via") or args.tracking_source
         if not tracking.get("ok"):
             out["error"] = tracking.get("error") or "无 TikTok 物流单号"
-            print(f"  [无运单] {name} order={order_id}: {out['error']}")
+            print(f"  {seq} [无运单] {name} order={order_id}: {out['error']}")
             results.append(out)
             continue
         print(
-            f"  [物流] {name} order={order_id} "
+            f"  {seq} [物流] {name} order={order_id} "
             f"track={out['tracking_raw'] or out['tracking_no']}"
         )
 
@@ -447,7 +466,7 @@ def main() -> int:
             existing_lang = ""
             if bitable_token:
                 out["feishu_status"] = "no-record"
-                print(f"    飞书无匹配行，不新建")
+                print(f"    {seq} 飞书无匹配行，不新建")
 
         if existing_lang in {"英语", "西班牙语"}:
             out["feishu_lang"] = existing_lang
@@ -470,8 +489,14 @@ def main() -> int:
             if plan.get("skip_tracking"):
                 out["feishu_status"] = "skip-existing-track"
                 print(
-                    f"    飞书已有不同运单 {plan.get('current_track')}，"
+                    f"    {seq} 飞书已有不同运单 {plan.get('current_track')}，"
                     "未覆盖且未推进合作状态"
+                )
+            elif feishu_shipping_already_current(plan, str(out["tracking_raw"])):
+                out["feishu_status"] = "unchanged"
+                print(
+                    f"    {seq} 飞书无需改写："
+                    f"{describe_cooperation_transition(str(plan.get('status_transition') or ''))}"
                 )
             else:
                 try:
@@ -485,17 +510,14 @@ def main() -> int:
                     out["feishu_status"] = "updated"
                     written += 1
                     transition = str(plan.get("status_transition") or "")
-                    if "合作状态" in plan["fields"]:
-                        print(f"    飞书已更新：快递单号；合作状态 {transition}")
-                    else:
-                        print(
-                            "    飞书已更新：快递单号；"
-                            f"合作状态保持不变（{transition}）"
-                        )
+                    print(
+                        f"    {seq} 飞书已更新：快递单号；"
+                        f"{describe_cooperation_transition(transition)}"
+                    )
                 except FeishuBitableError as error:
                     out["feishu_status"] = "update-error"
                     out["error"] = str(error)
-                    print(f"    飞书更新失败: {error}")
+                    print(f"    {seq} 飞书更新失败: {error}")
                     results.append(out)
                     continue
         elif not args.write_feishu:
@@ -503,10 +525,14 @@ def main() -> int:
                 out["feishu_status"] = "dry-run"
 
         want_send = bool(args.send_tracking)
-        if want_send and out.get("feishu_status") not in {"updated", "skip-existing-track"} and args.execute:
+        if want_send and out.get("feishu_status") not in {
+            "updated",
+            "unchanged",
+            "skip-existing-track",
+        } and args.execute:
             out["send_status"] = "skipped-no-write"
         elif want_send:
-            if args.execute and sent >= limit:
+            if args.execute and not unlimited_send and sent >= limit:
                 out["send_status"] = "skipped-limit"
             else:
                 dm = _send_tracking_dm(
@@ -542,6 +568,25 @@ def main() -> int:
     for key, path in paths.items():
         print(f"  {key}: {path}")
     print(f"完成 rows={len(results)} 飞书写入={written} 私信发送={sent}")
+    sending = bool(args.send_tracking and args.execute)
+    print(
+        "\n"
+        + format_job_summary(
+            title="「获取物流信息写飞书发单号」完成",
+            stats=[
+                f"飞书写入 : {written}",
+                f"私信发送 : {sent}",
+                f"已查看   : {len(results)}",
+                f"发私信   : {'开' if sending else '关'}",
+            ],
+            csv_path=paths.get("csv"),
+            json_path=paths.get("json"),
+            xlsx_path=paths.get("xlsx"),
+            root=ROOT,
+            hint="请看报表里的飞书状态和私信发送结果。",
+        ),
+        flush=True,
+    )
     return 0
 
 
