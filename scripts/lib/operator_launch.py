@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -29,7 +30,9 @@ from .run_summary import (
 )
 from .sample_navigation import INSPECT_NAVIGATION_PAGE_JS, validate_navigation_start
 from .zclaw import list_running_stores, zclaw_exec
-from .zclaw_cli import CLI_NOT_FOUND, resolve_ziniao_cli_command
+from .zclaw_cli import CLI_NOT_FOUND, fs_path, resolve_ziniao_cli_command
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCREEN_SCRIPT = ROOT / "scripts" / "screen_sample_requests.py"
@@ -213,10 +216,10 @@ def build_step_argv(
     out_prefix: Path,
     from_export: Path | None = None,
 ) -> list[str]:
-    argv = [python, str(script), *extra_args]
+    argv = [python, fs_path(script), *extra_args]
     if from_export is not None:
-        argv.extend(["--from-export", str(from_export)])
-    argv.extend(["--out", str(out_prefix)])
+        argv.extend(["--from-export", fs_path(from_export)])
+    argv.extend(["--out", fs_path(out_prefix)])
     if "--store-id" in argv or "--store-name" in argv:
         raise OperatorLaunchError("入口不允许指定店铺编号。")
     return argv
@@ -479,7 +482,7 @@ def ask_force_afternoon(
     if ask is not None:
         return parse_force(str(ask("force", title, message) or ""))
     _require_tty("强制运行")
-    print(format_force_afternoon_prompt(clock), flush=True)
+    logger.info("%s", format_force_afternoon_prompt(clock))
     answer = input("请输入 FORCE 强制运行（不推荐），或直接回车退出：")
     return parse_force(answer)
 
@@ -519,7 +522,7 @@ def run_job(
     runner: RunnerFn | None = None,
 ) -> int:
     run = runner or subprocess.run
-    proc = run(list(argv), cwd=str(ROOT))
+    proc = run(list(argv), cwd=fs_path(ROOT))
     return int(proc.returncode)
 
 
@@ -539,7 +542,7 @@ def run_operator_mode(
     alert_fn: Callable[[str, str], None] | None = None,
     out_prefix: Path | None = None,
 ) -> int:
-    emit = printer or (lambda line: print(line, flush=True))
+    emit = printer or (lambda line: logger.info("%s", line))
     # 说明只打在终端。系统弹窗在 macOS 上中文会乱码，而且和黑窗口重复。
     notify = alert_fn or (lambda _title, _msg: None)
     try:
@@ -780,6 +783,6 @@ def _require_tty(action: str) -> None:
 
 def _stdin_yes_no(title: str, message: str, *, no_means: str) -> bool:
     _require_tty(title)
-    print(format_confirm_prompt(title, message, no_means=no_means), flush=True)
+    logger.info("%s", format_confirm_prompt(title, message, no_means=no_means))
     answer = input("请输入 y 或 n，然后回车：")
     return parse_yes_no(answer)

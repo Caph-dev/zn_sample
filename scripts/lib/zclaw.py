@@ -2,11 +2,15 @@
 """紫鸟 ZClaw 薄封装（对齐 zn_daren/scripts/lib/zclaw_dom 用法）。"""
 from __future__ import annotations
 
+import logging
+
 import json
 import time
 from typing import Any
 
 from .zclaw_cli import run_ziniao_cli
+
+logger = logging.getLogger(__name__)
 
 # 长跑后 execute_script 偶发 network 假阳性（doctor 仍绿）；批准前会探活+重试
 DEFAULT_EXEC_RETRIES = 4
@@ -104,11 +108,9 @@ def zclaw_exec(
                 if attempt + 1 < attempts and is_bridge_network_error(outer):
                     last_error = err
                     sleep_sec = retry_base_sec * (attempt + 1)
-                    print(
+                    logger.info(
                         f"  [zclaw] execute_script network 抖动 "
-                        f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后重试…",
-                        flush=True,
-                    )
+                        f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后重试…")
                     time.sleep(sleep_sec)
                     continue
                 raise err
@@ -131,11 +133,9 @@ def zclaw_exec(
             last_error = error
             if attempt + 1 < attempts and is_bridge_network_error(error):
                 sleep_sec = retry_base_sec * (attempt + 1)
-                print(
+                logger.info(
                     f"  [zclaw] execute_script 异常重试 "
-                    f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后… {error}",
-                    flush=True,
-                )
+                    f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后… {error}")
                 time.sleep(sleep_sec)
                 continue
             raise
@@ -180,11 +180,9 @@ def ensure_store_exec_ready(
     try:
         probe = probe_store_page(store_id, retries=retries)
         href = str(probe.get("href") or "")
-        print(
+        logger.info(
             f"[Bridge探活/{label}] ok href={href[:90]!r} "
-            f"tr={probe.get('tr')} ready={probe.get('ready')}",
-            flush=True,
-        )
+            f"tr={probe.get('tr')} ready={probe.get('ready')}")
         return probe
     except Exception as error:
         hint = (
@@ -238,7 +236,7 @@ def resolve_store_id(
     """
     if store_id is not None and str(store_id).strip():
         sid = str(store_id).strip()
-        print(f"[店铺] 使用指定 storeId={sid}")
+        logger.info(f"[店铺] 使用指定 storeId={sid}")
         return sid
 
     running = [r for r in list_running_stores() if str(r.get("storeId") or "").strip()]
@@ -248,7 +246,7 @@ def resolve_store_id(
         hits = [r for r in running if str(r.get("storeName") or "").strip() == name_q]
         if len(hits) == 1:
             sid = str(hits[0]["storeId"]).strip()
-            print(f"[店铺] running 精确匹配 storeName={name_q} → {sid}")
+            logger.info(f"[店铺] running 精确匹配 storeName={name_q} → {sid}")
             return sid
         raise RuntimeError(
             f"running 中 storeName={name_q!r} 匹配到 {len(hits)} 家，无法唯一解析"
@@ -256,12 +254,12 @@ def resolve_store_id(
 
     if len(running) == 1:
         sid = str(running[0]["storeId"]).strip()
-        print(f"[店铺] running 唯一店 → {sid} ({running[0].get('storeName')})")
+        logger.info(f"[店铺] running 唯一店 → {sid} ({running[0].get('storeName')})")
         return sid
 
     if default_store_id and str(default_store_id).strip():
         sid = str(default_store_id).strip()
-        print(f"[店铺] 使用测试默认 storeId={sid}")
+        logger.info(f"[店铺] 使用测试默认 storeId={sid}")
         return sid
 
     raise RuntimeError(

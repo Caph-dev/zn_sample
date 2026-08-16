@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -24,6 +26,7 @@ from lib.creator_detail import (  # noqa: E402
     open_creator_detail_by_url,
 )
 from lib.detect_lang import detect_creator_lang  # noqa: E402
+from lib.app_log import configure_logging  # noqa: E402
 from lib.console import set_verbose  # noqa: E402
 from lib.export_util import resolve_from_export_arg, write_generic_reports  # noqa: E402
 from lib.run_summary import format_job_summary  # noqa: E402
@@ -45,6 +48,8 @@ from lib.im_dom import (  # noqa: E402
 from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import intro_message  # noqa: E402
 from lib.zclaw import resolve_store_id  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
@@ -200,36 +205,35 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
     try:
         args.from_export = resolve_from_export_arg(args.from_export)
     except FileNotFoundError as error:
-        print(str(error), file=sys.stderr)
+        logger.error(str(error))
         return 2
 
     if args.execute and not args.yes:
-        print("将真实发送私信。确认请加 --yes，或去掉 --execute 做只读预演。", file=sys.stderr)
+        logger.error("将真实发送私信。确认请加 --yes，或去掉 --execute 做只读预演。")
         return 2
 
     targets: list[dict[str, Any]] = []
     if args.from_export:
         targets = _load_export_targets(args.from_export)
-        print(f"[输入] 导出 {args.from_export} → {len(targets)} 条候选")
+        logger.info(f"[输入] 导出 {args.from_export} → {len(targets)} 条候选")
         if args.creator_id or args.creator_name:
             targets = _filter_targets(
                 targets,
                 creator_id=args.creator_id or "",
                 creator_name=args.creator_name or "",
             )
-            print(
+            logger.info(
                 f"[过滤] creator_name={args.creator_name or '-'} "
-                f"creator_id={args.creator_id or '-'} → {len(targets)} 条"
-            )
+                f"creator_id={args.creator_id or '-'} → {len(targets)} 条")
             if not targets:
-                print(
+                logger.error(
                     "导出里没有这个达人。核对 --creator-name / --creator-id，"
-                    "或改用带 creator_id 的筛查/批准 json。",
-                    file=sys.stderr,
+                    "或改用带 creator_id 的筛查/批准 json。"
                 )
                 return 2
     elif args.creator_id or args.creator_name:
@@ -240,7 +244,7 @@ def main() -> int:
             }
         ]
     if not targets:
-        print("请提供 --from-export 或 --creator-id/--creator-name", file=sys.stderr)
+        logger.error("请提供 --from-export 或 --creator-id/--creator-name")
         return 2
     if args.max_rows and len(targets) > args.max_rows:
         targets = targets[: args.max_rows]
@@ -257,18 +261,17 @@ def main() -> int:
         try:
             bitable_token = get_bitable_access_token(config_path=args.config)
         except FeishuBitableError as error:
-            print(f"[飞书] 初始化失败，将不写表: {error}", file=sys.stderr)
+            logger.error(f"[飞书] 初始化失败，将不写表: {error}")
             bitable_token = None
 
     limit = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
     sent = 0
     results: list[dict[str, Any]] = []
-    print("=" * 60)
-    print(
+    logger.info("=" * 60)
+    logger.info(
         f"第6步介绍私信 | 模式={'EXECUTE' if args.execute else 'DRY-RUN'} "
-        f"| 目标 {len(targets)} | limit={limit}"
-    )
-    print("=" * 60)
+        f"| 目标 {len(targets)} | limit={limit}")
+    logger.info("=" * 60)
 
     for row in targets:
         name = str(row.get("creator_name") or "").strip()
@@ -287,7 +290,7 @@ def main() -> int:
         if not detected.get("ok"):
             out["error"] = detected.get("error")
             out["send_status"] = "skipped"
-            print(f"  [跳过] {name}: {out['error']}")
+            logger.info(f"  [跳过] {name}: {out['error']}")
             results.append(out)
             continue
         out["bio"] = detected.get("bio") or ""
@@ -296,17 +299,16 @@ def main() -> int:
         out["lang_reason"] = detected.get("reason")
         body = intro_message(str(detected.get("lang")), name)
         out["message"] = body
-        print(
+        logger.info(
             f"  [语言] {name} {detected.get('feishu_lang')} "
-            f"({detected.get('reason')}) bio={(detected.get('bio') or '')[:60]!r}"
-        )
+            f"({detected.get('reason')}) bio={(detected.get('bio') or '')[:60]!r}")
 
         opened = _open_conversation(store_id, row, wait=args.page_wait)
         if not opened.get("ok"):
             out["im_status"] = "open-failed"
             out["error"] = opened.get("error")
             out["send_status"] = "skipped"
-            print(f"    私信打开失败: {out['error']}")
+            logger.info(f"    私信打开失败: {out['error']}")
             results.append(out)
             continue
         out["im_status"] = opened.get("via")
@@ -318,7 +320,7 @@ def main() -> int:
         probe = inspect_current_thread(store_id, name, wait=args.page_wait)
         if thread_has_named_intro(probe, name):
             out["send_status"] = "already-sent"
-            print(f"    已有介绍话术，跳过")
+            logger.info(f"    已有介绍话术，跳过")
             _write_feishu_lang(
                 out,
                 bitable_token=bitable_token,
@@ -330,7 +332,7 @@ def main() -> int:
 
         if not args.execute:
             out["send_status"] = "dry-run"
-            print("    DRY-RUN 不发送")
+            logger.info("    DRY-RUN 不发送")
         else:
             out["send_source"] = args.write_source
             if args.write_source == "api":
@@ -354,15 +356,15 @@ def main() -> int:
                     if out["send_postcheck"] == "confirmed":
                         out["send_status"] = "sent"
                         sent += 1
-                        print("    已通过 IM SDK API 发送并确认")
+                        logger.info("    已通过 IM SDK API 发送并确认")
                     else:
                         out["send_status"] = "send-unknown"
                         out["error"] = "API 已启动但发送后未确认，禁止自动重试"
-                        print(f"    发送状态未知: {out['error']}")
+                        logger.info(f"    发送状态未知: {out['error']}")
                 else:
                     out["send_status"] = "send-failed"
                     out["error"] = sent_ret.get("reason") or str(sent_ret)
-                    print(f"    API 发送失败: {out['error']}")
+                    logger.info(f"    API 发送失败: {out['error']}")
             else:
                 sent_ret = fill_or_send_message(store_id, body, execute=True)
                 if sent_ret.get("ok") and sent_ret.get("sent"):
@@ -378,15 +380,15 @@ def main() -> int:
                     if out["send_postcheck"] == "confirmed":
                         out["send_status"] = "sent"
                         sent += 1
-                        print("    已通过 DOM 发送并确认")
+                        logger.info("    已通过 DOM 发送并确认")
                     else:
                         out["send_status"] = "send-unknown"
                         out["error"] = "DOM 点击后未确认消息，禁止自动重试"
-                        print(f"    发送状态未知: {out['error']}")
+                        logger.info(f"    发送状态未知: {out['error']}")
                 else:
                     out["send_status"] = "send-failed"
                     out["error"] = sent_ret.get("error") or str(sent_ret)
-                    print(f"    发送失败: {out['error']}")
+                    logger.info(f"    发送失败: {out['error']}")
 
         _write_feishu_lang(
             out,
@@ -402,11 +404,11 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = args.out or (ROOT / "exports" / f"sample_intro_{ts}")
     paths = write_generic_reports(results, prefix, fieldnames=EXPORT_FIELDS)
-    print("--- 导出 ---")
+    logger.info("--- 导出 ---")
     for key, path in paths.items():
-        print(f"  {key}: {path}")
-    print(f"完成 sent={sent} / {len(results)}")
-    print(
+        logger.info(f"  {key}: {path}")
+    logger.info(f"完成 sent={sent} / {len(results)}")
+    logger.info(
         "\n"
         + format_job_summary(
             title="「发介绍私信」完成" if args.execute else "「介绍私信预演」完成",
@@ -420,9 +422,7 @@ def main() -> int:
             xlsx_path=paths.get("xlsx"),
             root=ROOT,
             hint="物流请北京时间 16:00 后再双击「3-获取物流信息写飞书发单号」。",
-        ),
-        flush=True,
-    )
+        ))
     return 0
 
 

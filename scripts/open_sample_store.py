@@ -2,17 +2,23 @@
 """脚本 1：通过 GUI + ZClaw 打开样品筛查目标店铺。"""
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from lib.app_log import configure_logging  # noqa: E402
 from lib.store_launcher import ensure_sample_store_open  # noqa: E402
 from lib.zclaw import resolve_store_id  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> int:
+    configure_logging()
     argument_parser = argparse.ArgumentParser(
         description=(
             "通过 GUI + ZClaw 打开店铺；目标店已运行时不会关闭或重新打开。"
@@ -47,18 +53,17 @@ def main() -> int:
             wait_seconds=max(0.0, arguments.wait),
         )
     except Exception as error:
-        print(f"打开店铺失败: {error}", file=sys.stderr)
+        logger.error(f"打开店铺失败: {error}")
         return 1
 
     action = "店铺已运行，未重新打开" if result["already_running"] else "店铺已打开"
     probe = result.get("probe") or {}
-    print(f"[{action}] storeId={result['store_id']}")
-    print(
+    logger.info(f"[{action}] storeId={result['store_id']}")
+    logger.info(
         f"[页面探活] ready={probe.get('ready')} "
-        f"href={str(probe.get('href') or '')[:160]}"
-    )
-    print("请在店铺窗口登录 TikTok Shop，并停在商家中心首页。")
-    print("随后运行 screen_sample_requests.py --from-seller-home 进行筛查。")
+        f"href={str(probe.get('href') or '')[:160]}")
+    logger.info("请在店铺窗口登录 TikTok Shop，并停在商家中心首页。")
+    logger.info("随后运行 screen_sample_requests.py --from-seller-home 进行筛查。")
     return 0
 
 

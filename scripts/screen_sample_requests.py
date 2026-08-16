@@ -29,6 +29,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -41,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
+from lib.app_log import configure_logging  # noqa: E402
 from lib.console import is_verbose, set_verbose  # noqa: E402
 from lib.export_util import resolve_from_export_arg, write_reports  # noqa: E402
 from lib.run_summary import format_job_summary  # noqa: E402
@@ -82,6 +85,8 @@ from lib.sample_write_api import (  # noqa: E402
     confirm_application_approved_api,
 )
 from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
@@ -268,16 +273,15 @@ def _run_execute_pipeline(
                 app_token=app_token,
                 table_id=table_id,
             )
-            print(
-                f"[飞书] 写入开启 table={table_id} 寄样产品选项={len(sample_options)} 个"
-            )
+            logger.info(
+                f"[飞书] 写入开启 table={table_id} 寄样产品选项={len(sample_options)} 个")
         except (FeishuBitableError, Exception) as error:
-            print(f"[飞书] 初始化失败，将只批准不写表: {error}", file=sys.stderr)
+            logger.error(f"[飞书] 初始化失败，将只批准不写表: {error}")
             write_feishu = False
     else:
         # 不写飞书时仍用主推表解析货号，便于跳过「无货号/无选项」
         sample_options = []
-        print("[飞书] 未开启 --write-feishu：批准后不写多维表格")
+        logger.info("[飞书] 未开启 --write-feishu：批准后不写多维表格")
 
     # 无 write 时也尽量解析 sku（用 hero 映射）；选项匹配在无 options 时跳过「选项缺失」卡点
     if not sample_options and product_id_to_sku:
@@ -349,10 +353,9 @@ def _run_execute_pipeline(
             row["approve_error"] = product_resolve.get("reason")
             row["feishu_error"] = product_resolve.get("reason")
             row["action"] = "skipped-product-unresolved"
-            print(
+            logger.info(
                 f"  [跳过] {creator_name} apply={apply_id} "
-                f"原因={product_resolve.get('reason')}"
-            )
+                f"原因={product_resolve.get('reason')}")
             continue
 
         # 去重（仅写飞书时强制；不写时也可选查重——默认不查以免无 token）
@@ -370,7 +373,7 @@ def _run_execute_pipeline(
                 row["feishu_status"] = "error"
                 row["feishu_error"] = f"查重失败: {error}"
                 row["action"] = "skipped-dedupe-error"
-                print(f"  [跳过] 查重失败 {creator_name}: {error}")
+                logger.info(f"  [跳过] 查重失败 {creator_name}: {error}")
                 continue
             if dup:
                 row["approve_status"] = "skipped"
@@ -378,10 +381,9 @@ def _run_execute_pipeline(
                 row["feishu_record_id"] = dup.get("record_id")
                 row["approve_error"] = "飞书已存在 红人ID+寄样产品"
                 row["action"] = "skipped-duplicate"
-                print(
+                logger.info(
                     f"  [跳过-去重] {creator_name} × {product_resolve.get('option')} "
-                    f"record={dup.get('record_id')}"
-                )
+                    f"record={dup.get('record_id')}")
                 continue
 
         try:
@@ -395,7 +397,7 @@ def _run_execute_pipeline(
             row["approve_status"] = "skipped"
             row["approve_error"] = f"批准前只读状态预检失败: {error}"
             row["action"] = "skipped-api-preflight-error"
-            print(f"  [跳过] {creator_name} 批准前状态预检失败: {error}")
+            logger.info(f"  [跳过] {creator_name} 批准前状态预检失败: {error}")
             continue
 
         row["approve_preflight"] = pending_status
@@ -406,17 +408,15 @@ def _run_execute_pipeline(
                 f"{pending_status.get('state') or 'unknown'}"
             )
             row["action"] = "skipped-api-preflight-state"
-            print(
+            logger.info(
                 f"  [跳过] {creator_name} 批准前状态="
-                f"{pending_status.get('state') or 'unknown'}"
-            )
+                f"{pending_status.get('state') or 'unknown'}")
             continue
 
-        print(
+        logger.info(
             f"  [批准] ({processed + 1}/{limit}) {creator_name} "
             f"apply={apply_id} sku={product_resolve.get('sku')} "
-            f"option={product_resolve.get('option')}"
-        )
+            f"option={product_resolve.get('option')}")
         observer_armed = False
         approval_attempt_started = False
         approve_exception: Exception | None = None
@@ -434,9 +434,8 @@ def _run_execute_pipeline(
                     preflight_status=pending_status,
                 )
                 if not approve_result.get("ok"):
-                    print(
-                        f"    批准 API 未接受请求: {approve_result.get('state')}"
-                    )
+                    logger.info(
+                        f"    批准 API 未接受请求: {approve_result.get('state')}")
             else:
                 if observe_approve_network:
                     arm_network_observer(store_id)
@@ -452,17 +451,17 @@ def _run_execute_pipeline(
             row["approve_status"] = "error"
             row["approve_error"] = str(error)
             row["action"] = "approve-error"
-            print(f"    批准异常: {error}")
+            logger.info(f"    批准异常: {error}")
         finally:
             if observer_armed:
                 try:
                     time.sleep(0.5)
                     network_trace = drain_network_observer(store_id, uninstall=True)
                     row["approve_network_trace"] = network_trace
-                    print(f"    被动网络摘要: {len(network_trace)} 条")
+                    logger.info(f"    被动网络摘要: {len(network_trace)} 条")
                 except Exception as trace_error:
                     row["approve_network_trace_error"] = str(trace_error)
-                    print(f"    被动网络摘要读取失败: {trace_error}")
+                    logger.info(f"    被动网络摘要读取失败: {trace_error}")
 
         if approve_exception is not None and not approval_attempt_started:
             continue
@@ -570,8 +569,8 @@ def _run_execute_pipeline(
                 else approve_result.get("error") or str(approve_result)
             )
             row["action"] = "approve-failed"
-            print(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
-            print("    已停止本轮，禁止自动改试下一条申请。")
+            logger.info(f"    批准失败，且只读 API 确认仍待审核: {row['approve_error']}")
+            logger.info("    已停止本轮，禁止自动改试下一条申请。")
             break
         if outcome["approve_status"] != "approved":
             row["approve_status"] = "unknown"
@@ -579,10 +578,9 @@ def _run_execute_pipeline(
                 f"{write_source} 批准写结果不确定；禁止重试及写飞书"
             )
             row["action"] = "approve-unknown"
-            print(
+            logger.info(
                 "    批准状态未知：已停止本轮，禁止自动重试；"
-                "请根据导出 approve_pending_recheck 人工核对。"
-            )
+                "请根据导出 approve_pending_recheck 人工核对。")
             break
 
         row["approve_status"] = "approved"
@@ -593,11 +591,10 @@ def _run_execute_pipeline(
             if write_source == "api"
             else "dom-accepted"
         )
-        print(
+        logger.info(
             f"    批准成功 note={approval_note}；"
             f"平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新，"
-            "列表确认已延后"
-        )
+            "列表确认已延后")
         processed += 1
 
         if not write_feishu or not bitable_token:
@@ -622,24 +619,21 @@ def _run_execute_pipeline(
             row["action"] = "approved+feishu"
             if record_id:
                 feishu_created_ids.append(str(record_id))
-            print(f"    飞书写入成功 record_id={record_id}")
+            logger.info(f"    飞书写入成功 record_id={record_id}")
         except FeishuBitableError as error:
             row["feishu_status"] = "error"
             row["feishu_error"] = str(error)
             row["action"] = "approved+feishu-failed"
-            print(
-                f"    飞书写入失败（批准已成功，需人工补录）: {error}",
-                file=sys.stderr,
-            )
+            logger.info(
+                f"    飞书写入失败（批准已成功，需人工补录）: {error}")
 
         if execute_delay:
             time.sleep(execute_delay)
 
     if feishu_created_ids:
-        print(
+        logger.info(
             f"[回退提示] 本轮新建飞书 record_id: {', '.join(feishu_created_ids)}；"
-            f"如需撤销可调用 delete_record / 在表中删除"
-        )
+            f"如需撤销可调用 delete_record / 在表中删除")
     return candidates
 
 
@@ -677,12 +671,11 @@ def _run_confirm_pipeline(
                 app_token=app_token,
                 table_id=table_id,
             )
-            print(
+            logger.info(
                 f"[飞书] 延后确认可补写 table={table_id} "
-                f"寄样产品选项={len(sample_options)} 个"
-            )
+                f"寄样产品选项={len(sample_options)} 个")
         except (FeishuBitableError, Exception) as error:
-            print(f"[飞书] 初始化失败，将只确认不写表: {error}", file=sys.stderr)
+            logger.error(f"[飞书] 初始化失败，将只确认不写表: {error}")
             write_feishu = False
 
     limit = execute_limit if execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
@@ -694,7 +687,7 @@ def _run_confirm_pipeline(
 
         apply_id = str(row.get("apply_id") or "").strip()
         creator_name = str(row.get("creator_name") or "").strip()
-        print(f"  [延后确认] {creator_name} apply={apply_id}")
+        logger.info(f"  [延后确认] {creator_name} apply={apply_id}")
         try:
             confirmation = confirm_application_approved_api(
                 store_id,
@@ -706,7 +699,7 @@ def _run_confirm_pipeline(
         except Exception as error:
             row["approve_confirmation"] = "error"
             row["approve_postcheck"] = {"ok": False, "error": str(error)}
-            print(f"    列表确认失败: {error}")
+            logger.info(f"    列表确认失败: {error}")
             continue
 
         row["approve_postcheck"] = confirmation
@@ -714,19 +707,18 @@ def _run_confirm_pipeline(
             row["approve_status"] = "approved"
             row["approve_confirmation"] = "confirmed"
             row["approve_error"] = ""
-            print("    平台列表已转入待发货")
+            logger.info("    平台列表已转入待发货")
             processed += 1
         elif confirmation.get("state") == "still-pending":
             row["approve_confirmation"] = "still-pending"
-            print("    仍在待审核；请人工核对，不自动重批")
+            logger.info("    仍在待审核；请人工核对，不自动重批")
             processed += 1
             continue
         else:
             row["approve_confirmation"] = str(confirmation.get("state") or "unknown")
-            print(
+            logger.info(
                 f"    列表仍未确认 state={row['approve_confirmation']}；"
-                "不改写批准结论，也不自动重批"
-            )
+                "不改写批准结论，也不自动重批")
             processed += 1
             continue
 
@@ -749,7 +741,7 @@ def _run_confirm_pipeline(
         if not product_resolve.get("ok"):
             row["feishu_status"] = "skipped"
             row["feishu_error"] = product_resolve.get("reason")
-            print(f"    飞书补写跳过: {product_resolve.get('reason')}")
+            logger.info(f"    飞书补写跳过: {product_resolve.get('reason')}")
             continue
         try:
             dup = find_duplicate_record(
@@ -762,12 +754,12 @@ def _run_confirm_pipeline(
         except FeishuBitableError as error:
             row["feishu_status"] = "error"
             row["feishu_error"] = f"查重失败: {error}"
-            print(f"    飞书补写查重失败: {error}")
+            logger.info(f"    飞书补写查重失败: {error}")
             continue
         if dup:
             row["feishu_status"] = "duplicate"
             row["feishu_record_id"] = dup.get("record_id")
-            print(f"    飞书已存在 record={dup.get('record_id')}")
+            logger.info(f"    飞书已存在 record={dup.get('record_id')}")
             continue
         try:
             created = create_creator_relation_record(
@@ -782,11 +774,11 @@ def _run_confirm_pipeline(
             row["feishu_status"] = "created"
             row["feishu_record_id"] = created.get("record_id")
             row["action"] = "approved+feishu"
-            print(f"    飞书补写成功 record_id={created.get('record_id')}")
+            logger.info(f"    飞书补写成功 record_id={created.get('record_id')}")
         except FeishuBitableError as error:
             row["feishu_status"] = "error"
             row["feishu_error"] = str(error)
-            print(f"    飞书补写失败: {error}", file=sys.stderr)
+            logger.error(f"    飞书补写失败: {error}")
     return candidates
 
 
@@ -940,56 +932,51 @@ def main() -> int:
         help="终端打印页面 API / 扫表明细（业务员入口默认不打）",
     )
     args = ap.parse_args()
+    configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
     try:
         args.from_export = resolve_from_export_arg(args.from_export)
     except FileNotFoundError as error:
-        print(str(error), file=sys.stderr)
+        logger.error(str(error))
         return 2
 
     if args.confirm_export and not args.from_export:
-        print("--confirm-export 必须配合 --from-export", file=sys.stderr)
+        logger.error("--confirm-export 必须配合 --from-export")
         return 2
     if args.confirm_export and args.execute:
-        print("--confirm-export 只做延后确认，不能同时 --execute", file=sys.stderr)
+        logger.error("--confirm-export 只做延后确认，不能同时 --execute")
         return 2
     if args.from_export and not args.execute and not args.confirm_export:
-        print(
+        logger.error(
             "--from-export 仅用于批准或延后确认；"
-            "请加 --execute --yes，或改用 --confirm-export",
-            file=sys.stderr,
+            "请加 --execute --yes，或改用 --confirm-export"
         )
         return 2
     if args.from_export and args.observe_approve_network:
-        print("--from-export 不支持 --observe-approve-network", file=sys.stderr)
+        logger.error("--from-export 不支持 --observe-approve-network")
         return 2
     if args.force_confirm and not args.confirm_export:
-        print("--force-confirm 仅适用于 --confirm-export", file=sys.stderr)
+        logger.error("--force-confirm 仅适用于 --confirm-export")
         return 2
     if args.execute and not args.yes:
-        print(
-            "将真实点击「同意」。确认请加 --yes，或去掉 --execute 做只读筛查。",
-            file=sys.stderr,
+        logger.error(
+            "将真实点击「同意」。确认请加 --yes，或去掉 --execute 做只读筛查。"
         )
         return 2
     if args.write_feishu and not args.execute and not args.confirm_export:
-        print("--write-feishu 仅在 --execute --yes 或 --confirm-export 时有效", file=sys.stderr)
+        logger.error("--write-feishu 仅在 --execute --yes 或 --confirm-export 时有效")
         return 2
     if args.observe_approve_network and not args.execute:
-        print("--observe-approve-network 仅在 --execute --yes 时有效", file=sys.stderr)
+        logger.error("--observe-approve-network 仅在 --execute --yes 时有效")
         return 2
     if args.observe_approve_network and args.write_source != "dom":
-        print(
+        logger.error(
             "--observe-approve-network 仅适用于 --write-source dom；"
-            "API 写入使用已登记的窄接口",
-            file=sys.stderr,
+            "API 写入使用已登记的窄接口"
         )
         return 2
     if args.execute and args.data_source == "shadow":
-        print(
-            "真实批准不能使用 --data-source shadow；请改用 auto 或 api。",
-            file=sys.stderr,
-        )
+        logger.error("真实批准不能使用 --data-source shadow；请改用 auto 或 api。")
         return 2
 
     if args.confirm_export:
@@ -998,39 +985,36 @@ def main() -> int:
         mode = "EXECUTE"
     else:
         mode = "DRY-RUN/只读导出"
-    print("=" * 60)
-    print(f"样品申请筛查 | 模式={mode}")
+    logger.info("=" * 60)
+    logger.info(f"样品申请筛查 | 模式={mode}")
     if args.confirm_export:
         limit_show = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
-        print(
+        logger.info(
             f"  延后确认: 开 | limit={limit_show} | "
             f"写飞书={'开' if args.write_feishu else '关（测试默认）'} | "
-            f"强制忽略等待={'开' if args.force_confirm else '关'}"
-        )
-        print(
-            f"  说明: 不重新批准；平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新"
-        )
-        print(f"  输入: 复用导出 {args.from_export}")
+            f"强制忽略等待={'开' if args.force_confirm else '关'}")
+        logger.info(
+            f"  说明: 不重新批准；平台「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新")
+        logger.info(f"  输入: 复用导出 {args.from_export}")
     elif args.execute:
         limit_show = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
-        print(
+        logger.info(
             f"  批准: 开 | limit={limit_show} | "
             f"写入路径={args.write_source} | "
-            f"写飞书={'开' if args.write_feishu else '关（测试默认）'}"
-        )
-        print("  顺序: 写接口接受即视为同意成功 → 再写飞书；列表确认延后")
+            f"写飞书={'开' if args.write_feishu else '关（测试默认）'}")
+        logger.info("  顺序: 写接口接受即视为同意成功 → 再写飞书；列表确认延后")
         if args.from_export:
-            print(f"  输入: 复用导出 {args.from_export}（跳过扫表/详情）")
+            logger.info(f"  输入: 复用导出 {args.from_export}（跳过扫表/详情）")
     else:
-        print("  默认只读导出 | **未**启用同意")
+        logger.info("  默认只读导出 | **未**启用同意")
     if not args.from_export:
-        print(f"  列表和筛查详情数据源: {args.data_source}")
-    print("主推表来源: 飞书云文档（不再使用本地 xlsx）")
+        logger.info(f"  列表和筛查详情数据源: {args.data_source}")
+    logger.info("主推表来源: 飞书云文档（不再使用本地 xlsx）")
     if args.from_seller_home:
-        print("前提：目标店已登录，并停在 TikTok Shop 商家中心首页")
+        logger.info("前提：目标店已登录，并停在 TikTok Shop 商家中心首页")
     else:
-        print("前提：你已手动打开「样品申请 → 待审核」并停在该页")
-    print("=" * 60)
+        logger.info("前提：你已手动打开「样品申请 → 待审核」并停在该页")
+    logger.info("=" * 60)
 
     explicit_store = bool(
         str(args.store_id or "").strip() or str(args.store_name or "").strip()
@@ -1046,11 +1030,11 @@ def main() -> int:
             default_store_id=default_sid,
         )
     except Exception as e:
-        print(f"解析店铺失败: {e}", file=sys.stderr)
+        logger.error(f"解析店铺失败: {e}")
         return 2
 
     if store_id == DEFAULT_TEST_STORE_ID:
-        print(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
+        logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
 
     if args.from_seller_home:
         try:
@@ -1060,20 +1044,19 @@ def main() -> int:
                 poll_interval=max(0.5, min(2.0, args.page_wait)),
             )
         except Exception as error:
-            print(f"自动导航失败: {error}", file=sys.stderr)
+            logger.error(f"自动导航失败: {error}")
             return 2
         destination = navigation_result.get("destination") or {}
-        print(
+        logger.info(
             f"[自动导航] 已进入样品申请-待审核 "
             f"shop_id={destination.get('shop_id')} "
-            f"region={destination.get('shop_region')}"
-        )
+            f"region={destination.get('shop_region')}")
 
     # 主推表：仅飞书
     hero_keys: set[str] = set()
     hero_data: dict[str, Any] | None = None
     if args.skip_hero_check:
-        print("[主推] --skip-hero-check：跳过飞书主推条件（非正式）")
+        logger.info("[主推] --skip-hero-check：跳过飞书主推条件（非正式）")
     else:
         try:
             hero_data = load_hero_from_feishu(
@@ -1084,16 +1067,14 @@ def main() -> int:
                 config_path=args.config,
             )
         except FeishuHeroError as error:
-            print(f"飞书主推表读取失败: {error}", file=sys.stderr)
-            print(
+            logger.error(f"飞书主推表读取失败: {error}")
+            logger.info(
                 "请确认：1) config.toml [feishu].app_secret 或 FEISHU_APP_SECRET  "
                 "2) 应用仍有表格可阅读权限  "
-                "3) 链接/子表名正确",
-                file=sys.stderr,
-            )
+                "3) 链接/子表名正确")
             return 2
         except Exception as error:
-            print(f"飞书主推表读取异常: {error}", file=sys.stderr)
+            logger.error(f"飞书主推表读取异常: {error}")
             return 2
 
         hero_keys = set(hero_data.get("hero_keys") or set())
@@ -1103,21 +1084,18 @@ def main() -> int:
         if len(hero_skus) > 20:
             preview = f"{preview}, …"
         cfg_note = hero_data.get("config_path") or "（无 config.toml，仅用环境变量/默认）"
-        print(f"[配置] {cfg_note}")
-        print(
+        logger.info(f"[配置] {cfg_note}")
+        logger.info(
             f"[主推飞书] title={hero_data.get('doc_title') or hero_data.get('sheet_title')} "
             f"sheet={hero_data.get('sheet_title')} "
             f"token={hero_data.get('spreadsheet_token')} "
             f"→ 货号 {len(hero_data.get('all_skus') or [])} 个，"
             f"主推货号 {len(hero_skus)} 个，主推商品ID {len(hero_product_ids)} 个，"
             f"匹配键 {len(hero_keys)} 个"
-            + (f"; 主推货号: {preview}" if preview else "")
-        )
+            + (f"; 主推货号: {preview}" if preview else ""))
         if not hero_keys:
-            print(
-                "警告: 飞书表已读到，但「是否主推=是」为空；条件2 将全部判非主推",
-                file=sys.stderr,
-            )
+            logger.info(
+                "警告: 飞书表已读到，但「是否主推=是」为空；条件2 将全部判非主推")
 
     criteria = Criteria(require_hero_sku=not args.skip_hero_check)
     t0 = time.time()
@@ -1132,22 +1110,21 @@ def main() -> int:
         try:
             pre = _load_export_rows(args.from_export)
         except Exception as error:
-            print(f"读取导出失败: {error}", file=sys.stderr)
+            logger.error(f"读取导出失败: {error}")
             return 2
         if not pre:
-            print("导出没有可用行", file=sys.stderr)
+            logger.error("导出没有可用行")
             return 1
         raw_rows = pre
-        print(
+        logger.info(
             f"[输入] 导出 {args.from_export} → {len(pre)} 行；"
             + (
                 "跳过扫表和详情，仅做延后列表确认"
                 if args.confirm_export
                 else "跳过扫表和详情，仅对通过行做批准前状态预检"
-            )
-        )
+            ))
         if args.with_detail or args.detail_all or args.require_detail:
-            print("[输入] --from-export 已忽略 --with-detail / --detail-all / --require-detail")
+            logger.info("[输入] --from-export 已忽略 --with-detail / --detail-all / --require-detail")
     else:
         try:
             pending_result = load_pending_rows(
@@ -1159,15 +1136,15 @@ def main() -> int:
             )
             raw_rows = pending_result.rows
         except Exception as e:
-            print(f"扫表失败: {e}", file=sys.stderr)
+            logger.error(f"扫表失败: {e}")
             return 1
 
-        print(f"[数据源] 实际使用={pending_result.source_used}")
+        logger.info(f"[数据源] 实际使用={pending_result.source_used}")
         if pending_result.fallback_reason:
-            print(f"[数据源] fallback={pending_result.fallback_reason}")
+            logger.info(f"[数据源] fallback={pending_result.fallback_reason}")
 
         if not raw_rows:
-            print("未读到待审核行", file=sys.stderr)
+            logger.error("未读到待审核行")
             return 1
 
     if not args.from_export:
@@ -1207,16 +1184,15 @@ def main() -> int:
             else:
                 # 列表层已过的再拉详情（禁止 --detail-limit 截断；要限量用 --max-rows）
                 detail_targets = [x for x in pre if x.get("eligible")]
-            print(f"详情复筛：共 {len(detail_targets)} 人")
+            logger.info(f"详情复筛：共 {len(detail_targets)} 人")
 
             by_key = {
                 (x.get("apply_id") or x.get("creator_name")): x for x in pre
             }
             for i, target in enumerate(detail_targets, 1):
                 key = target.get("apply_id") or target.get("creator_name")
-                print(
-                    f"  [{i}/{len(detail_targets)}] {target.get('creator_name')}"
-                )
+                logger.info(
+                    f"  [{i}/{len(detail_targets)}] {target.get('creator_name')}")
                 # 合并 raw 字段给 fetch
                 src = next(
                     (
@@ -1237,28 +1213,27 @@ def main() -> int:
                     )
                     res = detail_result.result
                 except Exception as e:
-                    print(f"    失败: {e}")
+                    logger.info(f"    失败: {e}")
                     target["detail_error"] = str(e)
                     if args.data_source == "api":
                         strict_api_detail_failure_count += 1
                     continue
                 if is_verbose():
-                    print(f"    详情数据源={detail_result.source_used}")
+                    logger.info(f"    详情数据源={detail_result.source_used}")
                 if detail_result.shadow_report:
                     detail_shadow_reports.append(detail_result.shadow_report)
                 if not res.get("ok"):
-                    print(f"    失败: {res.get('error')}")
+                    logger.info(f"    失败: {res.get('error')}")
                     target["detail_error"] = res.get("error")
                     if args.data_source == "api":
                         strict_api_detail_failure_count += 1
                 else:
                     d = res["detail"]
                     if is_verbose():
-                        print(
+                        logger.info(
                             f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
                             f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
-                            f"type={d.get('creator_type')}"
-                        )
+                            f"type={d.get('creator_type')}")
                     # 写回 pre 行
                     row = by_key.get(key) or target
                     for k in (
@@ -1293,13 +1268,12 @@ def main() -> int:
                             row[k] = d[k]
                     row["detail_checked"] = True
                     if not d.get("video_gpm") and not d.get("live_gpm") and is_verbose():
-                        print(
+                        logger.info(
                             f"    警告: 视频/直播GPM仍为空 "
                             f"cn_card={d.get('has_cn_video_card')} "
                             f"en_card={d.get('has_en_video_card')} "
                             f"overall={d.get('overall_gpm')} "
-                            f"via={d.get('extract_via')}"
-                        )
+                            f"via={d.get('extract_via')}")
                 if args.detail_delay:
                     time.sleep(args.detail_delay)
 
@@ -1332,18 +1306,16 @@ def main() -> int:
             pre = reevaluated_rows
 
     passed = [x for x in pre if x.get("eligible")]
-    print(
+    logger.info(
         f"--- 判定: 合计={len(pre)} 通过={len(passed)} "
-        f"用时 {time.time() - t0:.1f}s ---"
-    )
+        f"用时 {time.time() - t0:.1f}s ---")
     for x in passed[:30]:
-        print(
+        logger.info(
             f"  [通过] {x.get('creator_name')}\t"
             f"粉={x.get('followers_n')}\tGMV={x.get('gmv_n')}\t"
             f"件={x.get('units_n')}\t履约={x.get('fulfillment_n')}\t"
             f"VGPM={x.get('video_gpm_n')}\tLGPM={x.get('live_gpm_n')}\t"
-            f"type={x.get('creator_type')}\thero={x.get('is_hero')}"
-        )
+            f"type={x.get('creator_type')}\thero={x.get('is_hero')}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_prefix = args.out or (ROOT / "exports" / f"sample_screen_{ts}")
@@ -1384,17 +1356,16 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
-        print(f"[shadow] 差异报告: {shadow_path}")
+        logger.info(f"[shadow] 差异报告: {shadow_path}")
 
     if args.confirm_export:
         candidates = _select_confirm_candidates_from_export(
             pre,
             force=bool(args.force_confirm),
         )
-        print(
+        logger.info(
             f"--- CONFIRM 目标 {len(candidates)}"
-            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---"
-        )
+            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---")
         _run_confirm_pipeline(
             store_id=store_id,
             candidates=candidates,
@@ -1407,9 +1378,9 @@ def main() -> int:
         # 批准前备份（可回看筛查结果；平台侧「同意」不可自动撤销）
         if not args.no_pre_backup:
             backup_paths = _write_backup(pre, out_prefix)
-            print("--- 批准前备份 ---")
+            logger.info("--- 批准前备份 ---")
             for key, path in backup_paths.items():
-                print(f"  {key}: {path}")
+                logger.info(f"  {key}: {path}")
 
         # 合并 can_be_approved 等列表字段（evaluate 可能未保留）
         raw_by_apply = {
@@ -1429,10 +1400,9 @@ def main() -> int:
             candidates = _select_execute_candidates_from_export(pre)
         else:
             candidates = [row for row in pre if row.get("eligible")]
-        print(
+        logger.info(
             f"--- EXECUTE 目标通过行 {len(candidates)}"
-            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---"
-        )
+            f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---")
         _run_execute_pipeline(
             store_id=store_id,
             candidates=candidates,
@@ -1462,18 +1432,17 @@ def main() -> int:
         [row for row in pre if row.get("eligible")] if args.eligible_only else pre
     )
     paths = write_reports(export_rows, out_prefix)
-    print("--- 导出 ---")
+    logger.info("--- 导出 ---")
     for key, path in paths.items():
-        print(f"  {key}: {path}")
+        logger.info(f"  {key}: {path}")
     passed_count = sum(1 for row in pre if row.get("eligible"))
     if args.confirm_export:
         confirmed_count = sum(
             1 for row in pre if row.get("approve_confirmation") == "confirmed"
         )
-        print(
+        logger.info(
             f"完成。模式=CONFIRM 列表已确认={confirmed_count} "
-            f"写飞书={'开' if args.write_feishu else '关'}。"
-        )
+            f"写飞书={'开' if args.write_feishu else '关'}。")
         summary_title = "「核对补写」完成"
         summary_stats = [
             f"列表已确认 : {confirmed_count}",
@@ -1483,15 +1452,13 @@ def main() -> int:
         summary_hint = "日常请双击「2-筛查批准写飞书发私信」，不要拆开补写。"
     elif args.execute:
         approved_count = sum(1 for row in pre if row.get("approve_status") == "approved")
-        print(
+        logger.info(
             f"完成。模式=EXECUTE 批准成功={approved_count} "
-            f"写飞书={'开' if args.write_feishu else '关'}。"
-        )
-        print(
+            f"写飞书={'开' if args.write_feishu else '关'}。")
+        logger.info(
             "回退：平台「同意」无法脚本撤销；飞书新建行见导出列 feishu_record_id / 控制台提示。"
             f"「待发货」约 {PLATFORM_STATUS_LAG_MINUTES} 分钟后刷新，"
-            "可用 --confirm-export 延后核对。"
-        )
+            "可用 --confirm-export 延后核对。")
         summary_title = "「批准写飞书」完成"
         summary_stats = [
             f"批准成功 : {approved_count}",
@@ -1503,7 +1470,7 @@ def main() -> int:
             "日常请双击「2-筛查批准写飞书发私信」，它会自动等。"
         )
     else:
-        print("完成。未执行任何同意/批准/拒绝操作。")
+        logger.info("完成。未执行任何同意/批准/拒绝操作。")
         summary_title = "「筛查名单」完成"
         summary_stats = [
             f"通过   : {passed_count}",
@@ -1511,7 +1478,7 @@ def main() -> int:
             "模式   : 筛查（不会批准）",
         ]
         summary_hint = "若要批准并发介绍，双击「2-筛查批准写飞书发私信」。"
-    print(
+    logger.info(
         "\n"
         + format_job_summary(
             title=summary_title,
@@ -1521,16 +1488,12 @@ def main() -> int:
             xlsx_path=paths.get("xlsx"),
             root=ROOT,
             hint=summary_hint,
-        ),
-        flush=True,
-    )
+        ))
     if strict_api_detail_failure_count:
-        print(
+        logger.info(
             "纯 API 模式存在详情读取失败："
             f"{strict_api_detail_failure_count}/{len(detail_targets)}。"
-            "已保留导出用于排查，本次返回非零状态。",
-            file=sys.stderr,
-        )
+            "已保留导出用于排查，本次返回非零状态。")
         return 1
     return 0
 

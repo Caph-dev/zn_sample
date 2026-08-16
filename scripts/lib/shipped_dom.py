@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +15,8 @@ from urllib.parse import parse_qs, urlparse
 from .sample_dom import click_next
 from .sample_navigation import navigate_to_sample_request
 from .zclaw import zclaw_exec
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_REQUEST_URL = (
     "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
@@ -200,12 +204,11 @@ def scrape_shipped_list(
         if not isinstance(data, dict):
             raise RuntimeError(f"extract shipped bad: {data!r}"[:300])
         rows = data.get("rows") or []
-        print(
+        logger.info(
             f"[已发货] page={data.get('page') or page_i + 1} "
-            f"rows={len(rows)} href={(data.get('href') or '')[:90]}"
-        )
+            f"rows={len(rows)} href={(data.get('href') or '')[:90]}")
         if page_i == 0 and not rows:
-            print("[已发货] 当前 tab 0 行")
+            logger.info("[已发货] 当前 tab 0 行")
             return []
         for row in rows:
             key = (
@@ -219,12 +222,12 @@ def scrape_shipped_list(
             row["_shop_id"] = shop_id_from_href(str(data.get("href") or ""))
             all_rows.append(row)
             if max_rows and len(all_rows) >= max_rows:
-                print(f"[已发货] 达到 max_rows={max_rows}，停止")
+                logger.info(f"[已发货] 达到 max_rows={max_rows}，停止")
                 return all_rows
         if not data.get("canNext"):
             break
         nxt = click_next(store_id, page_wait=page_wait)
         if not nxt.get("ok"):
             break
-    print(f"[已发货] 完成，去重后 {len(all_rows)} 行")
+    logger.info(f"[已发货] 完成，去重后 {len(all_rows)} 行")
     return all_rows

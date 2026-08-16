@@ -8,10 +8,14 @@
 """
 from __future__ import annotations
 
+import logging
+
 import time
 from typing import Any
 
 from .zclaw import zclaw_exec
+
+logger = logging.getLogger(__name__)
 
 ENSURE_PENDING_TAB_JS = r"""
 (() => {
@@ -239,11 +243,10 @@ def scrape_pending_list(
         data = extract_page(store_id)
         rows = data.get("rows") or []
         list_href = data.get("href") or list_href
-        print(
+        logger.info(
             f"[扫表] page={data.get('page') or page_i + 1} "
             f"rows={len(rows)} pending={data.get('pending_count')} "
-            f"href={(data.get('href') or '')[:90]}"
-        )
+            f"href={(data.get('href') or '')[:90]}")
         if page_i == 0 and not rows:
             raise RuntimeError(
                 "当前页未读到待审核行。请确认：已打开「样品申请」且在「待审核」tab，列表已加载。"
@@ -259,12 +262,12 @@ def scrape_pending_list(
             r["_list_href"] = list_href
             all_rows.append(r)
             if max_rows and len(all_rows) >= max_rows:
-                print(f"[扫表] 达到 max_rows={max_rows}，停止")
+                logger.info(f"[扫表] 达到 max_rows={max_rows}，停止")
                 return all_rows
         if not data.get("canNext"):
             break
         nxt = click_next(store_id, page_wait=page_wait)
         if not nxt.get("ok"):
             break
-    print(f"[扫表] 完成，去重后 {len(all_rows)} 行")
+    logger.info(f"[扫表] 完成，去重后 {len(all_rows)} 行")
     return all_rows

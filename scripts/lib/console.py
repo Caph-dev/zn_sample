@@ -1,7 +1,10 @@
 """终端详略。默认只打业务员能看懂的进度；--verbose 才打 API 明细。"""
 from __future__ import annotations
 
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 _verbose = False
 _last_progress_cols = 0
@@ -28,7 +31,7 @@ def is_verbose() -> bool:
 
 def verbose_print(*args: object, **kwargs: object) -> None:
     if _verbose:
-        print(*args, **kwargs)
+        logger.debug("%s", " ".join(str(item) for item in args))
 
 
 def progress_line(text: str) -> None:

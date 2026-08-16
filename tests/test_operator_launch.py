@@ -59,6 +59,8 @@ class ParseAndArgvTests(unittest.TestCase):
         argv = build_job_argv("screen", python="/usr/bin/python3", out_prefix=out)
         self.assertEqual(argv[0], "/usr/bin/python3")
         self.assertEqual(Path(argv[1]), SCREEN_SCRIPT)
+        self.assertNotIn("\\", argv[1])
+        self.assertNotIn("\\", argv[argv.index("--out") + 1])
         self.assertIn("--from-seller-home", argv)
         self.assertIn("--with-detail", argv)
         self.assertIn("--require-detail", argv)
@@ -672,7 +674,8 @@ class StubFileTests(unittest.TestCase):
         self.assertIn("PYTHONIOENCODING=utf-8", text)
         self.assertIn("Python 版本太旧", text)
         self.assertIn("代号 %CODE%", text)
-        self.assertIn(r"%APPDATA%\npm\*", text)
+        self.assertNotIn("PATH=", text)
+        self.assertNotIn("%APPDATA%", text)
         self.assertTrue(
             (PROJECT_ROOT / "scripts" / "run_launcher.bat").read_bytes().startswith(
                 b"\xef\xbb\xbf"

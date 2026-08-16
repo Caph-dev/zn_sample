@@ -2,7 +2,12 @@
 
 按 SOP 筛「联盟中心 → 样品申请管理 → 待审核」，导出名单，批准、写飞书、发介绍/物流私信。
 
-维护纪律见 [AGENTS.md](./AGENTS.md)，规则原文见 [样品申请筛查 SOP](./样品申请筛查sop/样品申请筛查sop.md)。新电脑配 Python / Node / `ziniao-cli` 见 [快速开始.md](./快速开始.md)。
+| 文档 | 读谁 |
+|------|------|
+| [快速开始.md](./快速开始.md) | 新电脑装 Python / Node / `ziniao-cli` |
+| 本文 | 日常双击、检查环境、出问题 |
+| [AGENTS.md](./AGENTS.md) | Agent / 维护：门闩、阈值、页面契约 |
+| [样品申请筛查 SOP](./样品申请筛查sop/样品申请筛查sop.md) | 规则原文 |
 
 不点「拒绝」「邀请」。
 
@@ -76,7 +81,7 @@ ziniao-cli --version
 ziniao-cli doctor
 ```
 
-不要跑 `scripts\ziniao-status.sh`（依赖 zsh / pgrep / lsof）。Windows 预检只看工作台是否只开一家店。双击 `.bat` 时会把 `%APPDATA%\npm` 临时加进 PATH，以便找到 `ziniao-cli.cmd`。
+不要跑 `scripts\ziniao-status.sh`（依赖 zsh / pgrep / lsof）。Windows 预检只看工作台是否只开一家店。启动器**不改 PATH**：用 `py` / `python` / `which` 解析到的绝对路径；`ziniao-cli.cmd` 在 Python 里换成 `node` + `run.js` 的 POSIX 绝对路径。
 
 ---
 
@@ -104,7 +109,7 @@ ziniao-cli doctor
 
 ## 技术人员：终端等价命令
 
-四个脚本仍然断开。`--from-export` 不写路径 = `exports/` 里最新一份筛查 json。未传 `--store-id` 且只开着一家店时，从 running 识别。终端默认只打进度；要看页面 API 明细再加 `--verbose`。筛查导出是 CSV + JSON，不再自动写 xlsx。
+四个脚本仍然断开。参数**约束**（默认值、门闩、禁止组合）只写在 [AGENTS.md](./AGENTS.md)，这里只给可复制命令。`--from-export` 不写路径 = `exports/` 里最新一份筛查 json。未传 `--store-id` 且只开着一家店时，从 running 识别。终端默认只打进度；要看页面 API 明细再加 `--verbose`。筛查导出是 CSV + JSON，不再自动写 xlsx。
 
 ```bash
 # 开店（店已开则不重开）
@@ -133,7 +138,7 @@ python3 scripts/sync_shipped_tracking.py \
   --write-feishu --send-tracking --execute --yes --execute-limit 0
 ```
 
-Windows（PowerShell）：`python3` 换成 `py -3`，`scripts/` 换成 `scripts\`。
+Windows（cmd / PowerShell）：`python3` 换成 `py -3`。路径一律用正斜杠也可以，例如 `scripts/screen_sample_requests.py`。
 
 ## 参数
 

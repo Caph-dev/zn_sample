@@ -2,6 +2,8 @@
 """样品申请列表和筛查详情的数据源编排。"""
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -11,6 +13,8 @@ from .creator_api import fetch_creator_detail_api
 from .creator_detail import fetch_detail_for_row
 from .sample_api import scrape_pending_list_api
 from .sample_dom import scrape_pending_list
+
+logger = logging.getLogger(__name__)
 
 DATA_SOURCE_CHOICES = ("dom", "api", "auto", "shadow")
 
@@ -187,7 +191,7 @@ def load_pending_rows(
             return PendingListResult(rows=rows, source_used="api")
         except Exception as error:
             fallback_reason = f"{type(error).__name__}: {error}"
-            print(f"[数据源] API 失败，回退 DOM: {fallback_reason}", flush=True)
+            logger.info(f"[数据源] API 失败，回退 DOM: {fallback_reason}")
             rows = scrape_pending_list(
                 store_id,
                 page_wait=page_wait,
@@ -214,7 +218,7 @@ def load_pending_rows(
         )
     except Exception as error:
         api_error = f"{type(error).__name__}: {error}"
-        print(f"[shadow] API 读取失败: {api_error}", flush=True)
+        logger.info(f"[shadow] API 读取失败: {api_error}")
 
     dom_rows = scrape_pending_list(
         store_id,
@@ -231,15 +235,13 @@ def load_pending_rows(
         "missing_in_dom": [],
         "field_mismatches": [],
     }
-    print(
+    logger.info(
         "[shadow] "
         f"ok={report.get('ok')} dom={report.get('dom_count')} "
         f"api={report.get('api_count')} "
         f"missing_api={len(report.get('missing_in_api') or [])} "
         f"missing_dom={len(report.get('missing_in_dom') or [])} "
-        f"field_mismatches={len(report.get('field_mismatches') or [])}",
-        flush=True,
-    )
+        f"field_mismatches={len(report.get('field_mismatches') or [])}")
     marked_rows = _mark_source(dom_rows, "dom-shadow")
     return PendingListResult(
         rows=marked_rows,
@@ -367,10 +369,8 @@ def load_creator_detail(
                 source_used="api",
             )
         fallback_reason = str(api_result.get("error") or "unknown-api-detail-error")
-        print(
-            f"    [详情数据源] API 传输/结构失败，回退 DOM: {fallback_reason}",
-            flush=True,
-        )
+        logger.info(
+            f"    [详情数据源] API 传输/结构失败，回退 DOM: {fallback_reason}")
         dom_result = fetch_detail_for_row(
             store_id,
             row,
@@ -414,15 +414,13 @@ def load_creator_detail(
             "api_only_fields": [],
             "dom_only_fields": [],
         }
-    print(
+    logger.info(
         f"    [详情shadow] status={report.get('comparison_status')} "
         f"ok={report.get('ok')} "
         f"matched={len(report.get('matched_fields') or [])} "
         f"mismatches={len(report.get('mismatches') or [])} "
         f"api_only={len(report.get('api_only_fields') or [])} "
-        f"dom_only={len(report.get('dom_only_fields') or [])}",
-        flush=True,
-    )
+        f"dom_only={len(report.get('dom_only_fields') or [])}")
     return CreatorDetailResult(
         result=_mark_detail_result(dom_result, "dom-shadow"),
         source_used="dom-shadow",

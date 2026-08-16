@@ -15,8 +15,6 @@ if not defined VALID (
   exit /b 2
 )
 
-if exist "%APPDATA%\npm\*" set "PATH=%APPDATA%\npm;%PATH%"
-
 set "PY="
 set "SEEN_PY="
 py -3 -c "import sys" >nul 2>&1

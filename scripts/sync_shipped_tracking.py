@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 import time
@@ -21,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.app_config import load_bitable_settings  # noqa: E402
 from lib.creator_detail import extract_creator_detail, open_creator_detail_by_url  # noqa: E402
 from lib.detect_lang import detect_creator_lang  # noqa: E402
+from lib.app_log import configure_logging  # noqa: E402
 from lib.console import set_verbose  # noqa: E402
 from lib.export_util import write_generic_reports  # noqa: E402
 from lib.run_summary import format_job_summary  # noqa: E402
@@ -68,6 +71,8 @@ try:
     BEIJING = ZoneInfo("Asia/Shanghai")
 except Exception:
     BEIJING = timezone(timedelta(hours=8))
+
+logger = logging.getLogger(__name__)
 
 EXPORT_FIELDS = [
     "creator_name",
@@ -237,19 +242,19 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
 
     if args.send_tracking and args.execute and not args.yes:
-        print("将真实发送物流私信。确认请加 --yes。", file=sys.stderr)
+        logger.error("将真实发送物流私信。确认请加 --yes。")
         return 2
     if args.send_tracking and args.execute and not args.write_feishu:
-        print("发物流私信须同时 --write-feishu（先有飞书单号再发）。", file=sys.stderr)
+        logger.error("发物流私信须同时 --write-feishu（先有飞书单号再发）。")
         return 2
     if _before_four_pm_beijing() and not args.force:
         now = datetime.now(BEIJING).strftime("%H:%M")
-        print(
-            f"现在北京时间 {now}，早于 16:00。SOP 第 7 步须四点后跑；测试请加 --force。",
-            file=sys.stderr,
+        logger.error(
+            f"现在北京时间 {now}，早于 16:00。SOP 第 7 步须四点后跑；测试请加 --force。"
         )
         return 2
 
@@ -260,22 +265,21 @@ def main() -> int:
         default_store_id=default_sid,
     )
 
-    print("=" * 60)
-    print(
+    logger.info("=" * 60)
+    logger.info(
         f"第7-9步物流同步 | 列表数据源={args.data_source} | "
         f"物流数据源={args.tracking_source} | "
         f"写飞书={'开' if args.write_feishu else '关'} | "
         f"发私信={'开' if args.send_tracking and args.execute else '关'} | "
-        f"force={'是' if args.force else '否'}"
-    )
-    print("=" * 60)
+        f"force={'是' if args.force else '否'}")
+    logger.info("=" * 60)
 
     hero_data: dict[str, Any] = {}
     try:
         hero_data = load_hero_from_feishu(config_path=args.config)
-        print(f"[主推] 已加载，货号映射用")
+        logger.info(f"[主推] 已加载，货号映射用")
     except FeishuHeroError as error:
-        print(f"[主推] 读取失败，寄样产品只能按货号模糊匹配: {error}", file=sys.stderr)
+        logger.error(f"[主推] 读取失败，寄样产品只能按货号模糊匹配: {error}")
 
     product_id_to_sku = build_product_id_to_sku_map(hero_data)
     bitable_token = None
@@ -295,9 +299,9 @@ def main() -> int:
         sample_options = list_sample_product_options(
             bitable_token, app_token=app_token, table_id=table_id
         )
-        print(f"[飞书] 可读 table={table_id} 寄样选项={len(sample_options)}")
+        logger.info(f"[飞书] 可读 table={table_id} 寄样选项={len(sample_options)}")
     except Exception as error:
-        print(f"[飞书] 不可用，只做页面抽取: {error}", file=sys.stderr)
+        logger.error(f"[飞书] 不可用，只做页面抽取: {error}")
         bitable_token = None
 
     # 指定达人时先扫完全表再过滤，避免 max_rows 把目标截在页外。
@@ -318,12 +322,12 @@ def main() -> int:
                 max_pages=args.max_pages,
                 max_rows=scrape_max_rows,
             )
-            print(f"[已发货] API 读取完成 rows={len(rows)}")
+            logger.info(f"[已发货] API 读取完成 rows={len(rows)}")
         except Exception as error:
             if args.data_source == "api":
-                print(f"[已发货] API 读取失败，未自动执行 DOM 回退: {error}", file=sys.stderr)
+                logger.error(f"[已发货] API 读取失败，未自动执行 DOM 回退: {error}")
                 return 2
-            print(f"[已发货] API 读取失败，回退 DOM: {error}", file=sys.stderr)
+            logger.error(f"[已发货] API 读取失败，回退 DOM: {error}")
             rows = scrape_shipped_list(
                 store_id,
                 max_pages=args.max_pages,
@@ -341,15 +345,14 @@ def main() -> int:
                 or (wanted_id and str(row.get("creator_id") or "").strip() == wanted_id)
             )
         ]
-        print(
+        logger.info(
             f"[过滤] creator_name={args.creator_name or '-'} "
-            f"creator_id={args.creator_id or '-'} → {len(rows)} 行"
-        )
+            f"creator_id={args.creator_id or '-'} → {len(rows)} 行")
     if args.max_rows and len(rows) > args.max_rows:
         rows = rows[: args.max_rows]
-        print(f"[限量] max_rows={args.max_rows} → {len(rows)} 行")
+        logger.info(f"[限量] max_rows={args.max_rows} → {len(rows)} 行")
     if not rows:
-        print("已发货 0 行")
+        logger.info("已发货 0 行")
         return 0
 
     unlimited_send = args.execute_limit <= 0
@@ -373,7 +376,7 @@ def main() -> int:
         if not order_id:
             out["error"] = "列表无 main_order_id"
             results.append(out)
-            print(f"  {seq} [跳过] {name}: 无订单号")
+            logger.info(f"  {seq} [跳过] {name}: 无订单号")
             continue
 
         if args.tracking_source == "dom":
@@ -399,7 +402,7 @@ def main() -> int:
                         "error": f"物流 API 读取失败: {error}",
                     }
                 else:
-                    print(f"    物流 API 失败，回退 DOM: {error}", file=sys.stderr)
+                    logger.error(f"    物流 API 失败，回退 DOM: {error}")
                     tracking = fetch_tiktok_tracking(
                         store_id,
                         order_id,
@@ -411,13 +414,12 @@ def main() -> int:
         out["tracking_source"] = tracking.get("via") or args.tracking_source
         if not tracking.get("ok"):
             out["error"] = tracking.get("error") or "无 TikTok 物流单号"
-            print(f"  {seq} [无运单] {name} order={order_id}: {out['error']}")
+            logger.info(f"  {seq} [无运单] {name} order={order_id}: {out['error']}")
             results.append(out)
             continue
-        print(
+        logger.info(
             f"  {seq} [物流] {name} order={order_id} "
-            f"track={out['tracking_raw'] or out['tracking_no']}"
-        )
+            f"track={out['tracking_raw'] or out['tracking_no']}")
 
         option = ""
         sku = ""
@@ -466,7 +468,7 @@ def main() -> int:
             existing_lang = ""
             if bitable_token:
                 out["feishu_status"] = "no-record"
-                print(f"    {seq} 飞书无匹配行，不新建")
+                logger.info(f"    {seq} 飞书无匹配行，不新建")
 
         if existing_lang in {"英语", "西班牙语"}:
             out["feishu_lang"] = existing_lang
@@ -488,16 +490,14 @@ def main() -> int:
             out["cooperation_status_update"] = plan.get("status_transition")
             if plan.get("skip_tracking"):
                 out["feishu_status"] = "skip-existing-track"
-                print(
+                logger.info(
                     f"    {seq} 飞书已有不同运单 {plan.get('current_track')}，"
-                    "未覆盖且未推进合作状态"
-                )
+                    "未覆盖且未推进合作状态")
             elif feishu_shipping_already_current(plan, str(out["tracking_raw"])):
                 out["feishu_status"] = "unchanged"
-                print(
+                logger.info(
                     f"    {seq} 飞书无需改写："
-                    f"{describe_cooperation_transition(str(plan.get('status_transition') or ''))}"
-                )
+                    f"{describe_cooperation_transition(str(plan.get('status_transition') or ''))}")
             else:
                 try:
                     update_record_fields(
@@ -510,14 +510,13 @@ def main() -> int:
                     out["feishu_status"] = "updated"
                     written += 1
                     transition = str(plan.get("status_transition") or "")
-                    print(
+                    logger.info(
                         f"    {seq} 飞书已更新：快递单号；"
-                        f"{describe_cooperation_transition(transition)}"
-                    )
+                        f"{describe_cooperation_transition(transition)}")
                 except FeishuBitableError as error:
                     out["feishu_status"] = "update-error"
                     out["error"] = str(error)
-                    print(f"    {seq} 飞书更新失败: {error}")
+                    logger.info(f"    {seq} 飞书更新失败: {error}")
                     results.append(out)
                     continue
         elif not args.write_feishu:
@@ -564,12 +563,12 @@ def main() -> int:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = args.out or (ROOT / "exports" / f"sample_shipped_{ts}")
     paths = write_generic_reports(results, prefix, fieldnames=EXPORT_FIELDS)
-    print("--- 导出 ---")
+    logger.info("--- 导出 ---")
     for key, path in paths.items():
-        print(f"  {key}: {path}")
-    print(f"完成 rows={len(results)} 飞书写入={written} 私信发送={sent}")
+        logger.info(f"  {key}: {path}")
+    logger.info(f"完成 rows={len(results)} 飞书写入={written} 私信发送={sent}")
     sending = bool(args.send_tracking and args.execute)
-    print(
+    logger.info(
         "\n"
         + format_job_summary(
             title="「获取物流信息写飞书发单号」完成",
@@ -584,9 +583,7 @@ def main() -> int:
             xlsx_path=paths.get("xlsx"),
             root=ROOT,
             hint="请看报表里的飞书状态和私信发送结果。",
-        ),
-        flush=True,
-    )
+        ))
     return 0
 
 

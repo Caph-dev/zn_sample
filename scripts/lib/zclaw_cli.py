@@ -24,8 +24,16 @@ WINDOWS_SHIM_INCOMPLETE = (
 )
 
 
+def fs_path(path: str | Path) -> str:
+    """绝对路径，统一成 POSIX（Windows 为 C:/Users/...）。
+
+    给 node / Python 子进程用。不改系统 PATH，也不拼接反斜杠。
+    """
+    return Path(path).expanduser().resolve().as_posix()
+
+
 def resolve_ziniao_cli_command(*, which: WhichFn | None = None) -> list[str]:
-    """返回可直接传给 subprocess 的命令前缀（绝对路径）。"""
+    """返回可直接传给 subprocess 的命令前缀（绝对 POSIX 路径）。"""
     which_fn = which or shutil.which
     found = which_fn("ziniao-cli") or which_fn("ziniao-cli.cmd")
     if not found:
@@ -39,8 +47,8 @@ def resolve_ziniao_cli_command(*, which: WhichFn | None = None) -> list[str]:
         node_found = which_fn("node") or which_fn("node.exe")
         if not node_found or not runner.is_file():
             raise RuntimeError(WINDOWS_SHIM_INCOMPLETE)
-        return [str(Path(node_found).resolve()), str(runner)]
-    return [str(cli_path)]
+        return [fs_path(node_found), fs_path(runner)]
+    return [fs_path(cli_path)]
 
 
 def run_ziniao_cli(

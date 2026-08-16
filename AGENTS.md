@@ -1,9 +1,11 @@
 # zn_sample · AGENTS.md
 
 本文件给 **Agent / 技术维护**：纪律、数据 ID、实现契约。  
-**不写**业务员逐步教程、不堆常用命令。业务员操作和命令清单见 [README.md](./README.md)；规则原文见 `样品申请筛查sop/样品申请筛查sop.md`。
+日常双击 / 出问题只写 [README.md](./README.md)。新电脑配机只写 [快速开始.md](./快速开始.md)。规则原文见 `样品申请筛查sop/样品申请筛查sop.md`。
 
 紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。勿混用 `zn_daren` 的 `--execute` 取消逻辑。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
+
+不要改系统或启动器 `PATH`。Windows 上 `ziniao-cli.cmd` 只解析成 `node` + `run.js` 的**绝对 POSIX 路径**（`C:/...`），子进程固定 UTF-8。日志用 `logging`，入口 `configure_logging`，库代码 `getLogger`。
 
 ---
 
@@ -58,7 +60,7 @@
 
 ## SOP → 脚本停止点
 
-四个脚本断开。命令形态见 README（不超过 6 条常用）。
+四个脚本断开。可复制命令只写 README，这里只写停点和门闩。
 
 | SOP | 脚本 | 默认停 | 加开关 | 不会做 |
 |---|---|---|---|---|

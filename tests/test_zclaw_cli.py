@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from lib.zclaw_cli import (  # noqa: E402
     CLI_NOT_FOUND,
     WINDOWS_SHIM_INCOMPLETE,
+    fs_path,
     resolve_ziniao_cli_command,
     run_ziniao_cli,
 )
@@ -30,8 +31,9 @@ class ResolveZiniaoCliCommandTests(unittest.TestCase):
 
             self.assertEqual(
                 resolve_ziniao_cli_command(which=which),
-                [str(cli.resolve())],
+                [fs_path(cli)],
             )
+            self.assertNotIn("\\", resolve_ziniao_cli_command(which=which)[0])
 
     def test_windows_cmd_uses_node_and_run_js(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,8 +57,10 @@ class ResolveZiniaoCliCommandTests(unittest.TestCase):
 
             self.assertEqual(
                 resolve_ziniao_cli_command(which=which),
-                [str(node.resolve()), str(runner.resolve())],
+                [fs_path(node), fs_path(runner)],
             )
+            for part in resolve_ziniao_cli_command(which=which):
+                self.assertNotIn("\\", part)
 
     def test_windows_cmd_missing_runner_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
