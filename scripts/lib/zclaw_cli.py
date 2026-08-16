@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -12,6 +13,38 @@ from pathlib import Path
 
 WhichFn = Callable[[str], str | None]
 RunnerFn = Callable[..., subprocess.CompletedProcess]
+
+
+def default_which(name: str) -> str | None:
+    """更可靠的 which 实现：
+
+    - 优先使用 shutil.which
+    - 在 Windows 上若 shutil.which 未找到，回退使用 `where` 命令（可能定位到 .cmd/.ps1 shim）
+    - 返回第一个非空路径或 None
+    """
+    # 首先尝试 shutil.which，这会处理 PATHEXT 与常见场景
+    try:
+        p = shutil.which(name)
+    except Exception:
+        p = None
+    if p:
+        return p
+
+    # 在 Windows 上，shutil.which 有时找不到由 npm 放在 PATH 中的 shim，使用 `where` 作为回退
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(["where", name], capture_output=True, text=True, shell=False)
+            if proc.returncode == 0 and proc.stdout:
+                # where 可能返回多行，取第一行非空结果
+                for line in proc.stdout.splitlines():
+                    line = line.strip()
+                    if line:
+                        return line
+        except Exception:
+            # 忽略并返回 None
+            return None
+
+    return None
 
 
 CLI_NOT_FOUND = (
@@ -33,9 +66,29 @@ def fs_path(path: str | Path) -> str:
 
 
 def resolve_ziniao_cli_command(*, which: WhichFn | None = None) -> list[str]:
-    """返回可直接传给 subprocess 的命令前缀（绝对 POSIX 路径）。"""
-    which_fn = which or shutil.which
-    found = which_fn("ziniao-cli") or which_fn("ziniao-cli.cmd")
+    """返回可直接传给 subprocess 的命令前缀（绝对 POSIX 路径）。
+
+    在 Windows 上要兼容多种 shim：
+    - 优先查找常见候选名（ziniao-cli, ziniao-cli.cmd, .bat, .exe, .ps1）
+    - 如果找到的是 .cmd/.bat，尝试向上查找可能的 node_modules 中的 run.js（全局或本地安装场景）并用 node 直接运行它
+    - 如果找不到 run.js，则回退为直接使用找到的可执行文件（便于在能直接运行 .cmd/.ps1 的环境中工作）
+    """
+    which_fn = which or default_which
+
+    candidates = [
+        "ziniao-cli",
+        "ziniao-cli.exe",
+        "ziniao-cli.cmd",
+        "ziniao-cli.bat",
+        "ziniao-cli.ps1",
+    ]
+    found = None
+    for name in candidates:
+        p = which_fn(name)
+        if p:
+            found = p
+            break
+
     if not found:
         raise RuntimeError(CLI_NOT_FOUND)
 
