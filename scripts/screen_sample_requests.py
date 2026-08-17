@@ -67,6 +67,7 @@ from lib.feishu_hero import (  # noqa: E402
     DEFAULT_SHEET_TITLE,
     FeishuHeroError,
     load_hero_from_feishu,
+    match_hero,
 )
 from lib.filters import Criteria, evaluate_row  # noqa: E402
 from lib.network_observer import (  # noqa: E402
@@ -104,6 +105,20 @@ def _load_export_rows(path: Path) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise RuntimeError(f"导出不是数组: {export_path}")
     return [row for row in data if isinstance(row, dict)]
+
+
+def _reject_if_not_exact_hero(
+    row: dict[str, Any],
+    hero_data: dict[str, Any] | None,
+) -> str | None:
+    """hero_keys 有值时必须精确命中主推货号/商品 ID；空表交给后续解析拦截。"""
+    keys = set((hero_data or {}).get("hero_keys") or set())
+    if not keys:
+        return None
+    matched, reason = match_hero(row, keys)
+    if matched:
+        return None
+    return f"非主推款({reason})"
 
 
 def _select_execute_candidates_from_export(
@@ -319,6 +334,16 @@ def _run_execute_pipeline(
             row["approve_status"] = "skipped"
             row["approve_error"] = "can_be_approved=false"
             row["action"] = "skipped-cannot-approve"
+            continue
+
+        not_hero = _reject_if_not_exact_hero(row, hero_data)
+        if not_hero:
+            row["approve_status"] = "skipped"
+            row["feishu_status"] = "skipped"
+            row["approve_error"] = not_hero
+            row["feishu_error"] = not_hero
+            row["action"] = "skipped-not-hero"
+            logger.info(f"  [跳过] {creator_name} apply={apply_id} 原因={not_hero}")
             continue
 
         product_resolve = resolve_sample_product_for_row(
@@ -724,6 +749,13 @@ def _run_confirm_pipeline(
 
         already_written = row.get("feishu_status") in {"created", "approved+feishu"}
         if not write_feishu or not bitable_token or already_written:
+            continue
+
+        not_hero = _reject_if_not_exact_hero(row, hero_data)
+        if not_hero:
+            row["feishu_status"] = "skipped"
+            row["feishu_error"] = not_hero
+            logger.info(f"    飞书补写跳过: {not_hero}")
             continue
 
         product_resolve = resolve_sample_product_for_row(

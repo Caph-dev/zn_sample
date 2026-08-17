@@ -281,7 +281,8 @@ def main() -> int:
     except FeishuHeroError as error:
         logger.error(f"[主推] 读取失败，寄样产品只能按货号模糊匹配: {error}")
 
-    product_id_to_sku = build_product_id_to_sku_map(hero_data)
+    # 物流只解析已有寄样产品选项；含历史误批的非主推行。批准/筛查仍只认主推。
+    product_id_to_sku = build_product_id_to_sku_map(hero_data, hero_only=False)
     bitable_token = None
     sample_options: list[str] = []
     app_token = DEFAULT_APP_TOKEN

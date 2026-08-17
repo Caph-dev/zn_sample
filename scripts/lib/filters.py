@@ -348,15 +348,16 @@ def evaluate_row(
         hero = True
         hero_match_reason = "skip"
     elif not hero_keys:
-        unknowns.append("未加载飞书主推表")
-        hero = True
+        hero = False
         hero_match_reason = "no-hero-table"
+        need(False, "非主推款(未加载飞书主推表或是否主推为空)")
     else:
         hero, hero_match_reason = match_hero(row, hero_keys)
         if hero is False:
             need(False, f"非主推款({hero_match_reason})")
         elif hero is None:
             unknowns.append(hero_match_reason)
+            need(False, f"非主推款({hero_match_reason})")
 
     eligible = len(fails) == 0
     reason = "通过" if eligible else "; ".join(fails)

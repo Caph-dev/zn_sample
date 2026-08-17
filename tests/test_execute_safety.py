@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from screen_sample_requests import (  # noqa: E402
+    _reject_if_not_exact_hero,
     _run_execute_pipeline,
     _select_confirm_candidates_from_export,
     _select_execute_candidates_from_export,
@@ -200,6 +201,66 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(check_pending.call_count, 2)
         self.assertEqual(first["approve_status"], "failed")
         self.assertNotIn("approve_status", second)
+
+    @patch("screen_sample_requests.resolve_sample_product_for_row")
+    @patch("screen_sample_requests.check_pending_application_api")
+    @patch("screen_sample_requests.approve_application_api")
+    def test_non_hero_product_is_not_approved(
+        self,
+        approve_api,
+        check_pending,
+        resolve_product,
+    ) -> None:
+        resolve_product.return_value = {
+            "ok": True,
+            "sku": "P001",
+            "option": "P001",
+        }
+        candidate = build_candidate()
+        candidate["product_id"] = "1732117543281857378"
+        hero_data = {
+            "hero_keys": {"328", "1732060411527205730"},
+            "rows": [
+                {
+                    "sku": "328",
+                    "is_hero": True,
+                    "product_id": "1732060411527205730",
+                },
+                {
+                    "sku": "P001",
+                    "is_hero": False,
+                    "product_id": "1732117543281857378",
+                },
+            ],
+        }
+
+        _run_execute_pipeline(
+            store_id="store-test",
+            candidates=[candidate],
+            hero_data=hero_data,
+            write_feishu=False,
+            execute_limit=1,
+            execute_delay=0,
+            config_path=None,
+            page_wait=0,
+            observe_approve_network=False,
+            write_source="api",
+        )
+
+        approve_api.assert_not_called()
+        check_pending.assert_not_called()
+        resolve_product.assert_not_called()
+        self.assertEqual(candidate["approve_status"], "skipped")
+        self.assertEqual(candidate["action"], "skipped-not-hero")
+        self.assertIn("非主推款", candidate["approve_error"])
+
+    def test_reject_helper_blocks_sku_substring_in_product_id(self) -> None:
+        reason = _reject_if_not_exact_hero(
+            {"product_id": "1732117543281857378"},
+            {"hero_keys": {"328", "1732060411527205730"}},
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("非主推款", str(reason))
 
     def test_from_export_skips_approved_and_unknown_rows(self) -> None:
         rows = [

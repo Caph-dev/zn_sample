@@ -12,9 +12,46 @@ from lib.feishu_bitable import (  # noqa: E402
     describe_cooperation_transition,
     feishu_shipping_already_current,
     DEFAULT_RECORD_OWNER,
+    build_product_id_to_sku_map,
     build_shipping_fields,
     create_creator_relation_record,
+    resolve_sample_product_for_row,
 )
+
+
+class ProductIdToSkuMapTests(unittest.TestCase):
+    hero_data = {
+        "rows": [
+            {
+                "sku": "328",
+                "is_hero": True,
+                "product_id": "1732060411527205730",
+            },
+            {
+                "sku": "P001",
+                "is_hero": False,
+                "product_id": "1732117543281857378",
+            },
+        ]
+    }
+
+    def test_default_map_excludes_non_hero_rows(self) -> None:
+        mapping = build_product_id_to_sku_map(self.hero_data)
+        self.assertEqual(mapping, {"1732060411527205730": "328"})
+        self.assertNotIn("1732117543281857378", mapping)
+
+    def test_full_catalog_map_keeps_non_hero_for_logistics(self) -> None:
+        mapping = build_product_id_to_sku_map(self.hero_data, hero_only=False)
+        self.assertEqual(mapping["1732117543281857378"], "P001")
+
+    def test_resolve_rejects_non_hero_product_id(self) -> None:
+        result = resolve_sample_product_for_row(
+            {"product_id": "1732117543281857378"},
+            product_id_to_sku=build_product_id_to_sku_map(self.hero_data),
+            sample_product_options=["328", "P001"],
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("是否主推=是", result["reason"])
 
 
 class CreateCreatorRelationRecordTests(unittest.TestCase):

@@ -480,11 +480,20 @@ def describe_cooperation_transition(transition: str) -> str:
     return "未改合作状态"
 
 
-def build_product_id_to_sku_map(hero_data: dict[str, Any]) -> dict[str, str]:
-    """从 feishu_hero.load_hero_from_feishu 结果构建 product_id → 产品货号。"""
+def build_product_id_to_sku_map(
+    hero_data: dict[str, Any],
+    *,
+    hero_only: bool = True,
+) -> dict[str, str]:
+    """从 feishu_hero.load_hero_from_feishu 结果构建 product_id → 产品货号。
+
+    默认只收录「是否主推=是」。物流回写已有飞书行使 ``hero_only=False``。
+    """
     mapping: dict[str, str] = {}
     for row in hero_data.get("rows") or []:
         if not isinstance(row, dict):
+            continue
+        if hero_only and not row.get("is_hero"):
             continue
         product_id = str(row.get("product_id") or "").strip()
         sku = str(row.get("sku") or "").strip()
@@ -518,7 +527,9 @@ def resolve_sample_product_for_row(
             "ok": False,
             "sku": None,
             "option": None,
-            "reason": f"product_id={product_id} 在主推表无对应产品货号",
+            "reason": (
+                f"product_id={product_id} 在主推表无对应主推货号（须是否主推=是）"
+            ),
         }
     option = match_sample_product_option(sku, sample_product_options)
     if not option:

@@ -427,29 +427,31 @@ def parse_hero_grid(values: list[list[Any]]) -> dict[str, Any]:
     }
 
 
+# 只精确比对商家货号 / 平台商品 ID。标题、sku 描述、TikTok sku_id 禁止参与。
+_HERO_EXACT_FIELDS = (
+    "product_id",
+    "sku",
+    "seller_sku",
+    "hero_sku",
+    "resolved_sku",
+)
+
+
 def match_hero(product_fields: dict, hero_keys: set[str]) -> tuple[bool | None, str]:
-    """用货号集合匹配申请商品（与旧 hero_xlsx 策略一致）。"""
+    """精确匹配主推货号或商品 ID。
+
+    ``hero_keys`` 只应包含「是否主推=是」的货号和商品 ID。
+    不匹配标题/描述，也不做子串包含（避免货号 328 命中无关 product_id）。
+    """
     if not hero_keys:
         return None, "无主推名单"
 
-    candidates = [
-        product_fields.get("sku_desc"),
-        product_fields.get("sku_id"),
-        product_fields.get("product_id"),
-        product_fields.get("product_title"),
-        product_fields.get("seller_sku"),
-        product_fields.get("hero_sku"),
-    ]
-    for candidate in candidates:
+    for field_name in _HERO_EXACT_FIELDS:
+        candidate = product_fields.get(field_name)
         normalized = _normalize_sku_key(candidate or "")
         if normalized and normalized in hero_keys:
             return True, f"精确匹配:{candidate}"
-
-    blob = " ".join(_normalize_sku_key(item or "") for item in candidates)
-    for hero_key in hero_keys:
-        if len(hero_key) >= 2 and hero_key in blob:
-            return True, f"子串匹配:{hero_key}"
-    return False, "未匹配主推货号"
+    return False, "未精确匹配货号/商品ID"
 
 
 def load_hero_from_feishu(
