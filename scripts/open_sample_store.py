@@ -105,7 +105,7 @@ def main() -> int:
         logger.info("调试口已通，但窗口还没登录。请在这个店铺窗口登录 TikTok Shop。")
     else:
         logger.info("调试口已通。请确认已登录商家中心（任意页即可，不必停在首页）。")
-    logger.info("随后双击「1-只出名单」，或运行 screen_sample_requests.py --from-seller-home。")
+    logger.info("随后双击「1-只出名单」。")
     return 0
 
 
