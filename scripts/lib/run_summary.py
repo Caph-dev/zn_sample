@@ -35,9 +35,17 @@ def format_ascii_box(lines: list[str], *, min_inner: int = 46) -> str:
 
 
 START_BANNER_EXTRA = {
+    "prepare": "会关掉已开的店再打开（带调试口）。没有开着的店就默认打开 2 号店。不会筛查、不会批准。",
     "screen": "只会出名单。不会批准、不会发私信。",
     "pipeline": "接下来请输入 y 或 n。输入 y 才会筛查、批准、写飞书并发介绍私信。",
     "tracking": "接下来请输入 y 或 n。输入 y 才会获取物流、写飞书并发送单号。",
+}
+
+START_BANNER_FOOTER = {
+    "prepare": (
+        "请不要关闭这个窗口。",
+        "店铺窗口可能会关掉再开，这是正常的。",
+    ),
 }
 
 
@@ -46,13 +54,15 @@ def format_start_banner(mode_key: str, title: str) -> str:
     lines = [f"「{title}」"]
     if extra:
         lines.append(extra)
-    lines.extend(
-        [
-            "",
+    footer = START_BANNER_FOOTER.get(
+        mode_key,
+        (
             "请不要关闭这个窗口。",
             "紫鸟店铺窗口也请留着。",
-        ]
+        ),
     )
+    lines.append("")
+    lines.extend(footer)
     return format_ascii_box(lines)
 
 

@@ -48,6 +48,7 @@ class AsciiBoxTests(unittest.TestCase):
 class StartBannerTests(unittest.TestCase):
     def test_each_mode_uses_same_box_style(self) -> None:
         cases = {
+            "prepare": ("打开店铺", "2 号店"),
             "screen": ("只出名单", "只会出名单"),
             "pipeline": ("筛查批准写飞书发私信", "输入 y 或 n"),
             "tracking": ("获取物流信息写飞书发单号", "输入 y 或 n"),
@@ -61,6 +62,9 @@ class StartBannerTests(unittest.TestCase):
             self.assertIn(extra, text)
             self.assertIn("请不要关闭这个窗口。", text)
             self.assertEqual(len({visual_width(line) for line in lines}), 1)
+        prepare_text = format_start_banner("prepare", "打开店铺")
+        self.assertIn("关掉再开", prepare_text)
+        self.assertNotIn("也请留着", prepare_text)
 
     def test_confirm_aborted_says_not_eligible_zero(self) -> None:
         text = format_confirm_aborted(

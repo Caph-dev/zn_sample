@@ -16,6 +16,7 @@ from lib.zclaw_cli import CLI_NOT_FOUND  # noqa: E402
 from lib.operator_launch import (  # noqa: E402
     BEIJING as LAUNCH_BEIJING,
     INTRO_SCRIPT,
+    OPEN_SCRIPT,
     OPERATOR_EXECUTE_LIMIT,
     PLATFORM_WAIT_SECONDS,
     SCREEN_SCRIPT,
@@ -54,6 +55,16 @@ class ParseAndArgvTests(unittest.TestCase):
     def test_unknown_mode_is_chinese(self) -> None:
         with self.assertRaisesRegex(OperatorLaunchError, "双击"):
             parse_mode("approve")
+
+    def test_prepare_argv_reopens_without_out_or_store_id(self) -> None:
+        out = PROJECT_ROOT / "exports" / "sample_open_test"
+        argv = build_job_argv("prepare", python="/usr/bin/python3", out_prefix=out)
+        self.assertEqual(argv[0], "/usr/bin/python3")
+        self.assertEqual(Path(argv[1]), OPEN_SCRIPT)
+        self.assertIn("--reopen", argv)
+        self.assertNotIn("--out", argv)
+        self.assertNotIn("--store-id", argv)
+        self.assertNotIn("--execute", argv)
 
     def test_screen_argv_is_dry_run_without_store_id(self) -> None:
         out = PROJECT_ROOT / "exports" / "sample_screen_test"
@@ -254,6 +265,35 @@ class PrecheckWiringTests(unittest.TestCase):
             )
         listed.assert_not_called()
 
+    def test_prepare_allows_zero_running_and_skips_page_inspect(self) -> None:
+        inspect = Mock(side_effect=AssertionError)
+        result = precheck(
+            platform="win32",
+            status_fn=Mock(side_effect=AssertionError),
+            list_running_stores_fn=lambda: [],
+            inspect_fn=inspect,
+            require_running_store=False,
+            inspect_page=False,
+        )
+        self.assertEqual(result["store"], {})
+        self.assertEqual(result["page_type"], "")
+        inspect.assert_not_called()
+
+    def test_prepare_refuses_multiple_running_without_inspect(self) -> None:
+        inspect = Mock(side_effect=AssertionError)
+        with self.assertRaisesRegex(OperatorLaunchError, "多家店"):
+            precheck(
+                platform="win32",
+                list_running_stores_fn=lambda: [
+                    {"storeId": "1", "storeName": "甲店"},
+                    {"storeId": "2", "storeName": "乙店"},
+                ],
+                inspect_fn=inspect,
+                require_running_store=False,
+                inspect_page=False,
+            )
+        inspect.assert_not_called()
+
     def test_windows_skips_process_mode(self) -> None:
         result = precheck(
             platform="win32",
@@ -384,6 +424,30 @@ class RunOperatorModeTests(unittest.TestCase):
             "store": {"storeId": "sid-1", "storeName": "一号店"},
             "page_type": "seller-center",
         }
+
+    def test_prepare_runs_without_report(self) -> None:
+        opened: list[Path] = []
+        ran: list[list[str]] = []
+        printed: list[str] = []
+
+        code = run_operator_mode(
+            "prepare",
+            python="python3",
+            precheck_fn=lambda: {"store": {}, "page_type": ""},
+            confirm_fn=Mock(side_effect=AssertionError),
+            run_job_fn=lambda argv: ran.append(list(argv)) or 0,
+            open_report_fn=opened.append,
+            printer=printed.append,
+            alert_fn=lambda _t, _m: None,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(Path(ran[0][1]), OPEN_SCRIPT)
+        self.assertIn("--reopen", ran[0])
+        self.assertNotIn("--out", ran[0])
+        self.assertEqual(opened, [])
+        self.assertTrue(any("没有打开的店" in line and "2 号店" in line for line in printed))
+        self.assertTrue(any("1-只出名单" in line for line in printed))
 
     def test_screen_runs_and_opens_report(self) -> None:
         opened: list[Path] = []
@@ -601,12 +665,14 @@ class RunOperatorModeTests(unittest.TestCase):
 class StubFileTests(unittest.TestCase):
     def test_clickable_hint_lists_all(self) -> None:
         text = clickable_hint()
+        self.assertIn("0-打开店铺", text)
         self.assertIn("1-只出名单", text)
         self.assertIn("2-筛查批准写飞书发私信", text)
         self.assertIn("3-获取物流信息写飞书发单号", text)
 
     def test_macos_stubs_call_matching_modes(self) -> None:
         mapping = {
+            "0-打开店铺.command": "prepare",
             "1-只出名单.command": "screen",
             "2-筛查批准写飞书发私信.command": "pipeline",
             "3-获取物流信息写飞书发单号.command": "tracking",
@@ -620,6 +686,7 @@ class StubFileTests(unittest.TestCase):
 
     def test_windows_stubs_match_scan_bat_skeleton(self) -> None:
         mapping = {
+            "0-打开店铺.bat": "prepare",
             "1-只出名单.bat": "screen",
             "2-筛查批准写飞书发私信.bat": "pipeline",
             "3-获取物流信息写飞书发单号.bat": "tracking",
@@ -633,6 +700,7 @@ class StubFileTests(unittest.TestCase):
 
     def test_windows_stubs_pair_with_macos_commands(self) -> None:
         pairs = [
+            ("0-打开店铺.command", "0-打开店铺.bat", "prepare"),
             ("1-只出名单.command", "1-只出名单.bat", "screen"),
             ("2-筛查批准写飞书发私信.command", "2-筛查批准写飞书发私信.bat", "pipeline"),
             ("3-获取物流信息写飞书发单号.command", "3-获取物流信息写飞书发单号.bat", "tracking"),
@@ -669,6 +737,7 @@ class StubFileTests(unittest.TestCase):
 
     def test_windows_bats_use_crlf(self) -> None:
         bats = [
+            PROJECT_ROOT / "0-打开店铺.bat",
             PROJECT_ROOT / "1-只出名单.bat",
             PROJECT_ROOT / "2-筛查批准写飞书发私信.bat",
             PROJECT_ROOT / "3-获取物流信息写飞书发单号.bat",
@@ -691,6 +760,7 @@ class StubFileTests(unittest.TestCase):
         self.assertIn("py -3", text)
         self.assertIn('%~dp0launch_sample.py', text)
         self.assertIn("pipeline", text)
+        self.assertIn("prepare", text)
         self.assertNotIn("approve", text)
         self.assertIn("chcp 65001", text)
         self.assertIn("PYTHONUTF8=1", text)

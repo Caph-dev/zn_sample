@@ -6,11 +6,12 @@ cd /d "%~dp0.."
 
 set "MODE=%~1"
 set "VALID="
+if "%MODE%"=="prepare" set "VALID=1"
 if "%MODE%"=="screen" set "VALID=1"
 if "%MODE%"=="pipeline" set "VALID=1"
 if "%MODE%"=="tracking" set "VALID=1"
 if not defined VALID (
-  echo 请双击仓库里的「1-只出名单」「2-筛查批准写飞书发私信」或「3-获取物流信息写飞书发单号」。
+  echo 请双击仓库里的「0-打开店铺」「1-只出名单」「2-筛查批准写飞书发私信」或「3-获取物流信息写飞书发单号」。
   pause
   exit /b 2
 )

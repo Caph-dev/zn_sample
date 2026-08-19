@@ -19,14 +19,18 @@
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
 
 2. **两阶段导航**  
-   `open_sample_store.py` 只开店；目标店已运行绝不关闭/重开。用户登录后可停在商家中心任意子页（空白页和登录页除外）。  
+   `open_sample_store.py` 默认只开店；目标店已运行绝不关闭/重开。  
+   **仅** 0 号脚本 / `open_sample_store.py --reopen` 可对**目标店**先 `close_store` 再 `open_store`（带 debugPort）。有其他店 running 仍拒绝切店。不走 `page extract --mode running`。  
+   用户登录后可停在商家中心任意子页（空白页和登录页除外）。  
    `--from-seller-home` 从已登录商家中心/联盟中心/样品申请页进待审核；未传 `--store-id` 时必须 running 恰好一家，不回落到测试 1 号店。先返回脚本结果再跳转。  
    未带该开关：用户须已停在 **样品申请 → 待审核**。  
-   导航失败只报错退出，不重开、不切店。
+   1/2/3 导航失败只报错退出，不重开、不切店。
 
-3. **测试默认 1 号店**  
+3. **测试默认 1 号店（筛查/物流）**  
    `跨境1号店（Lingerie Outlet）` / `27437742526069`。  
-   未传 `--store-id` / `--store-name` 且 running 无法唯一解析时可用。生产/多店必须显式 ID。`--no-default-store` 禁用默认。勿默认操作 2 号店。
+   未传 `--store-id` / `--store-name` 且 running 无法唯一解析时可用。生产/多店必须显式 ID。`--no-default-store` 禁用默认。  
+   **1/2/3 勿默认操作 2 号店。**  
+   **例外：0 号** 在工作台没有打开的店、且未传 `--store-id`/`--store-name` 时，默认 `open_store` 2 号店 `跨境2号店` / `27506607043054`（带 debugPort）。已有恰好一家 running 则重开那一家，不切到 2 号店。`--no-default-store` 禁用该默认。
 
 4. **飞书两张表勿混**  
 
@@ -60,11 +64,12 @@
 
 ## SOP → 脚本停止点
 
-四个脚本断开。可复制命令只写 README，这里只写停点和门闩。
+五个入口断开。可复制命令只写 README，这里只写停点和门闩。
 
 | SOP | 脚本 | 默认停 | 加开关 | 不会做 |
 |---|---|---|---|---|
-| 开店 | `open_sample_store.py` | 首页前 | 无 | 不进联盟中心 |
+| 开店（带调试口） | `open_sample_store.py --reopen` | 店铺窗口打开 | 无 | 不代登、不进联盟中心、不切其它店 |
+| 开店（不重开） | `open_sample_store.py` | 首页前 | 无 | 已运行不关、不进联盟中心 |
 | 1–4 筛查+名单 | `screen_sample_requests.py` | 导出 | 正式须 `--with-detail --require-detail` | 不批、不发信 |
 | 5 同意/写表 | 同上 | 不写 | `--execute --yes`；再加 `--write-feishu` | 不发第 6 步 |
 | 5 **补写** | 同上 `--confirm-export` | 核对待发货 / 补飞书 | 约 10 分钟窗口；不重批 | 不发私信 |
@@ -134,13 +139,13 @@
 - storeId：显式 > running 精确店名 > running 唯一 > 测试默认 1 号店。ZClaw Bridge `9481` ≠ WebDriver `16851`。
 - 语言只看详情简介；空简介默认英语，已有会话语言不改判。
 
-脚本入口：`scripts/open_sample_store.py`、`screen_sample_requests.py`、`send_sample_intro.py`、`sync_shipped_tracking.py`。`hero_xlsx.py` 已废。密钥在 gitignore 的 `config.toml`。
+脚本入口：`scripts/open_sample_store.py`、`screen_sample_requests.py`、`send_sample_intro.py`、`sync_shipped_tracking.py`。日常 0 号双击走 `--reopen`。`hero_xlsx.py` 已废。密钥在 gitignore 的 `config.toml`。
 
 ---
 
 ## Agent 纪律
 
-1. 改自动化前确认：页在待审核（或用户允许 `--from-seller-home`，起点可以是已登录商家中心任意子页）；`ziniao-cli doctor`；脚本 1/2 同一 `store_id`。
+1. 改自动化前确认：0 号已开店且 `execute_script` 通；页在待审核（或用户允许 `--from-seller-home`，起点可以是已登录商家中心任意子页）；`ziniao-cli doctor`；脚本 1/2 同一 `store_id`。0 号允许关目标店再开；1/2/3 仍不重开、不切店。
 2. 用户要批准：只走已有 `--execute --yes`（+ 可选 `--write-feishu`）。提醒 limit、备份、不可撤销。勿另开无门闩路径。
 3. 探 DOM 只用 `execute_script`；失败先查：留在详情页、Bridge、错 tab、未全部展开。
 4. 与 zn_daren 共用时引用、不复制大段 `zclaw_dom`。

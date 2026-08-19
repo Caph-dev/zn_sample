@@ -207,10 +207,29 @@ def list_running_stores() -> list[dict]:
     return list(items or [])
 
 
-def open_store(store_id: str) -> dict:
-    outer = zclaw_invoke("open_store", {"storeId": store_id}, timeout=180)
+def list_all_stores(limit: int = 50) -> list[dict]:
+    """list_stores → [{storeId, storeName, ...}, ...]。"""
+    outer = zclaw_invoke("list_stores", {"limit": limit})
+    if not outer.get("ok"):
+        raise RuntimeError(f"list_stores failed: {outer.get('error') or outer}")
+    data = outer.get("data") or {}
+    items = data.get("items") if isinstance(data, dict) else None
+    if items is None and isinstance(data, list):
+        items = data
+    return list(items or [])
+
+
+def open_store(store_id: str, *, timeout: int = 180) -> dict:
+    outer = zclaw_invoke("open_store", {"storeId": store_id}, timeout=timeout)
     if not outer.get("ok"):
         raise RuntimeError(f"open_store failed: {outer.get('error') or outer}")
+    return outer.get("data") or {}
+
+
+def close_store(store_id: str, *, timeout: int = 120) -> dict:
+    outer = zclaw_invoke("close_store", {"storeId": store_id}, timeout=timeout)
+    if not outer.get("ok"):
+        raise RuntimeError(f"close_store failed: {outer.get('error') or outer}")
     return outer.get("data") or {}
 
 

@@ -35,6 +35,7 @@ from .zclaw_cli import CLI_NOT_FOUND, fs_path, resolve_ziniao_cli_command
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
+OPEN_SCRIPT = ROOT / "scripts" / "open_sample_store.py"
 SCREEN_SCRIPT = ROOT / "scripts" / "screen_sample_requests.py"
 INTRO_SCRIPT = ROOT / "scripts" / "send_sample_intro.py"
 TRACKING_SCRIPT = ROOT / "scripts" / "sync_shipped_tracking.py"
@@ -50,6 +51,7 @@ except Exception:
     # Windows 未装 tzdata 时 ZoneInfo 不可用；中国无夏令时，固定 UTC+8 即可。
     BEIJING = timezone(timedelta(hours=8))
 CLICKABLE_NAMES = (
+    "0-打开店铺",
     "1-只出名单",
     "2-筛查批准写飞书发私信",
     "3-获取物流信息写飞书发单号",
@@ -77,6 +79,9 @@ class LaunchMode:
     report_stem: str
     needs_afternoon: bool = False
     is_pipeline: bool = False
+    require_running_store: bool = True
+    inspect_page: bool = True
+    writes_report: bool = True
 
 
 def _limit_args() -> tuple[str, ...]:
@@ -111,6 +116,26 @@ INTRO_EXTRA = ("--execute", "--yes", "--write-feishu", *_limit_args())
 
 
 MODES: dict[str, LaunchMode] = {
+    "prepare": LaunchMode(
+        key="prepare",
+        title="打开店铺",
+        script=OPEN_SCRIPT,
+        extra_args=("--reopen",),
+        confirm="none",
+        confirm_message="",
+        abort_idle="",
+        abort_not_this="",
+        start_message=(
+            "开始打开店铺（带调试口）。"
+            "若店已经开着，会先关掉再开；这是正常的。"
+            "若一家都没开，默认打开 2 号店。"
+            "打开后请在店铺窗口登录商家中心（不必停在首页）。"
+        ),
+        report_stem="sample_open",
+        require_running_store=False,
+        inspect_page=False,
+        writes_report=False,
+    ),
     "screen": LaunchMode(
         key="screen",
         title="只出名单",
@@ -213,13 +238,17 @@ def build_step_argv(
     python: str,
     script: Path,
     extra_args: Sequence[str],
-    out_prefix: Path,
+    out_prefix: Path | None = None,
     from_export: Path | None = None,
+    writes_report: bool = True,
 ) -> list[str]:
     argv = [python, fs_path(script), *extra_args]
     if from_export is not None:
         argv.extend(["--from-export", fs_path(from_export)])
-    argv.extend(["--out", fs_path(out_prefix)])
+    if writes_report:
+        if out_prefix is None:
+            raise OperatorLaunchError("内部参数不对：缺少报表路径。")
+        argv.extend(["--out", fs_path(out_prefix)])
     if "--store-id" in argv or "--store-name" in argv:
         raise OperatorLaunchError("入口不允许指定店铺编号。")
     return argv
@@ -242,6 +271,7 @@ def build_job_argv(
         extra_args=spec.extra_args,
         out_prefix=out_prefix,
         from_export=from_export,
+        writes_report=spec.writes_report,
     )
     if force:
         if spec.key != "tracking":
@@ -356,14 +386,47 @@ def precheck(
     list_running_stores_fn: Callable[[], list[dict[str, Any]]] | None = None,
     inspect_fn: Callable[[str], str] | None = None,
     status_fn: Callable[[], str] | None = None,
+    require_running_store: bool = True,
+    inspect_page: bool = True,
 ) -> dict[str, Any]:
     host = sys.platform if platform is None else platform
     if host == "darwin":
         require_macos_gui((status_fn or read_macos_ziniao_mode)())
 
-    store = require_single_running_store(list_running_stores_fn)
+    if require_running_store:
+        store = require_single_running_store(list_running_stores_fn)
+        store_id = str(store["storeId"]).strip()
+        page_type = (
+            (inspect_fn or (lambda sid: precheck_shop_page(sid)))(store_id)
+            if inspect_page
+            else ""
+        )
+        return {"store": store, "page_type": page_type}
+
+    if list_running_stores_fn is None:
+        try:
+            resolve_ziniao_cli_command()
+        except RuntimeError as exc:
+            raise OperatorLaunchError(_humanize_bridge_error(exc)) from exc
+        lister = list_running_stores
+    else:
+        lister = list_running_stores_fn
+    try:
+        running = [row for row in lister() if str(row.get("storeId") or "").strip()]
+    except Exception as exc:
+        raise OperatorLaunchError(_humanize_bridge_error(exc)) from exc
+    if len(running) > 1:
+        names = "、".join(store_label(row) for row in running)
+        raise OperatorLaunchError(f"工作台开了多家店（{names}）。请关掉其它店，只留一家。")
+    if not running:
+        return {"store": {}, "page_type": ""}
+    store = running[0]
     store_id = str(store["storeId"]).strip()
-    page_type = (inspect_fn or (lambda sid: precheck_shop_page(sid)))(store_id)
+    page_type = (
+        (inspect_fn or (lambda sid: precheck_shop_page(sid)))(store_id)
+        if inspect_page
+        else ""
+    )
     return {"store": store, "page_type": page_type}
 
 
@@ -554,7 +617,13 @@ def run_operator_mode(
     emit(format_start_banner(mode.key, mode.title))
 
     try:
-        checked = (precheck_fn or precheck)()
+        if precheck_fn is not None:
+            checked = precheck_fn()
+        else:
+            checked = precheck(
+                require_running_store=mode.require_running_store,
+                inspect_page=mode.inspect_page,
+            )
     except OperatorLaunchError as exc:
         emit(f"还不能开始：{exc}")
         notify("还不能开始", str(exc))
@@ -566,7 +635,10 @@ def run_operator_mode(
         return 2
 
     store = checked.get("store") or {}
-    emit(f"检查通过：当前打开的店是「{store_label(store)}」。")
+    if str(store.get("storeId") or "").strip():
+        emit(f"检查通过：当前打开的店是「{store_label(store)}」。")
+    else:
+        emit("检查通过：工作台目前没有打开的店，将打开 2 号店。")
 
     force = False
     if mode.needs_afternoon and before_four_pm_beijing(now):
@@ -618,7 +690,10 @@ def run_operator_mode(
     code = (run_job_fn or run_job)(argv)
     if code != 0:
         return _job_failed(emit, notify, code)
-    _open_or_hint_report(prefix, emit=emit, open_report_fn=open_report_fn)
+    if mode.writes_report:
+        _open_or_hint_report(prefix, emit=emit, open_report_fn=open_report_fn)
+    else:
+        emit("店铺已打开。请在店铺窗口登录商家中心后，再双击「1-只出名单」。")
     return 0
 
 

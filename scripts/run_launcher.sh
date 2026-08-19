@@ -8,9 +8,9 @@ cd "$ROOT"
 
 MODE="${1:-}"
 case "$MODE" in
-  screen|pipeline|tracking) ;;
+  prepare|screen|pipeline|tracking) ;;
   *)
-    print -- "请双击仓库里的「1-只出名单」「2-筛查批准写飞书发私信」或「3-获取物流信息写飞书发单号」。"
+    print -- "请双击仓库里的「0-打开店铺」「1-只出名单」「2-筛查批准写飞书发私信」或「3-获取物流信息写飞书发单号」。"
     read -r '?按回车关闭'
     exit 2
     ;;
