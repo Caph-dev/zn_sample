@@ -199,6 +199,7 @@ class OrderApiAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["tracking_no"], "UUS68E5590171628828")
         navigate_to_url.assert_called_once()
+        self.assertGreaterEqual(navigate_to_url.call_args.kwargs["timeout"], 30)
         self.assertIn(
             "seller.us.tiktokshopglobalselling.com",
             navigate_to_url.call_args.args[1],

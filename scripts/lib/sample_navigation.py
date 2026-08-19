@@ -125,11 +125,12 @@ def current_page_href(
     store_id: str,
     *,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
+    timeout: float = 5.0,
 ) -> str:
     result = execute_script_fn(
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
-        timeout=15,
+        timeout=max(3, int(timeout)),
         retries=0,
     )
     if isinstance(result, dict):
@@ -192,6 +193,9 @@ def navigate_to_url(
         url,
         execute_script_fn=execute_script_fn,
     )
+    # 跨域跳转会卸页；立刻 execute_script 常卡死并把整段等待吃掉。
+    if timeout >= 5:
+        time.sleep(max(0.8, min(2.0, poll_interval * 2)))
     arrived_href = wait_for_page_href(
         store_id,
         href_matches,

@@ -159,7 +159,7 @@ def fetch_tiktok_tracking_api(
             shop_region=str(shop_region or "US"),
         ),
         is_seller_order_href,
-        timeout=max(12.0, wait + 8.0),
+        timeout=max(30.0, wait + 20.0),
         poll_interval=0.5,
     )
     time.sleep(max(0.8, min(wait, 2.5)))

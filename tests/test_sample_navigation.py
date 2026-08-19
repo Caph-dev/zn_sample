@@ -352,6 +352,24 @@ class SampleNavigationFlowTests(unittest.TestCase):
             )
         self.assertEqual(execute.call_count, 1)
 
+    def test_wait_for_page_href_retries_after_execute_timeout(self) -> None:
+        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+        execute = Mock(
+            side_effect=[
+                RuntimeError("timed out after 5 seconds"),
+                {"href": order_href},
+            ]
+        )
+        arrived = wait_for_page_href(
+            "store-two",
+            is_seller_order_href,
+            timeout=1,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+        self.assertEqual(arrived, order_href)
+        self.assertEqual(execute.call_count, 2)
+
     def test_already_on_sample_page_skips_navigation(self) -> None:
         current_href = (
             "https://affiliate.tiktokshopglobalselling.com/"
