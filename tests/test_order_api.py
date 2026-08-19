@@ -13,7 +13,60 @@ from lib.order_api import (  # noqa: E402
     fetch_tiktok_tracking_api,
     parse_logistics_payload,
 )
-from lib.page_api import SELLER_LOGISTICS_ENDPOINT, SellerPageContext  # noqa: E402
+from lib.page_api import (  # noqa: E402
+    SELLER_APP_NAME,
+    SELLER_LOGISTICS_ENDPOINT,
+    SellerPageContext,
+    _build_request_url,
+    build_seller_request_query,
+)
+
+
+class SellerLogisticsQueryTests(unittest.TestCase):
+    def test_seller_base_query_matches_order_page_not_shop_id_pair(self) -> None:
+        context = SellerPageContext(
+            href="https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+            shop_id="7496019476093176674",
+            shop_region="US",
+            page_query={
+                "locale": "zh-CN",
+                "language": "zh-CN",
+                "device_platform": "web",
+            },
+        )
+        query = build_seller_request_query(
+            context,
+            extra_query={"main_order_id": "577523711101473244"},
+        )
+
+        self.assertEqual(query["oec_seller_id"], "7496019476093176674")
+        self.assertEqual(query["seller_id"], "7496019476093176674")
+        self.assertEqual(query["aid"], "6556")
+        self.assertEqual(query["app_name"], SELLER_APP_NAME)
+        self.assertEqual(query["main_order_id"], "577523711101473244")
+        self.assertEqual(query["locale"], "zh-CN")
+        self.assertNotIn("shop_id", query)
+        self.assertNotIn("shop_region", query)
+
+    def test_seller_request_url_omits_legacy_shop_query(self) -> None:
+        context = SellerPageContext(
+            href="https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+            shop_id="7496019476093176674",
+            shop_region="US",
+        )
+        url = _build_request_url(
+            SELLER_LOGISTICS_ENDPOINT,
+            context=context,
+            allowed_endpoints={SELLER_LOGISTICS_ENDPOINT},
+            extra_query={"main_order_id": "577523711101473244"},
+        )
+
+        self.assertTrue(url.startswith(f"{SELLER_LOGISTICS_ENDPOINT}?"))
+        self.assertIn("oec_seller_id=7496019476093176674", url)
+        self.assertIn("seller_id=7496019476093176674", url)
+        self.assertIn("main_order_id=577523711101473244", url)
+        self.assertNotIn("shop_id=", url)
+        self.assertNotIn("shop_region=", url)
 
 
 class OrderApiParserTests(unittest.TestCase):
@@ -144,6 +197,37 @@ class OrderApiAdapterTests(unittest.TestCase):
             get_read_json.call_args.kwargs["query"],
             {"main_order_id": "order-test-001"},
         )
+
+    @patch("lib.page_api.zclaw_exec")
+    def test_seller_get_script_skips_json_content_type(self, execute) -> None:
+        execute.side_effect = [
+            {"ok": True, "started": True, "request_id": "request-test"},
+            {
+                "done": True,
+                "ok": True,
+                "status": 200,
+                "payload": {"code": 0, "data": {"package_list": []}},
+            },
+        ]
+        from lib.page_api import get_seller_read_json
+
+        payload = get_seller_read_json(
+            "store-test",
+            SELLER_LOGISTICS_ENDPOINT,
+            query={"main_order_id": "577523711101473244"},
+            context=SellerPageContext(
+                href="https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+                shop_id="7496019476093176674",
+                shop_region="US",
+            ),
+        )
+        start_script = execute.call_args_list[0].args[1]
+        self.assertIn("oec_seller_id=7496019476093176674", start_script)
+        self.assertIn("seller_id=7496019476093176674", start_script)
+        self.assertNotIn("shop_id=", start_script)
+        self.assertNotIn("document.cookie", start_script.lower())
+        self.assertIn('const requestMethod = "GET"', start_script)
+        self.assertEqual(payload["code"], 0)
 
 
 if __name__ == "__main__":

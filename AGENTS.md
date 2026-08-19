@@ -52,7 +52,7 @@
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
 | 写达人关系 | 写接口接受后 + `--write-feishu`；`--confirm-export` 可**补写** | 不是主推表；写结果未知时不先写 |
 | 第 6 / 9 步私信 | 独立脚本；详情页消息按钮 `handleClick` 开弹层，默认 IM SDK | 批准后不自动发；不要求跳到 `/seller/im`；不要先点「聊天数」 |
-| 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | `main_order_id` 不是发给达人的单号；`--force` 只过时间门 |
+| 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | `main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`），不用 `shop_id+shop_region` |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
 

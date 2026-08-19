@@ -11,7 +11,7 @@ import re
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .console import verbose_print
@@ -30,6 +30,8 @@ READ_POST_ENDPOINTS = frozenset(
 WRITE_POST_ENDPOINTS = frozenset({SAMPLE_GROUP_ACTION_ENDPOINT})
 SELLER_LOGISTICS_ENDPOINT = "/api/v1/fulfillment/na/logistic_detail/list"
 SELLER_READ_GET_ENDPOINTS = frozenset({SELLER_LOGISTICS_ENDPOINT})
+SELLER_AID = "6556"
+SELLER_APP_NAME = "i18n_ecom_shop"
 DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.5
@@ -55,6 +57,7 @@ class SellerPageContext:
     href: str
     shop_id: str
     shop_region: str
+    page_query: dict[str, str] = field(default_factory=dict)
 
 
 def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
@@ -88,6 +91,74 @@ def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
     )
 
 
+_SELLER_CONTEXT_JS = r"""
+(() => {
+  const nav = navigator || {};
+  const scr = typeof screen === 'undefined' ? {} : screen;
+  let timezoneName = '';
+  try {
+    timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch (error) {
+    timezoneName = '';
+  }
+  let fp = '';
+  try {
+    const candidates = [window.fp, window.__fp];
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) {
+        fp = value.trim();
+        break;
+      }
+    }
+  } catch (error) {
+    fp = '';
+  }
+  const pageLang = (document.documentElement && document.documentElement.lang) || '';
+  return JSON.stringify({
+    href: location.href || '',
+    locale: pageLang || 'zh-CN',
+    language: pageLang || nav.language || 'zh-CN',
+    browser_language: nav.language || pageLang || 'zh-CN',
+    browser_name: 'Mozilla',
+    browser_online: String(nav.onLine !== false),
+    browser_platform: nav.platform || '',
+    browser_version: String(nav.userAgent || '').slice(0, 240),
+    cookie_enabled: String(!!nav.cookieEnabled),
+    device_platform: 'web',
+    screen_width: String(scr.width || ''),
+    screen_height: String(scr.height || ''),
+    timezone_name: timezoneName,
+    fp: fp
+  });
+})()
+"""
+
+_SELLER_PAGE_QUERY_KEYS = (
+    "locale",
+    "language",
+    "browser_language",
+    "browser_name",
+    "browser_online",
+    "browser_platform",
+    "browser_version",
+    "cookie_enabled",
+    "device_platform",
+    "screen_width",
+    "screen_height",
+    "timezone_name",
+    "fp",
+)
+
+
+def _seller_page_query_from_probe(probe: dict[str, Any]) -> dict[str, str]:
+    page_query: dict[str, str] = {}
+    for key in _SELLER_PAGE_QUERY_KEYS:
+        text = str(probe.get(key) or "").strip()
+        if text:
+            page_query[key] = text
+    return page_query
+
+
 def get_seller_page_context(
     store_id: str,
     *,
@@ -97,7 +168,7 @@ def get_seller_page_context(
     """读取当前商家订单页上下文；店铺 ID 来自已读样品列表行。"""
     result = zclaw_exec(
         store_id,
-        "(() => JSON.stringify({href: location.href || ''}))()",
+        _SELLER_CONTEXT_JS,
         retries=DEFAULT_EXEC_RETRIES,
     )
     if not isinstance(result, dict):
@@ -121,7 +192,34 @@ def get_seller_page_context(
         href=href,
         shop_id=normalized_shop_id,
         shop_region=normalized_shop_region,
+        page_query=_seller_page_query_from_probe(result),
     )
+
+
+def build_seller_request_query(
+    context: SellerPageContext,
+    extra_query: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """订单页物流 GET 基参：对齐前端，不用 shop_id/shop_region。"""
+    shop_id = str(context.shop_id or "").strip()
+    query: dict[str, str] = {
+        "aid": SELLER_AID,
+        "app_name": SELLER_APP_NAME,
+        "oec_seller_id": shop_id,
+        "seller_id": shop_id,
+    }
+    for key, value in (context.page_query or {}).items():
+        text = str(value or "").strip()
+        if text:
+            query[str(key)] = text
+    if extra_query:
+        for key, value in extra_query.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                query[str(key)] = text
+    return query
 
 
 def _build_request_url(
@@ -144,12 +242,10 @@ def _build_request_url(
             "shop_region": context.shop_region,
         }
     else:
-        query = {
-            "shop_id": context.shop_id,
-            "shop_region": context.shop_region,
-        }
+        query = build_seller_request_query(context, extra_query)
+        extra_query = None
     if extra_query:
-        query.update(extra_query)
+        query.update({str(key): str(value) for key, value in extra_query.items()})
     return f"{endpoint}?{urllib.parse.urlencode(query, doseq=True)}"
 
 
@@ -207,12 +303,15 @@ def _post_page_json(
   const timeoutHandle = window.setTimeout(() => abortController.abort(), timeoutMilliseconds);
   requestStates[requestId] = {{done: false}};
 
+  const requestHeaders = {{
+    'accept': 'application/json, text/plain, */*'
+  }};
+  if (requestMethod !== 'GET' && requestMethod !== 'HEAD') {{
+    requestHeaders['content-type'] = 'application/json';
+  }}
   const requestOptions = {{
     method: requestMethod,
-    headers: {{
-      'accept': 'application/json, text/plain, */*',
-      'content-type': 'application/json'
-    }},
+    headers: requestHeaders,
     signal: abortController.signal
   }};
   if (requestMethod !== 'GET' && requestMethod !== 'HEAD') {{
