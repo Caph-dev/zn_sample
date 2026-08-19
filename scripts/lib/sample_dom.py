@@ -62,6 +62,14 @@ ENSURE_PENDING_TAB_JS = r"""
 
 EXTRACT_LIST_JS = r"""
 (() => {
+  if (!document.body) {
+    return JSON.stringify({
+      ok: false,
+      reason: 'no-document-body',
+      href: location.href || '',
+      rows: [],
+    });
+  }
   function getRecord(tr) {
     const key = Object.keys(tr || {}).find(k =>
       k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
@@ -213,6 +221,11 @@ def extract_page(store_id: str) -> dict:
     ret = zclaw_exec(store_id, EXTRACT_LIST_JS)
     if not isinstance(ret, dict):
         raise RuntimeError(f"extract_page bad result: {ret!r}"[:400])
+    if ret.get("reason") == "no-document-body":
+        raise RuntimeError(
+            "扫表时页面还在跳转（document.body 为空）。"
+            f" href={str(ret.get('href') or '')[:180]}"
+        )
     return ret
 
 

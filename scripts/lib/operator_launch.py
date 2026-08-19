@@ -135,7 +135,7 @@ MODES: dict[str, LaunchMode] = {
             f"本轮最多批准 / 发信 {OPERATOR_EXECUTE_LIMIT} 条。\n"
             "中间必须空等 10 分钟：TikTok 商家中心的「待发货」刷新慢，"
             "是平台侧问题，不是脚本卡住。\n"
-            "请确认：只开了一家店，已停在商家中心首页。\n"
+            "请确认：只开了一家店，店铺窗口已登录商家中心（不必停在首页）。\n"
             "平台同意和已发私信无法用脚本撤销。"
         ),
         abort_idle="没有批准、没有写飞书、也没有发介绍私信。",
@@ -324,7 +324,7 @@ def require_single_running_store(
 
     if not running:
         raise OperatorLaunchError(
-            "工作台里还没有打开的店。请只打开一家店，在店铺窗口登录 TikTok Shop，停在商家中心首页。"
+            "工作台里还没有打开的店。请只打开一家店，在店铺窗口登录 TikTok Shop。"
         )
     if len(running) > 1:
         names = "、".join(store_label(row) for row in running)
@@ -770,10 +770,10 @@ def _humanize_bridge_error(exc: BaseException) -> str:
 
 def _humanize_page_error(message: str) -> str:
     if "about:blank" in message:
-        return "店铺窗口还是空白页。请先在这个窗口里登录 TikTok Shop，停在商家中心首页。"
+        return "店铺窗口还是空白页。请先在这个窗口里登录 TikTok Shop。"
     if "登录页" in message or "login" in message.lower():
-        return "店铺窗口还在登录页。请先完成登录（验证码要自己点），停在商家中心首页。"
-    return "店铺窗口还没停在商家中心。请先登录 TikTok Shop，停在商家中心首页后再双击。"
+        return "店铺窗口还在登录页。请先完成登录（验证码要自己点）。"
+    return "店铺窗口还没停在已登录的商家中心。请先登录 TikTok Shop 后再双击。"
 
 
 def _require_tty(action: str) -> None:

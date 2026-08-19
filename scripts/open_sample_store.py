@@ -62,7 +62,7 @@ def main() -> int:
     logger.info(
         f"[页面探活] ready={probe.get('ready')} "
         f"href={str(probe.get('href') or '')[:160]}")
-    logger.info("请在店铺窗口登录 TikTok Shop，并停在商家中心首页。")
+    logger.info("请在店铺窗口登录 TikTok Shop。登录后可停在商家中心任意页。")
     logger.info("随后运行 screen_sample_requests.py --from-seller-home 进行筛查。")
     return 0
 

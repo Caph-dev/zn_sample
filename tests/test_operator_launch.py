@@ -44,6 +44,7 @@ from lib.operator_launch import (  # noqa: E402
     store_label,
     wait_platform_refresh,
     _humanize_bridge_error,
+    _humanize_page_error,
 )
 
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -220,6 +221,26 @@ class PagePrecheckTests(unittest.TestCase):
         )
         self.assertEqual(page_type, "seller-center")
 
+    def test_seller_order_and_product_pages_ok(self) -> None:
+        for href in (
+            "https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+            "https://seller.us.tiktokshopglobalselling.com/product/list",
+        ):
+            page_type = precheck_shop_page(
+                "sid-1",
+                execute_script_fn=lambda *a, href=href, **k: {
+                    "href": href,
+                    "page_type": "seller-center",
+                },
+            )
+            self.assertEqual(page_type, "seller-center")
+
+    def test_page_errors_do_not_require_homepage(self) -> None:
+        self.assertNotIn("首页", _humanize_page_error("店铺页面仍是 about:blank；请先登录商家中心"))
+        self.assertNotIn("首页", _humanize_page_error("检测到 TikTok Shop 登录页；请先完成登录"))
+        self.assertNotIn("首页", _humanize_page_error("当前页无法确认是已登录的 TikTok Shop"))
+        self.assertIn("登录", _humanize_page_error("检测到 TikTok Shop 登录页；请先完成登录"))
+
 
 class PrecheckWiringTests(unittest.TestCase):
     def test_macos_requires_gui_before_listing_stores(self) -> None:
@@ -345,6 +366,8 @@ class ReportAndConfirmTests(unittest.TestCase):
         self.assertEqual(pipeline.confirm, "yesno")
         self.assertTrue(confirm_mode(pipeline, ask=lambda kind, title, message: "y"))
         self.assertFalse(confirm_mode(pipeline, ask=lambda kind, title, message: "n"))
+        self.assertIn("不必停在首页", pipeline.confirm_message)
+        self.assertIn("已登录商家中心", pipeline.confirm_message)
 
     def test_screen_skips_confirm(self) -> None:
         self.assertTrue(

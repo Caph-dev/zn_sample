@@ -831,7 +831,7 @@ def main() -> int:
         "--from-seller-home",
         action="store_true",
         help=(
-            "从已登录的 TikTok Shop 商家中心首页自动导航到样品申请-待审核；"
+            "从已登录的 TikTok Shop 商家中心（任意子页）自动导航到样品申请-待审核；"
             "须显式传 --store-id"
         ),
     )
@@ -1043,7 +1043,7 @@ def main() -> int:
         logger.info(f"  列表和筛查详情数据源: {args.data_source}")
     logger.info("主推表来源: 飞书云文档（不再使用本地 xlsx）")
     if args.from_seller_home:
-        logger.info("前提：目标店已登录，并停在 TikTok Shop 商家中心首页")
+        logger.info("前提：目标店已登录商家中心（任意子页即可，不必停在首页）")
     else:
         logger.info("前提：你已手动打开「样品申请 → 待审核」并停在该页")
     logger.info("=" * 60)
@@ -1051,7 +1051,7 @@ def main() -> int:
     explicit_store = bool(
         str(args.store_id or "").strip() or str(args.store_name or "").strip()
     )
-    # 从首页导航时：只开着一家店就用那家，不要静默落到测试 1 号店。
+    # 从商家中心导航时：只开着一家店就用那家，不要静默落到测试 1 号店。
     default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
     if args.from_seller_home and not explicit_store:
         default_sid = None
@@ -1068,23 +1068,7 @@ def main() -> int:
     if store_id == DEFAULT_TEST_STORE_ID:
         logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
 
-    if args.from_seller_home:
-        try:
-            navigation_result = navigate_from_seller_home_to_pending(
-                store_id,
-                navigation_timeout=45.0,
-                poll_interval=max(0.5, min(2.0, args.page_wait)),
-            )
-        except Exception as error:
-            logger.error(f"自动导航失败: {error}")
-            return 2
-        destination = navigation_result.get("destination") or {}
-        logger.info(
-            f"[自动导航] 已进入样品申请-待审核 "
-            f"shop_id={destination.get('shop_id')} "
-            f"region={destination.get('shop_region')}")
-
-    # 主推表：仅飞书
+    # 主推表：仅飞书。先读飞书再跳样品申请，避免订单页 SPA 在等待期间把页面弹回去。
     hero_keys: set[str] = set()
     hero_data: dict[str, Any] | None = None
     if args.skip_hero_check:
@@ -1128,6 +1112,22 @@ def main() -> int:
         if not hero_keys:
             logger.info(
                 "警告: 飞书表已读到，但「是否主推=是」为空；条件2 将全部判非主推")
+
+    if args.from_seller_home:
+        try:
+            navigation_result = navigate_from_seller_home_to_pending(
+                store_id,
+                navigation_timeout=45.0,
+                poll_interval=max(0.5, min(2.0, args.page_wait)),
+            )
+        except Exception as error:
+            logger.error(f"自动导航失败: {error}")
+            return 2
+        destination = navigation_result.get("destination") or {}
+        logger.info(
+            f"[自动导航] 已进入样品申请-待审核 "
+            f"shop_id={destination.get('shop_id')} "
+            f"region={destination.get('shop_region')}")
 
     criteria = Criteria(require_hero_sku=not args.skip_hero_check)
     t0 = time.time()

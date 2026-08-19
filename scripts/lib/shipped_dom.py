@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """样品申请「已发货」列表：只读扫表。
 
-用户须已打开样品申请页（任意 tab）。本模块只点「已发货」并翻页。
-绝不点同意 / 拒绝 / 发货。
+未在样品申请页时，从已登录商家中心跳到样品申请并等到 shop_id。
+本模块只点「已发货」并翻页。绝不点同意 / 拒绝 / 发货。
 """
 from __future__ import annotations
 
@@ -13,15 +13,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .sample_dom import click_next
-from .sample_navigation import navigate_to_sample_request
+from .sample_navigation import ensure_sample_request_context
 from .zclaw import zclaw_exec
 
 logger = logging.getLogger(__name__)
-
-SAMPLE_REQUEST_URL = (
-    "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
-    "?shop_region=US"
-)
 
 ENSURE_SHIPPED_TAB_JS = r"""
 (() => {
@@ -141,46 +136,31 @@ def shop_id_from_href(href: str) -> str:
 
 
 def ensure_sample_page_loaded(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
-    """只保证当前页在样品申请域，不点击「已发货」tab。API 读取走 tab=30。"""
-    probe = zclaw_exec(
+    """只保证样品申请页带 shop_id，不点击「已发货」tab。API 读取走 tab=30。"""
+    result = ensure_sample_request_context(
         store_id,
-        "(() => JSON.stringify({href: location.href, text: (document.body.innerText||'').slice(0,80)}))()",
+        force_reload=False,
+        navigation_timeout=max(20.0, page_wait + 15.0),
+        poll_interval=max(0.5, min(2.0, page_wait)),
     )
-    href = ""
-    if isinstance(probe, dict):
-        href = str(probe.get("href") or "")
-    if "sample-request" not in href:
-        arrived = navigate_to_sample_request(
-            store_id,
-            shop_id=shop_id_from_href(href),
-            timeout=max(12.0, page_wait + 8.0),
-            poll_interval=0.5,
-        )
-        href = str(arrived.get("href") or "")
-        time.sleep(max(0.8, min(page_wait, 2.0)))
-    if "sample-request" not in href:
-        raise RuntimeError(f"无法进入样品申请页: {probe}")
-    return {"ok": True, "href": href, "clicked": False}
+    href = str((result.get("destination") or {}).get("href") or "")
+    return {
+        "ok": True,
+        "href": href,
+        "clicked": False,
+        "already": bool(result.get("already")),
+        "destination": result.get("destination") or {},
+    }
 
 
 def ensure_on_sample_page(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
-    """若已在样品申请域则只切 tab；否则 visit 样品申请 URL（本任务允许）。"""
-    probe = zclaw_exec(
+    """若已在样品申请域则只切 tab；否则跳到样品申请并等到 shop_id。"""
+    ensure_sample_request_context(
         store_id,
-        "(() => JSON.stringify({href: location.href, text: (document.body.innerText||'').slice(0,80)}))()",
+        force_reload=False,
+        navigation_timeout=max(20.0, page_wait + 15.0),
+        poll_interval=max(0.5, min(2.0, page_wait)),
     )
-    href = ""
-    if isinstance(probe, dict):
-        href = str(probe.get("href") or "")
-    if "sample-request" not in href:
-        arrived = navigate_to_sample_request(
-            store_id,
-            shop_id=shop_id_from_href(href),
-            timeout=max(12.0, page_wait + 8.0),
-            poll_interval=0.5,
-        )
-        href = str(arrived.get("href") or "")
-        time.sleep(max(0.8, min(page_wait, 2.0)))
     tab = zclaw_exec(store_id, ENSURE_SHIPPED_TAB_JS)
     if not isinstance(tab, dict) or not tab.get("ok"):
         raise RuntimeError(f"无法切到「已发货」tab: {tab}")

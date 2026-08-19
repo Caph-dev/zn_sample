@@ -51,6 +51,19 @@ class PendingTabReadinessTests(unittest.TestCase):
 
         self.assertEqual(execute_script.call_count, 1)
 
+    @patch("lib.sample_dom.zclaw_exec")
+    def test_extract_page_raises_when_body_is_missing(self, execute_script) -> None:
+        from lib.sample_dom import extract_page
+
+        execute_script.return_value = {
+            "ok": False,
+            "reason": "no-document-body",
+            "href": "https://seller.tiktokshopglobalselling.com/order",
+            "rows": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "document.body"):
+            extract_page("store-test")
+
 
 if __name__ == "__main__":
     unittest.main()
