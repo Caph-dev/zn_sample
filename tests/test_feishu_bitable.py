@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +16,10 @@ from lib.feishu_bitable import (  # noqa: E402
     build_product_id_to_sku_map,
     build_shipping_fields,
     create_creator_relation_record,
+    index_pending_ship_records,
+    pending_ship_lookup_key,
     resolve_sample_product_for_row,
+    search_pending_ship_records,
 )
 
 
@@ -52,6 +56,68 @@ class ProductIdToSkuMapTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("是否主推=是", result["reason"])
+
+
+class PendingShipSearchTests(unittest.TestCase):
+    def test_lookup_key_is_handle_plus_product(self) -> None:
+        self.assertEqual(
+            pending_ship_lookup_key("CeliaDailyDeals", "P001"),
+            ("celiadailydeals", "P001"),
+        )
+
+    def test_index_keeps_pending_ship_without_tracking(self) -> None:
+        records = [
+            {
+                "record_id": "old-with-track",
+                "fields": {
+                    "红人ID": "alice",
+                    "寄样产品": "328",
+                    "快递单号": "UUS1",
+                    "合作状态": ["待发货"],
+                },
+            },
+            {
+                "record_id": "fresh-empty",
+                "fields": {
+                    "红人ID": "alice",
+                    "寄样产品": "328",
+                    "合作状态": ["待发货"],
+                },
+            },
+        ]
+        indexed = index_pending_ship_records(records)
+        self.assertEqual(indexed[("alice", "328")]["record_id"], "fresh-empty")
+
+    def test_search_pending_ship_filters_created_time_and_status(self) -> None:
+        since = datetime(2026, 8, 12, 10, 0, tzinfo=timezone.utc)
+        response = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "record_id": "too-old",
+                        "created_time": int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                        "fields": {"红人ID": "old", "寄样产品": "328", "合作状态": ["待发货"]},
+                    },
+                    {
+                        "record_id": "fresh",
+                        "created_time": int(datetime(2026, 8, 13, tzinfo=timezone.utc).timestamp() * 1000),
+                        "fields": {"红人ID": "new", "寄样产品": "328", "合作状态": ["待发货"]},
+                    },
+                ],
+                "has_more": False,
+            },
+        }
+        with patch("lib.feishu_bitable._http_json", return_value=response) as request:
+            items = search_pending_ship_records("token", since=since)
+
+        body = request.call_args.kwargs["body"]
+        self.assertTrue(body["automatic_fields"])
+        self.assertEqual(
+            body["filter"]["conditions"][0]["value"],
+            ["待发货"],
+        )
+        self.assertEqual([item["record_id"] for item in items], ["fresh"])
 
 
 class CreateCreatorRelationRecordTests(unittest.TestCase):

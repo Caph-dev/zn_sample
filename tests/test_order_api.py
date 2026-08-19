@@ -13,6 +13,7 @@ from lib.order_api import (  # noqa: E402
     fetch_tiktok_tracking_api,
     parse_logistics_payload,
 )
+from lib.order_dom import order_lookup_url  # noqa: E402
 from lib.page_api import (  # noqa: E402
     SELLER_APP_NAME,
     SELLER_LOGISTICS_ENDPOINT,
@@ -20,6 +21,13 @@ from lib.page_api import (  # noqa: E402
     _build_request_url,
     build_seller_request_query,
 )
+
+
+class OrderLookupUrlTests(unittest.TestCase):
+    def test_us_region_uses_seller_us_host(self) -> None:
+        url = order_lookup_url("577524130949468533", shop_region="US")
+        self.assertIn("https://seller.us.tiktokshopglobalselling.com/order?", url)
+        self.assertNotIn("://seller.tiktokshopglobalselling.com/", url)
 
 
 class SellerLogisticsQueryTests(unittest.TestCase):
@@ -191,6 +199,14 @@ class OrderApiAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["tracking_no"], "UUS68E5590171628828")
         navigate_to_url.assert_called_once()
+        self.assertIn(
+            "seller.us.tiktokshopglobalselling.com",
+            navigate_to_url.call_args.args[1],
+        )
+        self.assertNotIn(
+            "://seller.tiktokshopglobalselling.com/",
+            navigate_to_url.call_args.args[1],
+        )
         get_read_json.assert_called_once()
         self.assertEqual(get_read_json.call_args.args[1], SELLER_LOGISTICS_ENDPOINT)
         self.assertEqual(

@@ -20,6 +20,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +317,104 @@ def search_relation_records(
         },
     )
     return list(((payload.get("data") or {}).get("items") or []))
+
+
+def pending_ship_lookup_key(creator_handle: str, sample_product: str) -> tuple[str, str]:
+    """红人ID + 寄样产品，大小写不敏感。"""
+    return (
+        (creator_handle or "").strip().lower(),
+        (sample_product or "").strip(),
+    )
+
+
+def record_created_ms(record: dict[str, Any]) -> int | None:
+    raw = record.get("created_time")
+    if raw is None:
+        raw = record.get("createdTime")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def search_pending_ship_records(
+    access_token: str,
+    *,
+    since: datetime,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """近窗内、合作状态=待发货的行。用系统 created_time，不读业务列当时间。"""
+    if since.tzinfo is None:
+        raise FeishuBitableError("search_pending_ship_records 需要带时区的 since")
+    since_ms = int(since.timestamp() * 1000)
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        body: dict[str, Any] = {
+            "page_size": min(max(1, int(page_size)), 500),
+            "automatic_fields": True,
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": "合作状态",
+                        "operator": "is",
+                        "value": [COOPERATION_STATUS_PENDING_SHIP],
+                    }
+                ],
+            },
+        }
+        if page_token:
+            body["page_token"] = page_token
+        payload = _http_json(
+            "POST",
+            f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=body,
+        )
+        data = payload.get("data") or {}
+        for record in data.get("items") or []:
+            if not isinstance(record, dict):
+                continue
+            created_ms = record_created_ms(record)
+            if created_ms is None or created_ms < since_ms:
+                continue
+            items.append(record)
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
+def index_pending_ship_records(
+    records: list[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """红人ID+寄样产品 → 待发货行；同键多行走 pick_shipping_target。"""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        fields = record.get("fields") or {}
+        key = pending_ship_lookup_key(
+            _field_plain(fields.get("红人ID")),
+            _field_plain(fields.get("寄样产品")),
+        )
+        if not key[0] or not key[1]:
+            continue
+        grouped.setdefault(key, []).append(record)
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, group in grouped.items():
+        picked = pick_shipping_target(group)
+        if picked:
+            indexed[key] = picked
+    return indexed
 
 
 def pick_shipping_target(

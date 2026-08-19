@@ -19,8 +19,8 @@
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
 
 2. **两阶段导航**  
-   `open_sample_store.py` 只开店；目标店已运行绝不关闭/重开。用户登录后停在商家中心首页。  
-   仅 `--from-seller-home` 允许从首页进待审核；未传 `--store-id` 时必须 running 恰好一家，不回落到测试 1 号店。先返回脚本结果再跳转。  
+   `open_sample_store.py` 只开店；目标店已运行绝不关闭/重开。用户登录后可停在商家中心任意子页（空白页和登录页除外）。  
+   `--from-seller-home` 从已登录商家中心/联盟中心/样品申请页进待审核；未传 `--store-id` 时必须 running 恰好一家，不回落到测试 1 号店。先返回脚本结果再跳转。  
    未带该开关：用户须已停在 **样品申请 → 待审核**。  
    导航失败只报错退出，不重开、不切店。
 
@@ -52,7 +52,7 @@
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
 | 写达人关系 | 写接口接受后 + `--write-feishu`；`--confirm-export` 可**补写** | 不是主推表；写结果未知时不先写 |
 | 第 6 / 9 步私信 | 独立脚本；详情页消息按钮 `handleClick` 开弹层，默认 IM SDK | 批准后不自动发；不要求跳到 `/seller/im`；不要先点「聊天数」 |
-| 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | `main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`），不用 `shop_id+shop_region` |
+| 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
 
@@ -85,7 +85,7 @@
 |---|---|
 | `--data-source` | `dom\|api\|auto\|shadow`。批准推荐 `auto`。`shadow` 禁止 `--execute` |
 | `--write-source` | 批准/私信写路径；默认 `api`；`dom` 须显式。都要 execute 门闩 |
-| `--from-seller-home` | 才允许从首页导航；未写 `--store-id` 时须 running 唯一店。失败不重开不切店 |
+| `--from-seller-home` | 才允许从已登录商家中心（任意子页）导航；未写 `--store-id` 时须 running 唯一店。失败不重开不切店 |
 | `--from-export` | 跳过扫表/详情。筛查脚本：批准或补写。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
 | `--confirm-export` | 只补写/核对，不重批 |
 | `--with-detail --require-detail` | 正式筛查必须成对；禁止 `--detail-limit`、`--skip-hero-check` |
@@ -130,7 +130,7 @@
 - 详情：直链 `cid=` 或点头像；抽完回列表。
 - 私信：详情「邀请」旁 `.alliance-icon-Message` 的 `handleClick`（带 `creatorId`）。成功=弹层有输入框且选中 `contactCard` 对得上人。**不要先点「聊天数」**。不要因 URL 不是 `/seller/im` 判失败。发送默认 `onSendText`，不点发送钮（除非 `--write-source dom`）。
 - 可点：待审核/已发货 tab、翻页、头像/详情、返回、详情消息按钮。execute 还可点列表同意、确认弹窗。永不点邀请。
-- 进出商家订单页：异步 `location.assign` + 短轮询，禁止阻塞 `visit_page` 回样品申请。
+- 进出商家订单页：异步 `location.replace` + 短轮询，禁止阻塞 `visit_page` 回样品申请。从订单等 SPA 子页出发时先 replace 掉历史，避免弹回订单页。
 - storeId：显式 > running 精确店名 > running 唯一 > 测试默认 1 号店。ZClaw Bridge `9481` ≠ WebDriver `16851`。
 - 语言只看详情简介；空简介默认英语，已有会话语言不改判。
 
@@ -140,7 +140,7 @@
 
 ## Agent 纪律
 
-1. 改自动化前确认：页在待审核（或用户允许 `--from-seller-home`）；`ziniao-cli doctor`；脚本 1/2 同一 `store_id`。
+1. 改自动化前确认：页在待审核（或用户允许 `--from-seller-home`，起点可以是已登录商家中心任意子页）；`ziniao-cli doctor`；脚本 1/2 同一 `store_id`。
 2. 用户要批准：只走已有 `--execute --yes`（+ 可选 `--write-feishu`）。提醒 limit、备份、不可撤销。勿另开无门闩路径。
 3. 探 DOM 只用 `execute_script`；失败先查：留在详情页、Bridge、错 tab、未全部展开。
 4. 与 zn_daren 共用时引用、不复制大段 `zclaw_dom`。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 TikTok Shop 商家中心首页导航到样品申请待审核。"""
+"""从已登录的 TikTok Shop 商家中心跳转到样品申请待审核。"""
 from __future__ import annotations
 
 import json
@@ -16,6 +16,8 @@ SAMPLE_REQUEST_URL = (
     "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
     "?shop_region=US"
 )
+# 订单页 SPA 会先闪到样品申请再弹回；连续两次同一 href 才算站住。
+STABLE_DESTINATION_POLLS = 2
 
 INSPECT_NAVIGATION_PAGE_JS = r"""
 (() => {
@@ -32,9 +34,6 @@ INSPECT_NAVIGATION_PAGE_JS = r"""
     || /^seller(?:\.[a-z0-9-]+)*\.tiktok\.com$/i.test(hostname);
   const loginPage = /login|sign[-_]?in|passport/i.test(pathname + ' ' + title)
     || /Log in to TikTok Shop|登录 TikTok Shop|Sign in to TikTok Shop/i.test(bodyText);
-  const sellerCenterEvidence = /Seller Center|Shop Seller Center|商家中心|TikTok Shop/i.test(
-    title + '\n' + bodyText
-  );
   return JSON.stringify({
     ok: true,
     href,
@@ -46,7 +45,7 @@ INSPECT_NAVIGATION_PAGE_JS = r"""
       ? 'sample-request'
       : (loginPage
           ? 'login'
-          : (sellerHost && sellerCenterEvidence
+          : (sellerHost
               ? 'seller-center'
               : (affiliatePage ? 'affiliate-center' : 'unknown'))),
   });
@@ -75,7 +74,7 @@ def validate_navigation_start(page_state: dict[str, Any]) -> str:
     href = str(page_state.get("href") or "").strip()
     page_type = str(page_state.get("page_type") or "").strip()
     if not href or href == "about:blank":
-        raise RuntimeError("店铺页面仍是 about:blank；请先登录并停在商家中心首页")
+        raise RuntimeError("店铺页面仍是 about:blank；请先登录商家中心")
     if page_type == "login":
         raise RuntimeError("检测到 TikTok Shop 登录页；请先完成登录")
     if page_type not in {"seller-center", "affiliate-center", "sample-request"}:
@@ -158,6 +157,13 @@ def is_seller_order_href(href: str) -> bool:
     )
 
 
+def is_ziniao_navigation_error_href(href: str) -> bool:
+    """紫鸟拦截页：跳转失败，不能再当订单页轮询。"""
+    parsed_url = urllib.parse.urlsplit(href or "")
+    path = str(parsed_url.path or "").lower()
+    return parsed_url.scheme == "chrome-extension" and "error.html" in path
+
+
 def navigate_to_url(
     store_id: str,
     url: str,
@@ -168,7 +174,7 @@ def navigate_to_url(
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """当前已在目标页则跳过；否则异步 assign 后短轮询 href。"""
+    """当前已在目标页则跳过；否则异步 replace 后短轮询 href。"""
     current_href = ""
     try:
         current_href = current_page_href(
@@ -219,10 +225,17 @@ def wait_for_page_href(
                 store_id,
                 execute_script_fn=execute_script_fn,
             )
-            if href_matches(last_href):
-                return last_href
         except Exception as error:
             last_error = str(error)
+            time.sleep(max(0.2, poll_interval))
+            continue
+        if is_ziniao_navigation_error_href(last_href):
+            raise RuntimeError(
+                "订单页跳转被紫鸟拦截，停在 error.html；"
+                f" last_href={last_href[:180]}"
+            )
+        if href_matches(last_href):
+            return last_href
         time.sleep(max(0.2, poll_interval))
     raise RuntimeError(
         "页面跳转超时。"
@@ -263,7 +276,14 @@ def schedule_page_navigation(
     navigation_script = f"""
 (() => {{
   const targetUrl = {json.dumps(url, ensure_ascii=False)};
-  window.setTimeout(() => window.location.assign(targetUrl), 100);
+  window.setTimeout(() => {{
+    const target = window.top || window;
+    try {{
+      target.location.replace(targetUrl);
+    }} catch (error) {{
+      window.location.replace(targetUrl);
+    }}
+  }}, 100);
   return JSON.stringify({{ok: true, scheduled: true, target_url: targetUrl}});
 }})()
 """
@@ -278,34 +298,18 @@ def schedule_page_navigation(
     return result
 
 
-def navigate_from_seller_home_to_pending(
+def _wait_for_sample_request_destination(
     store_id: str,
     *,
-    navigation_timeout: float = 45.0,
-    poll_interval: float = 1.5,
-    navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
-    execute_script_fn: Callable[..., Any] = zclaw_exec,
-    ensure_pending_fn: Callable[..., dict[str, Any]] = assert_on_pending_list,
-) -> dict[str, Any]:
-    """显式开启时，从商家中心首页导航并切到待审核 tab。"""
-    initial_state = execute_script_fn(
-        store_id,
-        INSPECT_NAVIGATION_PAGE_JS,
-        timeout=30,
-        retries=1,
-    )
-    if not isinstance(initial_state, dict):
-        raise RuntimeError(f"无法识别当前店铺页面: {initial_state!r}"[:300])
-    initial_page_type = validate_navigation_start(initial_state)
-
-    # 显式导航模式始终访问规范 URL，避免上次扫表停在中间分页后从该页续扫。
-    navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
-    time.sleep(max(2.0, poll_interval))
-
+    navigation_timeout: float,
+    poll_interval: float,
+    execute_script_fn: Callable[..., Any],
+) -> dict[str, str]:
     deadline = time.monotonic() + max(1.0, navigation_timeout)
     destination_state: dict[str, Any] = {}
-    destination_context: dict[str, str] | None = None
     last_validation_error = ""
+    stable_href = ""
+    stable_count = 0
     while time.monotonic() < deadline:
         try:
             candidate_state = execute_script_fn(
@@ -317,21 +321,103 @@ def navigate_from_seller_home_to_pending(
         except Exception as error:
             candidate_state = None
             last_validation_error = str(error)
+            stable_href = ""
+            stable_count = 0
         if isinstance(candidate_state, dict):
             destination_state = candidate_state
             try:
                 destination_context = validate_sample_request_destination(candidate_state)
-                break
             except RuntimeError as error:
                 last_validation_error = str(error)
+                stable_href = ""
+                stable_count = 0
+            else:
+                href = destination_context["href"]
+                if href == stable_href:
+                    stable_count += 1
+                else:
+                    stable_href = href
+                    stable_count = 1
+                if stable_count >= STABLE_DESTINATION_POLLS:
+                    return destination_context
         time.sleep(max(0.2, poll_interval))
+    raise RuntimeError(
+        "自动导航样品申请页超时。"
+        f" 最后页面={str(destination_state.get('href') or '')[:180]}"
+        f" 校验={last_validation_error}"
+    )
 
-    if destination_context is None:
-        raise RuntimeError(
-            "自动导航样品申请页超时。"
-            f" 最后页面={str(destination_state.get('href') or '')[:180]}"
-            f" 校验={last_validation_error}"
-        )
+
+def ensure_sample_request_context(
+    store_id: str,
+    *,
+    force_reload: bool = False,
+    navigation_timeout: float = 45.0,
+    poll_interval: float = 1.5,
+    navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+) -> dict[str, Any]:
+    """从已登录商家中心任意子页跳到样品申请，并等到 URL 带上 shop_id。
+
+    空白页和登录页拒绝。个别页 execute_script 失败或跳转被拦住时超时退出。
+    """
+    initial_state = execute_script_fn(
+        store_id,
+        INSPECT_NAVIGATION_PAGE_JS,
+        timeout=30,
+        retries=1,
+    )
+    if not isinstance(initial_state, dict):
+        raise RuntimeError(f"无法识别当前店铺页面: {initial_state!r}"[:300])
+    initial_page_type = validate_navigation_start(initial_state)
+
+    if not force_reload:
+        try:
+            destination_context = validate_sample_request_destination(initial_state)
+            return {
+                "ok": True,
+                "already": True,
+                "initial_page_type": initial_page_type,
+                "destination": destination_context,
+            }
+        except RuntimeError:
+            pass
+
+    # 筛查显式导航始终访问规范 URL，避免上次扫表停在中间分页后从该页续扫。
+    navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
+    time.sleep(max(2.0, poll_interval) if force_reload else max(0.8, min(poll_interval, 2.0)))
+    destination_context = _wait_for_sample_request_destination(
+        store_id,
+        navigation_timeout=navigation_timeout,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+    )
+    return {
+        "ok": True,
+        "already": False,
+        "initial_page_type": initial_page_type,
+        "destination": destination_context,
+    }
+
+
+def navigate_from_seller_home_to_pending(
+    store_id: str,
+    *,
+    navigation_timeout: float = 45.0,
+    poll_interval: float = 1.5,
+    navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+    ensure_pending_fn: Callable[..., dict[str, Any]] = assert_on_pending_list,
+) -> dict[str, Any]:
+    """显式开启时，从已登录商家中心任意子页导航并切到待审核 tab。"""
+    navigation_result = ensure_sample_request_context(
+        store_id,
+        force_reload=True,
+        navigation_timeout=navigation_timeout,
+        poll_interval=poll_interval,
+        navigate_page_fn=navigate_page_fn,
+        execute_script_fn=execute_script_fn,
+    )
 
     pending_result = ensure_pending_fn(
         store_id,
@@ -364,8 +450,8 @@ def navigate_from_seller_home_to_pending(
 
     return {
         "ok": True,
-        "initial_page_type": initial_page_type,
-        "destination": destination_context,
+        "initial_page_type": navigation_result["initial_page_type"],
+        "destination": navigation_result["destination"],
         "pending_tab": pending_result,
         "list_readiness": readiness_state,
     }

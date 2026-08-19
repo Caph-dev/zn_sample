@@ -38,10 +38,11 @@ from lib.feishu_bitable import (  # noqa: E402
     describe_cooperation_transition,
     feishu_shipping_already_current,
     get_bitable_access_token,
+    index_pending_ship_records,
     list_sample_product_options,
-    pick_shipping_target,
+    pending_ship_lookup_key,
     resolve_sample_product_for_row,
-    search_relation_records,
+    search_pending_ship_records,
     update_record_fields,
 )
 from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
@@ -65,6 +66,7 @@ from lib.zclaw import resolve_store_id  # noqa: E402
 
 DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
+PENDING_SHIP_LOOKBACK = timedelta(hours=7 * 24)
 try:
     from zoneinfo import ZoneInfo
 
@@ -302,8 +304,29 @@ def main() -> int:
         )
         logger.info(f"[飞书] 可读 table={table_id} 寄样选项={len(sample_options)}")
     except Exception as error:
-        logger.error(f"[飞书] 不可用，只做页面抽取: {error}")
-        bitable_token = None
+        logger.error(f"[飞书] 不可用，无法按待发货筛选: {error}")
+        return 2
+
+    now = datetime.now(BEIJING)
+    since = now - PENDING_SHIP_LOOKBACK
+    try:
+        pending_records = search_pending_ship_records(
+            bitable_token,
+            since=since,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    except FeishuBitableError as error:
+        logger.error(f"[飞书] 读取待发货失败: {error}")
+        return 2
+    pending_index = index_pending_ship_records(pending_records)
+    logger.info(
+        f"[飞书] 近 {int(PENDING_SHIP_LOOKBACK.total_seconds() // 3600)} 小时待发货 "
+        f"{len(pending_records)} 行，主键 {len(pending_index)} 个"
+    )
+    if not pending_index:
+        logger.info("飞书近 7 天没有「待发货」记录，不读已发货")
+        return 0
 
     # 指定达人时先扫完全表再过滤，避免 max_rows 把目标截在页外。
     scrape_max_rows = 0 if (args.creator_name or args.creator_id) else args.max_rows
@@ -349,11 +372,33 @@ def main() -> int:
         logger.info(
             f"[过滤] creator_name={args.creator_name or '-'} "
             f"creator_id={args.creator_id or '-'} → {len(rows)} 行")
+
+    matched_rows: list[dict[str, Any]] = []
+    for row in rows:
+        resolved = resolve_sample_product_for_row(
+            row,
+            product_id_to_sku=product_id_to_sku,
+            sample_product_options=sample_options or list(product_id_to_sku.values()),
+        )
+        option = str(resolved.get("option") or "") if resolved.get("ok") else ""
+        key = pending_ship_lookup_key(str(row.get("creator_name") or ""), option)
+        record = pending_index.get(key)
+        if not record:
+            continue
+        row = dict(row)
+        row["resolved_sku"] = resolved.get("sku") if resolved.get("ok") else ""
+        row["sample_product_option"] = option
+        row["_feishu_record"] = record
+        matched_rows.append(row)
+    logger.info(
+        f"[对齐] 已发货 {len(rows)} 行中，命中飞书待发货主键 {len(matched_rows)} 行"
+    )
+    rows = matched_rows
     if args.max_rows and len(rows) > args.max_rows:
         rows = rows[: args.max_rows]
         logger.info(f"[限量] max_rows={args.max_rows} → {len(rows)} 行")
     if not rows:
-        logger.info("已发货 0 行")
+        logger.info("已发货里没有与近 7 天待发货主键匹配的行")
         return 0
 
     unlimited_send = args.execute_limit <= 0
@@ -422,46 +467,12 @@ def main() -> int:
             f"  {seq} [物流] {name} order={order_id} "
             f"track={out['tracking_raw'] or out['tracking_no']}")
 
-        option = ""
-        sku = ""
-        if sample_options:
-            resolved = resolve_sample_product_for_row(
-                row,
-                product_id_to_sku=product_id_to_sku,
-                sample_product_options=sample_options,
-            )
-            if resolved.get("ok"):
-                option = str(resolved.get("option") or "")
-                sku = str(resolved.get("sku") or "")
-        elif product_id_to_sku.get(str(row.get("product_id") or "")):
-            sku = product_id_to_sku[str(row.get("product_id"))]
-            option = sku
+        option = str(row.get("sample_product_option") or "")
+        sku = str(row.get("resolved_sku") or "")
         out["resolved_sku"] = sku
         out["sample_product_option"] = option
 
-        record = None
-        if bitable_token:
-            try:
-                found = search_relation_records(
-                    bitable_token,
-                    creator_handle=name,
-                    sample_product=option or None,
-                    app_token=app_token,
-                    table_id=table_id,
-                )
-                if not found and option:
-                    found = search_relation_records(
-                        bitable_token,
-                        creator_handle=name,
-                        app_token=app_token,
-                        table_id=table_id,
-                    )
-                record = pick_shipping_target(found)
-            except FeishuBitableError as error:
-                out["feishu_status"] = "search-error"
-                out["error"] = str(error)
-                results.append(out)
-                continue
+        record = row.get("_feishu_record") if isinstance(row.get("_feishu_record"), dict) else None
         if record:
             out["feishu_record_id"] = record.get("record_id")
             existing_lang = _field_plain((record.get("fields") or {}).get("使用语言"))

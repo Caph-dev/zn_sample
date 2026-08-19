@@ -28,10 +28,40 @@ EXTRACT_ORDER_JS = r"""
 """
 
 
-def order_lookup_url(order_id: str, *, shop_id: str = "", shop_region: str = "US") -> str:
+DEFAULT_US_SELLER_HOST = "seller.us.tiktokshopglobalselling.com"
+DEFAULT_SELLER_HOST = "seller.tiktokshopglobalselling.com"
+
+
+def seller_order_host(*, shop_region: str = "US", seller_host: str = "") -> str:
+    """US 店用 seller.us；显式 host 优先。"""
+    explicit = str(seller_host or "").strip()
+    if explicit:
+        host = (
+            explicit.replace("https://", "")
+            .replace("http://", "")
+            .split("/", 1)[0]
+            .strip()
+            .lower()
+        )
+        if host:
+            return host
+    region = str(shop_region or "US").strip().upper()
+    if region == "US":
+        return DEFAULT_US_SELLER_HOST
+    return DEFAULT_SELLER_HOST
+
+
+def order_lookup_url(
+    order_id: str,
+    *,
+    shop_id: str = "",
+    shop_region: str = "US",
+    seller_host: str = "",
+) -> str:
     oid = quote(str(order_id).strip(), safe="")
+    host = seller_order_host(shop_region=shop_region, seller_host=seller_host)
     url = (
-        "https://seller.tiktokshopglobalselling.com/order"
+        f"https://{host}/order"
         f"?main_order_id[]={oid}&order_status[]=200&order_tag[]=8"
         f"&shop_region={quote(shop_region)}&tab=all"
     )
