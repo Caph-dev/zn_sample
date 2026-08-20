@@ -12,7 +12,8 @@
   - 默认禁止同意；仅 --execute --yes 可批
   - 用户须 **已手动** 打开：样品申请 → 待审核
   - 测试环境默认 **1 号店** storeId=27437742526069
-  - 主推表仅飞书 wiki；达人关系表 bitable 见 [feishu.bitable]
+  - temp-only-b005 分支固定只处理 B005 / 1732414717062320994
+  - 达人关系表 bitable 见 [feishu.bitable]
 
 示例：
   # 只读筛查
@@ -66,8 +67,6 @@ from lib.feishu_hero import (  # noqa: E402
     DEFAULT_APP_ID,
     DEFAULT_HERO_URL,
     DEFAULT_SHEET_TITLE,
-    FeishuHeroError,
-    load_hero_from_feishu,
     match_hero,
 )
 from lib.filters import Criteria, evaluate_row  # noqa: E402
@@ -100,6 +99,37 @@ DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
 DEFAULT_EXECUTE_LIMIT = 1
 PLATFORM_STATUS_LAG_MINUTES = 10
 ALREADY_EXECUTED_APPROVE_STATUSES = {"approved", "unknown"}
+TEMP_ONLY_PRODUCT_SKU = "B005"
+TEMP_ONLY_PRODUCT_ID = "1732414717062320994"
+
+
+def _build_temp_only_product_data() -> dict[str, Any]:
+    """Build the fixed B005 product mapping used only on this temporary branch."""
+    return {
+        "hero_keys": {TEMP_ONLY_PRODUCT_SKU.lower(), TEMP_ONLY_PRODUCT_ID},
+        "hero_skus": [TEMP_ONLY_PRODUCT_SKU],
+        "hero_product_ids": [TEMP_ONLY_PRODUCT_ID],
+        "all_skus": [TEMP_ONLY_PRODUCT_SKU],
+        "rows": [
+            {
+                "sku": TEMP_ONLY_PRODUCT_SKU,
+                "product_id": TEMP_ONLY_PRODUCT_ID,
+                "is_hero": True,
+            }
+        ],
+        "source": "temp-only-b005",
+    }
+
+
+def _filter_temp_only_product_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only applications for the temporary branch's exact product ID."""
+    return [
+        row
+        for row in rows
+        if str(row.get("product_id") or "").strip() == TEMP_ONLY_PRODUCT_ID
+    ]
 
 
 def _load_export_rows(path: Path) -> list[dict[str, Any]]:
@@ -357,7 +387,9 @@ def _run_execute_pipeline(
     write_source: str = "api",
 ) -> list[dict[str, Any]]:
     """对筛查通过行执行：解析货号 →（可选查重）→ 同意 →（可选写飞书）。"""
-    product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
+    # 写操作再次固定映射，避免复用旧导出或内部调用时绕过临时产品门槛。
+    hero_data = _build_temp_only_product_data()
+    product_id_to_sku = build_product_id_to_sku_map(hero_data)
     sample_options: list[str] = []
     bitable_token: str | None = None
     app_token = DEFAULT_APP_TOKEN
@@ -1233,7 +1265,9 @@ def main() -> int:
         logger.info("  默认只读导出 | **未**启用同意")
     if not args.from_export:
         logger.info(f"  列表和筛查详情数据源: {args.data_source}")
-    logger.info("主推表来源: 飞书云文档（不再使用本地 xlsx）")
+    logger.info(
+        f"[临时产品门槛] 只处理货号={TEMP_ONLY_PRODUCT_SKU} 且 "
+        f"商品ID={TEMP_ONLY_PRODUCT_ID}；忽略其他申请")
     if args.from_seller_home:
         logger.info("前提：目标店已登录商家中心（任意子页即可，不必停在首页）")
     else:
@@ -1260,50 +1294,12 @@ def main() -> int:
     if store_id == DEFAULT_TEST_STORE_ID:
         logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
 
-    # 主推表：仅飞书。先读飞书再跳样品申请，避免订单页 SPA 在等待期间把页面弹回去。
-    hero_keys: set[str] = set()
-    hero_data: dict[str, Any] | None = None
+    # temp-only-b005 分支固定处理单一商品，不读取主推表，也不允许参数扩大范围。
+    hero_data = _build_temp_only_product_data()
+    hero_keys = set(hero_data["hero_keys"])
     if args.skip_hero_check:
-        logger.info("[主推] --skip-hero-check：跳过飞书主推条件（非正式）")
-    else:
-        try:
-            hero_data = load_hero_from_feishu(
-                url=args.hero_feishu_url,
-                sheet_title=args.hero_sheet,
-                app_id=args.feishu_app_id,
-                app_secret=args.feishu_app_secret,
-                config_path=args.config,
-            )
-        except FeishuHeroError as error:
-            logger.error(f"飞书主推表读取失败: {error}")
-            logger.info(
-                "请确认：1) config.toml [feishu].app_secret 或 FEISHU_APP_SECRET  "
-                "2) 应用仍有表格可阅读权限  "
-                "3) 链接/子表名正确")
-            return 2
-        except Exception as error:
-            logger.error(f"飞书主推表读取异常: {error}")
-            return 2
-
-        hero_keys = set(hero_data.get("hero_keys") or set())
-        hero_skus = hero_data.get("hero_skus") or []
-        hero_product_ids = hero_data.get("hero_product_ids") or []
-        preview = ", ".join(str(sku) for sku in hero_skus[:20])
-        if len(hero_skus) > 20:
-            preview = f"{preview}, …"
-        cfg_note = hero_data.get("config_path") or "（无 config.toml，仅用环境变量/默认）"
-        logger.info(f"[配置] {cfg_note}")
         logger.info(
-            f"[主推飞书] title={hero_data.get('doc_title') or hero_data.get('sheet_title')} "
-            f"sheet={hero_data.get('sheet_title')} "
-            f"token={hero_data.get('spreadsheet_token')} "
-            f"→ 货号 {len(hero_data.get('all_skus') or [])} 个，"
-            f"主推货号 {len(hero_skus)} 个，主推商品ID {len(hero_product_ids)} 个，"
-            f"匹配键 {len(hero_keys)} 个"
-            + (f"; 主推货号: {preview}" if preview else ""))
-        if not hero_keys:
-            logger.info(
-                "警告: 飞书表已读到，但「是否主推=是」为空；条件2 将全部判非主推")
+            "[临时产品门槛] 已忽略 --skip-hero-check；固定 B005 门槛不可绕过")
 
     if args.from_seller_home:
         try:
@@ -1321,7 +1317,7 @@ def main() -> int:
             f"shop_id={destination.get('shop_id')} "
             f"region={destination.get('shop_region')}")
 
-    criteria = Criteria(require_hero_sku=not args.skip_hero_check)
+    criteria = Criteria(require_hero_sku=True)
     t0 = time.time()
     pending_result = None
     raw_rows: list[dict[str, Any]] = []
@@ -1371,6 +1367,20 @@ def main() -> int:
             logger.error("未读到待审核行")
             return 1
 
+    input_row_count = len(raw_rows)
+    raw_rows = _filter_temp_only_product_rows(raw_rows)
+    ignored_row_count = input_row_count - len(raw_rows)
+    logger.info(
+        f"[临时产品门槛] 命中 B005={len(raw_rows)}，"
+        f"忽略其他产品={ignored_row_count}")
+    if not raw_rows:
+        logger.info(
+            f"没有商品ID={TEMP_ONLY_PRODUCT_ID}（货号={TEMP_ONLY_PRODUCT_SKU}）的申请；"
+            "本次不拉详情、不批准、不写飞书。")
+        return 0
+    if args.from_export:
+        pre = raw_rows
+
     if not args.from_export:
         list_href = (
             (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "")
@@ -1385,7 +1395,7 @@ def main() -> int:
                 r,
                 criteria=criteria,
                 hero_keys=hero_keys,
-                skip_hero_check=args.skip_hero_check,
+                skip_hero_check=False,
                 require_detail=False,
             )
             for r in raw_rows
@@ -1513,7 +1523,7 @@ def main() -> int:
                     row,
                     criteria=criteria,
                     hero_keys=hero_keys,
-                    skip_hero_check=args.skip_hero_check,
+                    skip_hero_check=False,
                     require_detail=args.require_detail,
                 )
                 reevaluated_row["initial_screen_eligible"] = True

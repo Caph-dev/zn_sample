@@ -10,7 +10,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from screen_sample_requests import (  # noqa: E402
+    TEMP_ONLY_PRODUCT_ID,
+    TEMP_ONLY_PRODUCT_SKU,
     _backfill_feishu_order_no,
+    _build_temp_only_product_data,
+    _filter_temp_only_product_rows,
     _looks_like_tiktok_order_no,
     _reject_if_not_exact_hero,
     _run_confirm_pipeline,
@@ -22,12 +26,41 @@ from screen_sample_requests import (  # noqa: E402
 )
 
 
+class TempOnlyProductTests(unittest.TestCase):
+    def test_fixed_product_data_maps_exact_product_id_to_b005(self) -> None:
+        product_data = _build_temp_only_product_data()
+
+        self.assertEqual(product_data["hero_skus"], [TEMP_ONLY_PRODUCT_SKU])
+        self.assertEqual(product_data["hero_product_ids"], [TEMP_ONLY_PRODUCT_ID])
+        self.assertEqual(
+            product_data["rows"],
+            [
+                {
+                    "sku": "B005",
+                    "product_id": "1732414717062320994",
+                    "is_hero": True,
+                }
+            ],
+        )
+
+    def test_filter_ignores_every_other_product(self) -> None:
+        rows = [
+            {"apply_id": "keep", "product_id": TEMP_ONLY_PRODUCT_ID},
+            {"apply_id": "other", "product_id": "1732060411527205730"},
+            {"apply_id": "missing"},
+        ]
+
+        filtered_rows = _filter_temp_only_product_rows(rows)
+
+        self.assertEqual(filtered_rows, [rows[0]])
+
+
 def build_candidate() -> dict:
     return {
         "apply_id": "apply-test-001",
         "creator_id": "creator-test-001",
         "creator_name": "creator_test",
-        "product_id": "product-test-001",
+        "product_id": TEMP_ONLY_PRODUCT_ID,
         "can_be_approved": True,
         "eligible": True,
     }
