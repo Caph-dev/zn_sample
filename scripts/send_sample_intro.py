@@ -58,6 +58,9 @@ EXPORT_FIELDS = [
     "creator_name",
     "creator_id",
     "apply_id",
+    "product_id",
+    "sample_product_option",
+    "resolved_sku",
     "bio",
     "lang",
     "feishu_lang",
@@ -71,6 +74,51 @@ EXPORT_FIELDS = [
     "feishu_status",
     "error",
 ]
+
+
+def _target_product_key(row: dict[str, Any]) -> str:
+    """Return the most stable product identity available in an export row."""
+    for field_name in ("sample_product_option", "resolved_sku", "product_id"):
+        value = str(row.get(field_name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _intro_target_key(row: dict[str, Any]) -> tuple[str, str]:
+    """Use creator ID plus product as the introduction-message dedupe key."""
+    return (
+        str(row.get("creator_id") or "").strip(),
+        _target_product_key(row),
+    )
+
+
+def _load_sent_intro_audit() -> tuple[set[tuple[str, str]], set[str]]:
+    """Load successful intro sends from prior local intro exports.
+
+    Older intro exports did not include product fields, so their apply IDs are
+    also retained as an exact same-application fallback.
+    """
+    sent_target_keys: set[tuple[str, str]] = set()
+    sent_apply_ids: set[str] = set()
+    for export_path in (ROOT / "exports").glob("sample_intro_*.json"):
+        try:
+            data = json.loads(export_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rows = data if isinstance(data, list) else data.get("rows") or data.get("items") or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or row.get("send_status") != "sent":
+                continue
+            apply_id = str(row.get("apply_id") or "").strip()
+            if apply_id:
+                sent_apply_ids.add(apply_id)
+            target_key = _intro_target_key(row)
+            if target_key[0] and target_key[1]:
+                sent_target_keys.add(target_key)
+    return sent_target_keys, sent_apply_ids
 
 
 def _load_export_targets(path: Path) -> list[dict[str, Any]]:
@@ -267,6 +315,9 @@ def main() -> int:
     limit = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
     sent = 0
     results: list[dict[str, Any]] = []
+    sent_intro_keys, sent_intro_apply_ids = _load_sent_intro_audit()
+    current_run_intro_keys: set[tuple[str, str]] = set()
+    current_run_apply_ids: set[str] = set()
     logger.info("=" * 60)
     logger.info(
         f"第6步介绍私信 | 模式={'EXECUTE' if args.execute else 'DRY-RUN'} "
@@ -279,6 +330,9 @@ def main() -> int:
             "creator_name": name,
             "creator_id": row.get("creator_id") or "",
             "apply_id": row.get("apply_id") or "",
+            "product_id": row.get("product_id") or "",
+            "sample_product_option": row.get("sample_product_option") or "",
+            "resolved_sku": row.get("resolved_sku") or "",
             "feishu_record_id": row.get("feishu_record_id") or "",
         }
         if args.execute and sent >= limit:
@@ -302,6 +356,26 @@ def main() -> int:
         logger.info(
             f"  [语言] {name} {detected.get('feishu_lang')} "
             f"({detected.get('reason')}) bio={(detected.get('bio') or '')[:60]!r}")
+
+        intro_key = _intro_target_key(row)
+        apply_id = str(row.get("apply_id") or "").strip()
+        already_sent = (
+            (intro_key[0] and intro_key[1] and intro_key in sent_intro_keys)
+            or (apply_id and apply_id in sent_intro_apply_ids)
+            or (intro_key[0] and intro_key[1] and intro_key in current_run_intro_keys)
+            or (apply_id and apply_id in current_run_apply_ids)
+        )
+        if args.execute and already_sent:
+            out["send_status"] = "already-sent"
+            logger.info(f"    已发送同一红人+产品介绍，跳过")
+            _write_feishu_lang(
+                out,
+                bitable_token=bitable_token,
+                feishu_lang=str(detected.get("feishu_lang") or ""),
+                creator_name=name,
+            )
+            results.append(out)
+            continue
 
         opened = _open_conversation(store_id, row, wait=args.page_wait)
         if not opened.get("ok"):
@@ -345,6 +419,10 @@ def main() -> int:
                     # 因页面未及时刷新而误报未发送并诱发重复私信。
                     out["send_status"] = "sent"
                     sent += 1
+                    if intro_key[0] and intro_key[1]:
+                        current_run_intro_keys.add(intro_key)
+                    if apply_id:
+                        current_run_apply_ids.add(apply_id)
                     if out["send_postcheck"] == "confirmed":
                         logger.info("    已通过 IM SDK API 发送并确认")
                     else:
@@ -369,6 +447,10 @@ def main() -> int:
                     # 点击发送并获得成功响应后即计入发送；postcheck 只作诊断。
                     out["send_status"] = "sent"
                     sent += 1
+                    if intro_key[0] and intro_key[1]:
+                        current_run_intro_keys.add(intro_key)
+                    if apply_id:
+                        current_run_apply_ids.add(apply_id)
                     if out["send_postcheck"] == "confirmed":
                         logger.info("    已通过 DOM 发送并确认")
                     else:
