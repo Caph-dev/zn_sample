@@ -68,6 +68,9 @@ EXPORT_FIELDS = [
     "feishu_error",
     "sample_product_option",
     "resolved_sku",
+    "order_no",
+    "feishu_order_status",
+    "feishu_order_error",
 ]
 
 # SOP 名单列（中文表头）
@@ -105,6 +108,9 @@ CN_HEADERS = [
     "飞书错误",
     "寄样产品选项",
     "解析货号",
+    "待发货订单号",
+    "订单号回填状态",
+    "订单号回填错误",
 ]
 
 

@@ -317,18 +317,6 @@ def main() -> int:
             click_detail = opened_click.get("click") or {}
         else:
             click_detail = opened_click if isinstance(opened_click, dict) else {}
-        probe = inspect_current_thread(store_id, name, wait=args.page_wait)
-        if thread_has_named_intro(probe, name):
-            out["send_status"] = "already-sent"
-            logger.info(f"    已有介绍话术，跳过")
-            _write_feishu_lang(
-                out,
-                bitable_token=bitable_token,
-                feishu_lang=str(detected.get("feishu_lang") or ""),
-                creator_name=name,
-            )
-            results.append(out)
-            continue
 
         if not args.execute:
             out["send_status"] = "dry-run"
@@ -353,14 +341,15 @@ def main() -> int:
                         if thread_has_named_intro(post_probe, name)
                         else "unknown"
                     )
+                    # API 已启动即视为发送成功；postcheck 只用于诊断，避免
+                    # 因页面未及时刷新而误报未发送并诱发重复私信。
+                    out["send_status"] = "sent"
+                    sent += 1
                     if out["send_postcheck"] == "confirmed":
-                        out["send_status"] = "sent"
-                        sent += 1
                         logger.info("    已通过 IM SDK API 发送并确认")
                     else:
-                        out["send_status"] = "send-unknown"
                         out["error"] = "API 已启动但发送后未确认，禁止自动重试"
-                        logger.info(f"    发送状态未知: {out['error']}")
+                        logger.info(f"    已通过 IM SDK API 发送（{out['error']}）")
                 else:
                     out["send_status"] = "send-failed"
                     out["error"] = sent_ret.get("reason") or str(sent_ret)
@@ -377,14 +366,14 @@ def main() -> int:
                         if thread_has_named_intro(post_probe, name)
                         else "unknown"
                     )
+                    # 点击发送并获得成功响应后即计入发送；postcheck 只作诊断。
+                    out["send_status"] = "sent"
+                    sent += 1
                     if out["send_postcheck"] == "confirmed":
-                        out["send_status"] = "sent"
-                        sent += 1
                         logger.info("    已通过 DOM 发送并确认")
                     else:
-                        out["send_status"] = "send-unknown"
                         out["error"] = "DOM 点击后未确认消息，禁止自动重试"
-                        logger.info(f"    发送状态未知: {out['error']}")
+                        logger.info(f"    已通过 DOM 发送（{out['error']}）")
                 else:
                     out["send_status"] = "send-failed"
                     out["error"] = sent_ret.get("error") or str(sent_ret)

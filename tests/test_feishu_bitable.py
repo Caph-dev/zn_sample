@@ -20,6 +20,7 @@ from lib.feishu_bitable import (  # noqa: E402
     pending_ship_lookup_key,
     resolve_sample_product_for_row,
     search_pending_ship_records,
+    update_record_order_no,
 )
 
 
@@ -267,6 +268,72 @@ class DescribeCooperationTransitionTests(unittest.TestCase):
         )
         self.assertTrue(feishu_shipping_already_current(plan, "tracking-1"))
         self.assertFalse(feishu_shipping_already_current(plan, "tracking-new"))
+
+
+class UpdateRecordOrderNoTests(unittest.TestCase):
+    def test_writes_order_field_when_current_is_empty(self) -> None:
+        with patch("lib.feishu_bitable._http_json") as request:
+            request.side_effect = [
+                {
+                    "code": 0,
+                    "data": {"record": {"record_id": "rec-1", "fields": {}}},
+                },
+                {"code": 0, "data": {"record": {"record_id": "rec-1"}}},
+            ]
+            result = update_record_order_no(
+                "token-test",
+                "rec-1",
+                "577532709908747188",
+            )
+
+        self.assertEqual(result["status"], "written")
+        put_call = request.call_args_list[1]
+        self.assertEqual(put_call.args[0], "PUT")
+        self.assertEqual(
+            put_call.kwargs["body"]["fields"],
+            {"订单号": "577532709908747188"},
+        )
+
+    def test_unchanged_when_current_is_same(self) -> None:
+        with patch("lib.feishu_bitable._http_json") as request:
+            request.return_value = {
+                "code": 0,
+                "data": {
+                    "record": {
+                        "record_id": "rec-1",
+                        "fields": {"订单号": "577532709908747188"},
+                    }
+                },
+            }
+            result = update_record_order_no(
+                "token-test",
+                "rec-1",
+                "577532709908747188",
+            )
+
+        request.assert_called_once()
+        self.assertEqual(result["status"], "unchanged")
+
+    def test_skips_when_current_is_different(self) -> None:
+        with patch("lib.feishu_bitable._http_json") as request:
+            request.return_value = {
+                "code": 0,
+                "data": {
+                    "record": {
+                        "record_id": "rec-1",
+                        "fields": {"订单号": "577599999999999999"},
+                    }
+                },
+            }
+            result = update_record_order_no(
+                "token-test",
+                "rec-1",
+                "577532709908747188",
+            )
+
+        request.assert_called_once()
+        self.assertEqual(result["status"], "skipped-existing-different")
+        self.assertEqual(result["current_order"], "577599999999999999")
 
 
 if __name__ == "__main__":

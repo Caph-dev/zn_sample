@@ -72,13 +72,15 @@
 | 开店（不重开） | `open_sample_store.py` | 首页前 | 无 | 已运行不关、不进联盟中心 |
 | 1–4 筛查+名单 | `screen_sample_requests.py` | 导出 | 正式须 `--with-detail --require-detail` | 不批、不发信 |
 | 5 同意/写表 | 同上 | 不写 | `--execute --yes`；再加 `--write-feishu` | 不发第 6 步 |
-| 5 **补写** | 同上 `--confirm-export` | 核对待发货 / 补飞书 | 约 10 分钟窗口；不重批 | 不发私信 |
+| 5 **补写** | 同上 `--confirm-export` | 核对待发货 / 补飞书 / 回填订单号 | 约 10 分钟窗口；不重批 | 不发私信 |
 | 6 介绍 | `send_sample_intro.py` | 预演 | `--execute --yes` | 不批、不查物流 |
 | 7 读物流 | `sync_shipped_tracking.py` | **16:00 前拒绝** | 16:00 后只读；测试 `--force` | `--force` 不写不发 |
 | 8 回写飞书 | 同上 | 不写 | `--write-feishu` | 不发第 9 步 |
 | 9 物流私信 | 同上 | 不发 | `--write-feishu --send-tracking --execute --yes` | 不回头筛/批 |
 
 **补写：** 写接口 `success_count=1` 即算批准成功，不等待发货。列表约 10 分钟后刷新；用 `--confirm-export` 核对并补飞书。原先因「待审核找不到」标成 `skipped` 的已批行也纳入补写。
+
+**订单号回填（同一 confirm 步骤）：** 确认转入待发货后，对飞书已建行的行回填「订单号」列，只写这一列（不联动「是否已寄样」/「合作状态」）。订单号取自待发货 tab 的 `main_order_id`，须非空、非 `0`、符合 15–20 位订单号形态（`is_order_id`）；已有不同订单号不覆盖（`update_record_order_no`）。拿不到有效订单号的行跳过，留待物流步骤兜底；「快递单号」仍只在已发货后由第 7–8 步写。回填与补写共享同一 `--execute-limit` 预算，主流程先行。导出新增 `order_no` / `feishu_order_status` / `feishu_order_error` 列。
 
 **16:00：** `sync_shipped_tracking.py` 启动时用 `Asia/Shanghai` 看当前小时，`< 16` 退出。不是 cron，到点不会自动跑。
 
@@ -92,7 +94,7 @@
 | `--write-source` | 批准/私信写路径；默认 `api`；`dom` 须显式。都要 execute 门闩 |
 | `--from-seller-home` | 才允许从已登录商家中心（任意子页）导航；未写 `--store-id` 时须 running 唯一店。失败不重开不切店 |
 | `--from-export` | 跳过扫表/详情。筛查脚本：批准或补写。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
-| `--confirm-export` | 只补写/核对，不重批 |
+| `--confirm-export` | 只补写/核对/回填订单号，不重批；回填与补写共享 `--execute-limit` |
 | `--with-detail --require-detail` | 正式筛查必须成对；禁止 `--detail-limit`、`--skip-hero-check` |
 | `--execute --yes` | 唯一批准/真发门闩；缺一退出码 2 |
 | `--execute-limit` | 默认 1 |

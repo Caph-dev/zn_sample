@@ -82,6 +82,7 @@ class ParseAndArgvTests(unittest.TestCase):
         self.assertNotIn("--store-name", argv)
 
     def test_pipeline_is_not_a_single_argv(self) -> None:
+        self.assertEqual(OPERATOR_EXECUTE_LIMIT, 50)
         with self.assertRaisesRegex(OperatorLaunchError, "不是单步"):
             build_job_argv(
                 "pipeline",

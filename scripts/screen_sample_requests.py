@@ -60,6 +60,7 @@ from lib.feishu_bitable import (  # noqa: E402
     get_bitable_access_token,
     list_sample_product_options,
     resolve_sample_product_for_row,
+    update_record_order_no,
 )
 from lib.feishu_hero import (  # noqa: E402
     DEFAULT_APP_ID,
@@ -75,7 +76,11 @@ from lib.network_observer import (  # noqa: E402
     drain_network_observer,
 )
 from lib.sample_navigation import navigate_from_seller_home_to_pending  # noqa: E402
-from lib.sample_api import check_pending_application_api  # noqa: E402
+from lib.sample_api import (  # noqa: E402
+    READY_TO_SHIP_TAB,
+    check_application_in_tab_api,
+    check_pending_application_api,
+)
 from lib.sample_data_source import (  # noqa: E402
     DATA_SOURCE_CHOICES,
     load_creator_detail,
@@ -85,6 +90,7 @@ from lib.sample_write_api import (  # noqa: E402
     approve_application_api,
     confirm_application_approved_api,
 )
+from lib.tracking_parse import is_order_id  # noqa: E402
 from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -190,6 +196,93 @@ def _select_confirm_candidates_from_export(
             continue
         candidates.append(row)
     return candidates
+
+
+def _looks_like_tiktok_order_no(value: Any) -> str:
+    """待发货列表 main_order_id 校验：非空、非 0、符合订单号形态。
+
+    拿不到有效订单号时返回空串；飞书「订单号」留待物流步骤兜底。
+    """
+    order_no = str(value or "").strip()
+    if not order_no or order_no == "0":
+        return ""
+    return order_no if is_order_id(order_no) else ""
+
+
+def _select_order_backfill_rows_from_export(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """挑已批且飞书已建行的行，等满平台刷新窗口后回填「订单号」。"""
+    current_time = now or datetime.now()
+    backfill_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not str(row.get("apply_id") or "").strip():
+            continue
+        if str(row.get("approve_status") or "").strip() not in {"approved", "unknown"}:
+            continue
+        if not str(row.get("feishu_record_id") or "").strip():
+            continue
+        if str(row.get("approve_confirmation") or "").strip() == "confirmed":
+            continue
+        if str(row.get("feishu_order_status") or "").strip() in {
+            "written",
+            "unchanged",
+            "skipped-existing-different",
+        }:
+            continue
+        approved_at = _parse_approved_at(row.get("approved_at"))
+        if (
+            not force
+            and approved_at is not None
+            and (current_time - approved_at).total_seconds()
+            < PLATFORM_STATUS_LAG_MINUTES * 60
+        ):
+            row["feishu_order_status"] = "waiting-platform-lag"
+            continue
+        backfill_rows.append(row)
+    return backfill_rows
+
+
+def _backfill_feishu_order_no(
+    *,
+    bitable_token: str,
+    row: dict[str, Any],
+    order_no: str,
+    record_id: str,
+    app_token: str,
+    table_id: str,
+) -> None:
+    """把待发货订单号写入飞书「订单号」列；只写这一列。
+
+    不联动「是否已寄样」/「合作状态」；已有不同订单号时不覆盖。
+    """
+    try:
+        result = update_record_order_no(
+            bitable_token,
+            record_id,
+            order_no,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    except FeishuBitableError as error:
+        row["feishu_order_status"] = "error"
+        row["feishu_order_error"] = str(error)
+        logger.info(f"    飞书订单号回填失败: {error}")
+        return
+    status = str(result.get("status") or "unknown")
+    row["feishu_order_status"] = status
+    row["feishu_order_error"] = ""
+    if status == "written":
+        logger.info(f"    飞书订单号已回填: {order_no}")
+    elif status == "unchanged":
+        logger.info(f"    飞书订单号已有且一致: {order_no}")
+    else:
+        current_order = str(result.get("current_order") or "")
+        row["feishu_order_error"] = f"已有订单号 {current_order}，不覆盖"
+        logger.info(f"    飞书已有不同订单号，不覆盖: {current_order}")
 
 
 def decide_api_approval_outcome(
@@ -304,6 +397,7 @@ def _run_execute_pipeline(
         pass
 
     limit = execute_limit if execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
+    approval_target_count = min(len(candidates), limit)
     processed = 0
     feishu_created_ids: list[str] = []
 
@@ -439,7 +533,7 @@ def _run_execute_pipeline(
             continue
 
         logger.info(
-            f"  [批准] ({processed + 1}/{limit}) {creator_name} "
+            f"  [批准] ({processed + 1}/{approval_target_count}) {creator_name} "
             f"apply={apply_id} sku={product_resolve.get('sku')} "
             f"option={product_resolve.get('option')}")
         observer_armed = False
@@ -670,8 +764,13 @@ def _run_confirm_pipeline(
     write_feishu: bool,
     execute_limit: int,
     config_path: str | None,
+    order_backfill_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """延后确认平台列表是否已转入待发货；可选补写飞书。"""
+    """延后确认平台列表是否已转入待发货；可选补写飞书并回填订单号。
+
+    订单号只写飞书「订单号」列，不联动「是否已寄样」/「合作状态」；
+    拿不到有效订单号的行跳过，留待物流步骤兜底。
+    """
     product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
     sample_options: list[str] = []
     bitable_token: str | None = None
@@ -733,6 +832,10 @@ def _run_confirm_pipeline(
             row["approve_confirmation"] = "confirmed"
             row["approve_error"] = ""
             logger.info("    平台列表已转入待发货")
+            order_no = _looks_like_tiktok_order_no(
+                (confirmation.get("ready_to_ship") or {}).get("main_order_id")
+            )
+            row["order_no"] = order_no
             processed += 1
         elif confirmation.get("state") == "still-pending":
             row["approve_confirmation"] = "still-pending"
@@ -748,7 +851,23 @@ def _run_confirm_pipeline(
             continue
 
         already_written = row.get("feishu_status") in {"created", "approved+feishu"}
-        if not write_feishu or not bitable_token or already_written:
+        if not write_feishu or not bitable_token:
+            continue
+
+        if already_written:
+            # 只回填「订单号」；不补建行，也不碰寄样/合作状态
+            record_id = str(row.get("feishu_record_id") or "").strip()
+            if record_id and order_no:
+                _backfill_feishu_order_no(
+                    bitable_token=bitable_token,
+                    row=row,
+                    order_no=order_no,
+                    record_id=record_id,
+                    app_token=app_token,
+                    table_id=table_id,
+                )
+            elif not order_no:
+                row["feishu_order_status"] = "skipped-invalid-order-no"
             continue
 
         not_hero = _reject_if_not_exact_hero(row, hero_data)
@@ -792,6 +911,18 @@ def _run_confirm_pipeline(
             row["feishu_status"] = "duplicate"
             row["feishu_record_id"] = dup.get("record_id")
             logger.info(f"    飞书已存在 record={dup.get('record_id')}")
+            record_id = str(dup.get("record_id") or "").strip()
+            if record_id and order_no:
+                _backfill_feishu_order_no(
+                    bitable_token=bitable_token,
+                    row=row,
+                    order_no=order_no,
+                    record_id=record_id,
+                    app_token=app_token,
+                    table_id=table_id,
+                )
+            elif not order_no:
+                row["feishu_order_status"] = "skipped-invalid-order-no"
             continue
         try:
             created = create_creator_relation_record(
@@ -807,10 +938,70 @@ def _run_confirm_pipeline(
             row["feishu_record_id"] = created.get("record_id")
             row["action"] = "approved+feishu"
             logger.info(f"    飞书补写成功 record_id={created.get('record_id')}")
+            record_id = str(created.get("record_id") or "").strip()
+            if record_id and order_no:
+                _backfill_feishu_order_no(
+                    bitable_token=bitable_token,
+                    row=row,
+                    order_no=order_no,
+                    record_id=record_id,
+                    app_token=app_token,
+                    table_id=table_id,
+                )
+            elif not order_no:
+                row["feishu_order_status"] = "skipped-invalid-order-no"
         except FeishuBitableError as error:
             row["feishu_status"] = "error"
             row["feishu_error"] = str(error)
             logger.error(f"    飞书补写失败: {error}")
+
+    # 第 2 遍：对已批且飞书已建行的行回填「订单号」（共享本轮 limit）
+    for row in order_backfill_rows or []:
+        if processed >= limit:
+            row["feishu_order_status"] = "skipped-limit"
+            continue
+        apply_id = str(row.get("apply_id") or "").strip()
+        creator_name = str(row.get("creator_name") or "").strip()
+        record_id = str(row.get("feishu_record_id") or "").strip()
+        if not write_feishu or not bitable_token or not record_id:
+            row["feishu_order_status"] = "skipped-no-write"
+            continue
+        logger.info(f"  [订单号回填] {creator_name} apply={apply_id}")
+        try:
+            ready = check_application_in_tab_api(
+                store_id,
+                apply_id,
+                tab=READY_TO_SHIP_TAB,
+                expected_creator_id=str(row.get("creator_id") or ""),
+                expected_product_id=str(row.get("product_id") or ""),
+                max_pages=50,
+            )
+        except Exception as error:
+            row["feishu_order_status"] = "error"
+            row["feishu_order_error"] = str(error)
+            logger.info(f"    待发货查询失败: {error}")
+            continue
+        row["order_no_postcheck"] = ready
+        processed += 1
+        if ready.get("state") in {"not-found-in-pending", "identity-mismatch"}:
+            row["feishu_order_status"] = f"skipped-{ready.get('state')}"
+            logger.info(
+                f"    待发货未找到该申请 state={ready.get('state')}，留给物流步骤")
+            continue
+        order_no = _looks_like_tiktok_order_no(ready.get("main_order_id"))
+        row["order_no"] = order_no
+        if not order_no:
+            row["feishu_order_status"] = "skipped-invalid-order-no"
+            logger.info("    待发货无有效订单号，留给物流步骤")
+            continue
+        _backfill_feishu_order_no(
+            bitable_token=bitable_token,
+            row=row,
+            order_no=order_no,
+            record_id=record_id,
+            app_token=app_token,
+            table_id=table_id,
+        )
     return candidates
 
 
@@ -904,7 +1095,8 @@ def main() -> int:
         action="store_true",
         help=(
             "只对 --from-export 里已批行做延后列表确认（默认等满约 "
-            f"{PLATFORM_STATUS_LAG_MINUTES} 分钟）；不重新批准"
+            f"{PLATFORM_STATUS_LAG_MINUTES} 分钟）；不重新批准；"
+            "确认转入待发货后回填飞书「订单号」列（拿不到留待物流步骤）"
         ),
     )
     ap.add_argument(
@@ -1395,9 +1587,15 @@ def main() -> int:
             pre,
             force=bool(args.force_confirm),
         )
+        order_backfill_rows = _select_order_backfill_rows_from_export(
+            pre,
+            force=bool(args.force_confirm),
+        )
         logger.info(
             f"--- CONFIRM 目标 {len(candidates)}"
             f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---")
+        logger.info(
+            f"--- 订单号回填 {len(order_backfill_rows)}（共享同一 limit）---")
         _run_confirm_pipeline(
             store_id=store_id,
             candidates=candidates,
@@ -1405,6 +1603,7 @@ def main() -> int:
             write_feishu=bool(args.write_feishu),
             execute_limit=args.execute_limit,
             config_path=args.config,
+            order_backfill_rows=order_backfill_rows,
         )
     elif args.execute:
         # 批准前备份（可回看筛查结果；平台侧「同意」不可自动撤销）
@@ -1472,12 +1671,19 @@ def main() -> int:
         confirmed_count = sum(
             1 for row in pre if row.get("approve_confirmation") == "confirmed"
         )
+        order_written_count = sum(
+            1
+            for row in pre
+            if row.get("feishu_order_status") in {"written", "unchanged"}
+        )
         logger.info(
             f"完成。模式=CONFIRM 列表已确认={confirmed_count} "
+            f"订单号已回填={order_written_count} "
             f"写飞书={'开' if args.write_feishu else '关'}。")
-        summary_title = "「核对补写」完成"
+        summary_title = "「核对补写回填」完成"
         summary_stats = [
             f"列表已确认 : {confirmed_count}",
+            f"订单号回填 : {order_written_count}",
             f"已查看     : {len(pre)}",
             f"写飞书     : {'开' if args.write_feishu else '关'}",
         ]

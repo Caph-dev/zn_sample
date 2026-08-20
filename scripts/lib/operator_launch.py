@@ -41,7 +41,7 @@ INTRO_SCRIPT = ROOT / "scripts" / "send_sample_intro.py"
 TRACKING_SCRIPT = ROOT / "scripts" / "sync_shipped_tracking.py"
 ZINIAO_STATUS = ROOT / "scripts" / "ziniao-status.sh"
 YES_ANSWERS = {"y", "yes"}
-OPERATOR_EXECUTE_LIMIT = 20
+OPERATOR_EXECUTE_LIMIT = 50
 PLATFORM_WAIT_SECONDS = 10 * 60
 try:
     if ZoneInfo is None:
@@ -156,16 +156,16 @@ MODES: dict[str, LaunchMode] = {
         confirm="yesno",
         confirm_message=(
             "将连续做完：出名单 → 批准并写飞书 → 空等 10 分钟 → "
-            "核对待发货并补写 → 发介绍私信，并写回「使用语言」。\n"
+            "核对待发货、补写并回填订单号 → 发介绍私信，并写回「使用语言」。\n"
             f"本轮最多批准 / 发信 {OPERATOR_EXECUTE_LIMIT} 条。\n"
             "中间必须空等 10 分钟：TikTok 商家中心的「待发货」刷新慢，"
             "是平台侧问题，不是脚本卡住。\n"
             "请确认：只开了一家店，店铺窗口已登录商家中心（不必停在首页）。\n"
             "平台同意和已发私信无法用脚本撤销。"
         ),
-        abort_idle="没有批准、没有写飞书、也没有发介绍私信。",
+        abort_idle="没有批准、没有写飞书、没有回填订单号，也没有发介绍私信。",
         abort_not_this="这不是「名单里没有可批准的人」。",
-        start_message="开始筛查、批准、写飞书并发介绍私信。请看着店铺窗口，不要自己点页面。",
+        start_message="开始筛查、批准、写飞书、回填订单号并发介绍私信。请看着店铺窗口，不要自己点页面。",
         report_stem="sample_screen",
         is_pipeline=True,
     ),
@@ -753,12 +753,12 @@ def _run_pipeline(
         else:
             wait_platform_refresh(seconds=PLATFORM_WAIT_SECONDS)
     except KeyboardInterrupt:
-        emit("等待被中断。没有补写飞书，也没有发介绍私信。")
-        notify("等待被中断", "10 分钟等待被中断。没有补写飞书，也没有发介绍私信。")
+        emit("等待被中断。没有补写飞书、没有回填订单号，也没有发介绍私信。")
+        notify("等待被中断", "10 分钟等待被中断。没有补写飞书、没有回填订单号，也没有发介绍私信。")
         return 130
     emit("10 分钟已到。这 10 分钟是在等商家中心刷新，不是脚本在干活。")
 
-    emit("第 3 步：核对待发货并补写飞书。")
+    emit("第 3 步：核对待发货、补写飞书并回填订单号。")
     confirm_code = run_job_fn(
         build_step_argv(
             python=python,

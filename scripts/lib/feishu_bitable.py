@@ -468,6 +468,73 @@ def update_record_fields(
     }
 
 
+def get_record_fields(
+    access_token: str,
+    record_id: str,
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """只读单条记录字段，用于回填前核对当前「订单号」。"""
+    if not record_id:
+        raise FeishuBitableError("缺少 record_id")
+    payload = _http_json(
+        "GET",
+        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/"
+        f"{urllib.parse.quote(record_id)}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    record = ((payload.get("data") or {}).get("record") or {})
+    return record.get("fields") or {}
+
+
+def update_record_order_no(
+    access_token: str,
+    record_id: str,
+    order_no: str,
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """仅回填「订单号」列；不联动「是否已寄样」/「合作状态」。
+
+    已有不同订单号时不覆盖（物流步骤可用 --overwrite 覆盖）。
+    返回 status: written | unchanged | skipped-existing-different。
+    """
+    current_fields = get_record_fields(
+        access_token,
+        record_id,
+        app_token=app_token,
+        table_id=table_id,
+    )
+    current_order = _field_plain(current_fields.get("订单号")).strip()
+    if current_order:
+        if current_order == order_no:
+            return {
+                "status": "unchanged",
+                "record_id": record_id,
+                "current_order": current_order,
+            }
+        return {
+            "status": "skipped-existing-different",
+            "record_id": record_id,
+            "current_order": current_order,
+        }
+    updated = update_record_fields(
+        access_token,
+        record_id,
+        {"订单号": order_no},
+        app_token=app_token,
+        table_id=table_id,
+    )
+    return {
+        "status": "written",
+        "record_id": record_id,
+        "fields": {"订单号": order_no},
+        "raw": updated.get("raw"),
+    }
+
+
 def build_shipping_fields(
     *,
     order_no: str,

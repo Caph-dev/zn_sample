@@ -35,10 +35,10 @@
 |------|----------|---------------------|
 | 0 打开店铺 | 已开则关掉再开（带调试口），没开则打开 | 会关/开店铺窗口；不会批准、不会发私信 |
 | 1 只出名单 | 从商家中心进待审核，筛人，出名单 | 不会批准、不会发私信 |
-| 2 筛查批准写飞书发私信 | 出名单 → 批准并写飞书 → **空等 10 分钟** → 核对待发货并补写 → 发介绍 | 输入 `y` 才继续；本轮最多 20 条；**同意和私信无法撤销** |
+| 2 筛查批准写飞书发私信 | 出名单 → 批准并写飞书 → **空等 10 分钟** → 核对待发货并补写（含回填订单号） → 发介绍 | 输入 `y` 才继续；本轮最多 50 条；**同意和私信无法撤销** |
 | 3 获取物流信息写飞书发单号 | 先读飞书近 7 天「待发货」，再对已发货取单号写回并发私信 | 须 **北京时间 16:00 之后**。输入 `y` 就会写飞书并发送单号 |
 
-`2-筛查批准写飞书发私信` 中间那 10 分钟是在等 **TikTok 商家中心** 把「同意」刷成「待发货」。这是平台侧刷新慢，不是脚本卡住。窗口里会有进度条。请不要关窗口。
+`2-筛查批准写飞书发私信` 中间那 10 分钟是在等 **TikTok 商家中心** 把「同意」刷成「待发货」。这是平台侧刷新慢，不是脚本卡住。窗口里会有进度条。请不要关窗口。等满 10 分钟后，脚本会把「待发货」里已有的订单号回填到飞书「订单号」列（只写这一列；拿不到就等物流步骤补）。
 
 输入 `n` 或直接回车都会退出，什么也不改。
 
@@ -132,14 +132,14 @@ python3 scripts/screen_sample_requests.py \
 # b 对应「2-筛查批准写飞书发私信」里的后半段（批准 / 补写 / 介绍）
 python3 scripts/screen_sample_requests.py \
   --from-export \
-  --execute --yes --write-feishu --execute-limit 20
+  --execute --yes --write-feishu --execute-limit 50
 # 批准后必须等满 10 分钟（商家中心「待发货」刷新），再：
 python3 scripts/screen_sample_requests.py \
   --from-export \
-  --confirm-export --write-feishu --execute-limit 20
+  --confirm-export --write-feishu --execute-limit 50
 python3 scripts/send_sample_intro.py \
   --from-export \
-  --execute --yes --write-feishu --execute-limit 20
+  --execute --yes --write-feishu --execute-limit 50
 
 # c 获取物流、写飞书、发单号（北京时间 16:00 之后）
 python3 scripts/sync_shipped_tracking.py \
@@ -158,11 +158,11 @@ Windows（cmd / PowerShell）：`python3` 换成 `py -3`。路径一律用正斜
 | `--from-seller-home` | 从已登录商家中心（任意子页）进入待审核 |
 | `--with-detail --require-detail` | 正式筛查必带 |
 | `--from-export` | 用筛查 JSON。不写路径则用最新一份 |
-| `--confirm-export` | 核对「待发货」并补写飞书，不重新批准 |
+| `--confirm-export` | 核对「待发货」、补写飞书并回填订单号，不重新批准 |
 | `--execute --yes` | 批准或发送私信 |
 | `--write-feishu` | 写「达人关系管理(新)」 |
 | `--creator-id` / `--creator-name` | 只处理指定达人 |
 | `--force` | 测试时绕过北京时间 16:00 |
 | `--send-tracking` | 发送物流私信 |
-| `--execute-limit 20` | 批准 / 介绍私信本轮最多 20 条 |
+| `--execute-limit 50` | 批准 / 介绍私信本轮最多 50 条 |
 | `--execute-limit 0` | 物流私信不限条数（命令 3 默认） |
