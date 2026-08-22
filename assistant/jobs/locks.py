@@ -39,6 +39,7 @@ def create_or_get_pending_job(
     *,
     job_type: str,
     store_id: str | None,
+    result_summary: str = "",
 ) -> tuple[str, bool]:
     """Deduplicate local job creation across concurrent request threads."""
     with _job_creation_lock:
@@ -63,6 +64,7 @@ def create_or_get_pending_job(
                     store_id=store_id,
                     status="pending",
                     requested_by="local-session",
+                    result_summary=result_summary,
                 )
             )
             session.commit()

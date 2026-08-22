@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from assistant.database.models import Job
 from assistant.jobs.locks import create_or_get_pending_job
 from assistant.services.export_service import SUPPORTED_EXPORT_KINDS
 
@@ -38,12 +37,12 @@ async def create_export(request: Request) -> dict:
     kind = "day_10_list" if requested_kind == "overdue_10" else requested_kind
     if kind not in SUPPORTED_EXPORT_KINDS:
         raise HTTPException(400, {"error": "unsupported-export-kind"})
-    job_id, deduplicated = create_or_get_pending_job(request.app.state.session_factory, job_type="report_export", store_id=kind)
-    with request.app.state.session_factory() as session:
-        job = session.get(Job, job_id)
-        if job and not deduplicated:
-            job.result_summary = json.dumps({"kind": kind})
-            session.commit()
+    job_id, deduplicated = create_or_get_pending_job(
+        request.app.state.session_factory,
+        job_type="report_export",
+        store_id=kind,
+        result_summary=json.dumps({"kind": kind}),
+    )
     return {"job_id": job_id, "deduplicated": deduplicated}
 
 
