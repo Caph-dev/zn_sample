@@ -1,0 +1,39 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "package_list": [
+      {
+        "tracking_no": "UUS68E5590171628828",
+        "logistic_supplier": {
+          "supplier_id": "supplier-test",
+          "supplier_name": "USPS"
+        },
+        "predict_delivery_time_text": "1787630399",
+        "fulfill_unit_id": "fulfill-test-001",
+        "logistic_detail": {
+          "track_list": [
+            {
+              "title": "In transit",
+              "time": 1787207027,
+              "content": "in-transit-event",
+              "track_status": 1
+            },
+            {
+              "title": "Packed",
+              "time": 1787172646,
+              "content": "packed-event",
+              "track_status": 1
+            },
+            {
+              "title": "Order placed",
+              "time": 1787102765,
+              "content": "placed-event",
+              "track_status": 1
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
