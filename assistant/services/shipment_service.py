@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from assistant.database.models import SampleCase, Shipment, ShipmentSnapshot
+from assistant.jobs.registry import HandlerFailure
 from assistant.services.store_service import StoreService
 
 
@@ -50,20 +51,59 @@ class ShipmentService:
             details = None
             order_id = str(row.get("main_order_id") or "").strip()
             if VALID_ORDER_ID.fullmatch(order_id):
+                detail_error: Exception | None = None
+                navigation_error: Exception | None = None
                 try:
-                    details = fetch_tiktok_logistics_details_api(
-                        ziniao_store_id,
-                        order_id,
-                        shop_id=store_model.shop_id,
-                        shop_region=store_model.shop_region,
-                        fulfill_unit_ids=row.get("fulfill_unit_ids") or (),
-                    )
+                    try:
+                        details = fetch_tiktok_logistics_details_api(
+                            ziniao_store_id,
+                            order_id,
+                            shop_id=store_model.shop_id,
+                            shop_region=store_model.shop_region,
+                            fulfill_unit_ids=row.get("fulfill_unit_ids") or (),
+                        )
+                    except Exception as error:
+                        # Isolate one page/API failure without turning it into
+                        # unknown data or stopping later orders.
+                        detail_error = error
                 finally:
-                    navigate_to_sample_request(
-                        ziniao_store_id,
-                        shop_id=store_model.shop_id,
-                        shop_region=store_model.shop_region,
+                    try:
+                        navigation_result = navigate_to_sample_request(
+                            ziniao_store_id,
+                            shop_id=store_model.shop_id,
+                            shop_region=store_model.shop_region,
+                        )
+                        if (
+                            not isinstance(navigation_result, dict)
+                            or not navigation_result.get("ok")
+                        ):
+                            raise RuntimeError("样品申请页导航未确认成功")
+                    except Exception as error:
+                        navigation_error = error
+                if detail_error is not None:
+                    self.warning(
+                        "物流详情读取失败，已跳过该行："
+                        f"order_id={order_id} "
+                        f"error_type={type(detail_error).__name__}"
                     )
+                if navigation_error is not None:
+                    self.warning(
+                        "回样品申请页失败，已停止本批："
+                        f"order_id={order_id} "
+                        f"error_type={type(navigation_error).__name__}"
+                    )
+                    raise HandlerFailure(
+                        "sample-navigation-failed",
+                        "回样品申请页失败，已停止后续物流同步。",
+                    ) from navigation_error
+                if detail_error is not None:
+                    continue
+                if not isinstance(details, dict) or details.get("ok") is False:
+                    self.warning(
+                        "物流详情响应结构异常，已跳过该行："
+                        f"order_id={order_id}"
+                    )
+                    continue
             if details is None:
                 details = self._unknown_details(order_id)
             changed += int(self._persist_shipment(sample_case.id, details))
