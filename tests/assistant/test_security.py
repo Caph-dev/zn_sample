@@ -102,6 +102,53 @@ class LocalSecurityTests(unittest.TestCase):
             self.assertNotIn(secret_value, redacted)
         self.assertIn("[redacted]", redacted)
 
+    def test_secret_redaction_handles_structured_and_punctuation_boundaries(self) -> None:
+        redaction_cases = (
+            (
+                "app_secret=flat_app_secret_sentinel",
+                "app_secret=[redacted]",
+            ),
+            (
+                "access_token:flat_access_token_sentinel",
+                "access_token:[redacted]",
+            ),
+            (
+                '{"tenant_access_token": "json_tenant_access_token_sentinel"}',
+                '{"tenant_access_token": "[redacted]"}',
+            ),
+            (
+                "{'cookie': 'dict_cookie_sentinel'}",
+                "{'cookie': '[redacted]'}",
+            ),
+            (
+                "cookie=comma_cookie_sentinel, ordinary=value",
+                "cookie=[redacted], ordinary=value",
+            ),
+            (
+                "access_token=parenthesis_access_token_sentinel)",
+                "access_token=[redacted])",
+            ),
+        )
+        synthetic_secret_values = (
+            "flat_app_secret_sentinel",
+            "flat_access_token_sentinel",
+            "json_tenant_access_token_sentinel",
+            "dict_cookie_sentinel",
+            "comma_cookie_sentinel",
+            "parenthesis_access_token_sentinel",
+        )
+
+        redacted_outputs = [redact_text(source_text) for source_text, _ in redaction_cases]
+        for redacted_output, (_, expected_output) in zip(redacted_outputs, redaction_cases):
+            self.assertEqual(redacted_output, expected_output)
+        for synthetic_secret_value in synthetic_secret_values:
+            self.assertTrue(
+                all(synthetic_secret_value not in redacted_output for redacted_output in redacted_outputs)
+            )
+
+        ordinary_text = "Ordinary text without a credential assignment remains unchanged."
+        self.assertEqual(redact_text(ordinary_text), ordinary_text)
+
 
 if __name__ == "__main__":
     unittest.main()

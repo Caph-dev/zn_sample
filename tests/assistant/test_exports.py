@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import tempfile
 import unittest
@@ -16,7 +17,11 @@ from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, FollowupTask, Job, SampleCase, Shipment, Store
 from assistant.jobs.locks import create_or_get_pending_job
 from assistant.jobs.worker import _claim_next_job
-from assistant.services.export_service import ExportService
+from assistant.services.export_service import (
+    EXPORT_FIELDS,
+    ExportService,
+    serialize_csv_cell_value,
+)
 
 
 class ExportTests(unittest.TestCase):
@@ -38,6 +43,77 @@ class ExportTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8-sig")
             self.assertIn("order-40", text); self.assertIn("track-40", text)
             self.assertNotIn("order-30", text)
+            engine.dispose()
+
+    def test_export_serializes_formula_prefix_cells_as_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = create_database_engine(root / "test.sqlite3")
+            Base.metadata.create_all(engine)
+            factory = sessionmaker(bind=engine, expire_on_commit=False)
+            dangerous_prefix_values = {
+                "store_name": "=formula_store_name",
+                "creator_name": "+formula_creator_name",
+                "creator_id": "-formula_creator_id",
+                "product_id": "@formula_product_id",
+            }
+            ordinary_apply_id = "ordinary-apply-id"
+            with factory() as session:
+                store = Store(
+                    ziniao_store_id="store",
+                    store_name=dangerous_prefix_values["store_name"],
+                )
+                session.add(store)
+                session.flush()
+                sample_case = SampleCase(
+                    store_id=store.id,
+                    creator_id=dangerous_prefix_values["creator_id"],
+                    creator_name=dangerous_prefix_values["creator_name"],
+                    apply_id=ordinary_apply_id,
+                    product_id=dangerous_prefix_values["product_id"],
+                    curr_status=40,
+                    main_order_id="ordinary-order-id",
+                )
+                session.add(sample_case)
+                session.flush()
+                session.add(
+                    FollowupTask(
+                        sample_case_id=sample_case.id,
+                        stage="day_10_list",
+                        scheduled_for=date(2026, 8, 1),
+                    )
+                )
+                session.commit()
+
+            export_service = ExportService(factory, exports_directory=root / "exports")
+            source_rows = export_service._rows("day_10_list")
+            self.assertEqual(len(source_rows), 1)
+            source_row = source_rows[0]
+            self.assertEqual(tuple(source_row), EXPORT_FIELDS)
+            self.assertEqual(len(source_row), len(EXPORT_FIELDS))
+            for field_name, dangerous_value in dangerous_prefix_values.items():
+                self.assertEqual(source_row[field_name], dangerous_value)
+            self.assertEqual(source_row["apply_id"], ordinary_apply_id)
+            self.assertEqual(source_row["curr_status"], 40)
+            self.assertEqual(
+                serialize_csv_cell_value(source_row["curr_status"]),
+                source_row["curr_status"],
+            )
+            self.assertEqual(serialize_csv_cell_value(ordinary_apply_id), ordinary_apply_id)
+
+            output_path = export_service.export("day_10_list")
+            with output_path.open("r", encoding="utf-8-sig", newline="") as output_file:
+                reader = csv.DictReader(output_file)
+                exported_rows = list(reader)
+
+            self.assertEqual(reader.fieldnames, list(EXPORT_FIELDS))
+            self.assertEqual(len(exported_rows), 1)
+            exported_row = exported_rows[0]
+            self.assertEqual(len(exported_row), len(EXPORT_FIELDS))
+            for field_name, dangerous_value in dangerous_prefix_values.items():
+                self.assertEqual(exported_row[field_name], f"'{dangerous_value}")
+            self.assertEqual(exported_row["apply_id"], ordinary_apply_id)
+            self.assertEqual(exported_row["curr_status"], "40")
             engine.dispose()
 
     def test_json_and_form_job_creation_and_csrf_contract(self) -> None:

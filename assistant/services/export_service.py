@@ -17,6 +17,14 @@ EXPORT_FIELDS = (
     "language", "creator_type", "template_key", "reason",
 )
 SUPPORTED_EXPORT_KINDS = frozenset({"today", "day_10_list", "logistics_exception", "needs_review"})
+SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def serialize_csv_cell_value(value: object) -> object:
+    """Mark formula-like string cells as text during CSV serialization."""
+    if isinstance(value, str) and value.startswith(SPREADSHEET_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
 
 
 class ExportService:
@@ -36,7 +44,13 @@ class ExportService:
         with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=EXPORT_FIELDS)
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(
+                {
+                    field_name: serialize_csv_cell_value(row[field_name])
+                    for field_name in EXPORT_FIELDS
+                }
+                for row in rows
+            )
         return output_path
 
     def _rows(self, kind: str) -> list[dict]:
