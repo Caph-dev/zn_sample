@@ -10,8 +10,12 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 
 from assistant.api.jobs import router as jobs_api_router
+from assistant.api.dashboard import dashboard_summary, router as dashboard_api_router
+from assistant.api.exports import router as exports_api_router
+from assistant.api.followups import router as followups_api_router
+from assistant.api.shipments import router as shipments_api_router
 from assistant.api.stores import running_store_summary
-from assistant.database.models import Job
+from assistant.database.models import FollowupTask, Job, SampleCase, Shipment, Store
 from assistant.jobs.locks import request_safe_store_summary
 from assistant.paths import database_path, user_data_dir
 from assistant.security.secret_redaction import redact_text
@@ -19,6 +23,10 @@ from assistant.security.secret_redaction import redact_text
 
 router = APIRouter()
 router.include_router(jobs_api_router)
+router.include_router(dashboard_api_router)
+router.include_router(exports_api_router)
+router.include_router(followups_api_router)
+router.include_router(shipments_api_router)
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
 
@@ -49,6 +57,10 @@ def home(request: Request) -> HTMLResponse:
             "data_directory": redact_text(user_data_dir()),
             "database_ready": database_path().is_file(),
             "store_summary": _request_store_summary(request),
+            "dashboard": (
+                dashboard_summary(request.app.state.session_factory)
+                if getattr(request.app.state, "session_factory", None) else {}
+            ),
         }
     )
     return templates.TemplateResponse(request, "home.html", context)
@@ -115,3 +127,82 @@ def job_detail_page(job_id: str, request: Request) -> HTMLResponse:
         return HTMLResponse("任务不存在", status_code=404)
     context["job"] = job
     return templates.TemplateResponse(request, "job_detail.html", context)
+
+
+@router.get("/shipments", response_class=HTMLResponse)
+def shipments_page(request: Request) -> HTMLResponse:
+    context = _base_context(request)
+    with request.app.state.session_factory() as session:
+        context["rows"] = session.execute(
+            select(Shipment, SampleCase).join(SampleCase, Shipment.sample_case_id == SampleCase.id)
+        ).all()
+    return templates.TemplateResponse(request, "shipments.html", context)
+
+
+@router.get("/shipments/{shipment_id}", response_class=HTMLResponse)
+def shipment_detail_page(shipment_id: int, request: Request) -> HTMLResponse:
+    context = _base_context(request)
+    with request.app.state.session_factory() as session:
+        row = session.execute(
+            select(Shipment, SampleCase).join(SampleCase, Shipment.sample_case_id == SampleCase.id).where(Shipment.id == shipment_id)
+        ).first()
+    if row is None:
+        return HTMLResponse("物流记录不存在", status_code=404)
+    context["shipment"], context["sample_case"] = row
+    return templates.TemplateResponse(request, "shipment_detail.html", context)
+
+
+@router.get("/followups", response_class=HTMLResponse)
+def followups_page(
+    request: Request,
+    stage: str = "",
+    status: str = "",
+    language: str = "",
+    curr_status: int | None = None,
+) -> HTMLResponse:
+    context = _base_context(request)
+    with request.app.state.session_factory() as session:
+        query = (
+            select(FollowupTask, SampleCase).join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
+        )
+        if stage:
+            query = query.where(FollowupTask.stage == stage)
+        if status:
+            query = query.where(FollowupTask.status == status)
+        if language:
+            query = query.where(FollowupTask.language == language)
+        if curr_status is not None:
+            query = query.where(SampleCase.curr_status == curr_status)
+        context["rows"] = session.execute(query).all()
+    context["filters"] = {
+        "stage": stage, "status": status, "language": language,
+        "curr_status": curr_status,
+    }
+    return templates.TemplateResponse(request, "followups.html", context)
+
+
+@router.get("/followups/{task_id}", response_class=HTMLResponse)
+def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
+    context = _base_context(request)
+    with request.app.state.session_factory() as session:
+        row = session.execute(
+            select(FollowupTask, SampleCase, Shipment, Store)
+            .join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
+            .join(Store, SampleCase.store_id == Store.id)
+            .outerjoin(Shipment, Shipment.sample_case_id == SampleCase.id)
+            .where(FollowupTask.id == task_id)
+        ).first()
+    if row is None:
+        return HTMLResponse("待办不存在", status_code=404)
+    context["task"], context["sample_case"], context["shipment"], context["store"] = row
+    context["attachment_url"] = (
+        "/static/sop-images/2-查看到货+达人跟进-b05.png"
+        if Path(context["task"].attachment_key).name == "2-查看到货+达人跟进-b05.png" else ""
+    )
+    context["scheduled_label"] = "待确认送达日" if context["task"].stage == "confirm_delivery_time" else str(context["task"].scheduled_for)
+    return templates.TemplateResponse(request, "followup_detail.html", context)
+
+
+@router.get("/reports", response_class=HTMLResponse)
+def reports_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "reports.html", _base_context(request))

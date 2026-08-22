@@ -9,6 +9,8 @@ from .timeutil import beijing_date, beijing_now
 
 
 FEISHU_UNFULFILLED_COOPERATION_STATUS = COOPERATION_STATUS_UNPUBLISHED
+CONFIRM_DELIVERY_TIME_STAGE = "confirm_delivery_time"
+CONFIRM_DELIVERY_TIME_SENTINEL = date(1970, 1, 1)
 
 FOLLOWUP_STAGES = frozenset(
     {"arrival", "day_3", "day_7", "day_10_list", "unfulfilled"}

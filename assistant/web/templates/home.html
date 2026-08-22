@@ -7,5 +7,20 @@
   <dt>运行店铺</dt>
   <dd>{% if store_summary.ok %}{{ store_summary.store.storeName }}（{{ store_summary.store.storeId }}）{% else %}{{ store_summary.error }}{% endif %}</dd>
 </dl>
-<section><h2>今日待办</h2><p>待办尚未生成</p></section>
+<nav><a href="/shipments">物流</a> · <a href="/followups">跟进待办</a> · <a href="/reports">CSV 报表</a> · <a href="/jobs">任务</a></nav>
+<section>
+  <h2>只读同步与预览</h2>
+  <form method="post" action="/api/jobs/shipment-sync"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>同步物流（只读）</button></form>
+  <form method="post" action="/api/jobs/followup-generate"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>生成待办预览</button></form>
+  <p>飞书合作状态：未同步；不会发送私信。</p>
+</section>
+{% if dashboard %}
+<section><h2>概览</h2><ul>
+  <li>等待送达：{{ dashboard.waiting_delivery }}</li><li>D0：{{ dashboard.arrival }}</li>
+  <li>D+3：{{ dashboard.day_3 }}</li><li>D+7：{{ dashboard.day_7 }}</li>
+  <li>D+10 名单：{{ dashboard.day_10_list }}</li><li>D+15 未发布：{{ dashboard.unfulfilled }}</li>
+  <li>物流异常：{{ dashboard.logistics_exceptions }}</li><li>需要人工确认：{{ dashboard.needs_review }}</li><li>失败任务：{{ dashboard.failed_jobs }}</li>
+</ul></section>
+<section><h2>最近任务</h2><ul>{% for job_type, job in dashboard.latest_jobs.items() %}<li>{{ job_type }}：{% if job %}{{ job.status }}（{{ job.finished_at or job.created_at }}）{% else %}尚未运行{% endif %}</li>{% endfor %}</ul></section>
+{% endif %}
 {% endblock %}
