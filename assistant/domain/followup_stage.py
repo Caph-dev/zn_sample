@@ -53,8 +53,13 @@ def plan_followup_mutation(
     existing_unpublished: list[dict],
     days: int,
     has_confirmed_content: bool,
+    today: date | None = None,
 ) -> dict:
-    """Plan creation and suppression without performing persistence or I/O."""
+    """Plan creation and suppression without performing persistence or I/O.
+
+    ``today`` lets callers use one frozen natural date for an entire generate
+    operation. Direct callers keep the current Beijing-date default.
+    """
     suppressions: list[dict] = []
 
     if has_confirmed_content:
@@ -77,8 +82,8 @@ def plan_followup_mutation(
         return {"create": [], "suppress": []}
 
     stage, offset_days = latest_stage
-    today = beijing_date(beijing_now())
-    delivery_date = today - timedelta(days=days)
+    effective_today = today if today is not None else beijing_date(beijing_now())
+    delivery_date = effective_today - timedelta(days=days)
     scheduled_for = delivery_date + timedelta(days=offset_days)
     target_key = (stage, scheduled_for)
     existing_keys = {

@@ -8,6 +8,8 @@ from datetime import date, datetime, timezone
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
+from .types import UTCDateTime
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -71,9 +73,9 @@ class Shipment(TimestampMixin, Base):
     status_code: Mapped[str] = mapped_column(String, default="")
     status_label: Mapped[str] = mapped_column(String, default="")
     status_category: Mapped[str] = mapped_column(String, default="")
-    estimated_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimated_delivery_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_event_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_event_text: Mapped[str] = mapped_column(Text, default="")
     package_count: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str] = mapped_column(String, default="")
@@ -90,9 +92,9 @@ class ShipmentSnapshot(Base):
     status_code: Mapped[str] = mapped_column(String, default="")
     status_label: Mapped[str] = mapped_column(String, default="")
     status_category: Mapped[str] = mapped_column(String, default="")
-    estimated_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimated_delivery_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_event_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     last_event_text: Mapped[str] = mapped_column(Text, default="")
     raw_payload_hash: Mapped[str] = mapped_column(String, default="")
     source: Mapped[str] = mapped_column(String, default="")

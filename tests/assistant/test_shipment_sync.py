@@ -202,10 +202,7 @@ class ShipmentSyncTests(unittest.TestCase):
             snapshots = session.scalars(select(ShipmentSnapshot)).all()
             self.assertEqual(shipment.tracking_number, "known-tracking")
             self.assertEqual(shipment.status_category, "delivered")
-            self.assertEqual(
-                shipment.delivered_at,
-                existing_delivered_at.replace(tzinfo=None),
-            )
+            self.assertEqual(shipment.delivered_at, existing_delivered_at)
             self.assertEqual(len(snapshots), 1)
         self.assertEqual(len(warnings), 1)
 

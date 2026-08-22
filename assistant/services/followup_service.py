@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from sqlalchemy import select
 
@@ -12,13 +12,12 @@ from assistant.domain.followup_stage import (
     CONFIRM_DELIVERY_TIME_STAGE,
     CONFIRM_DELIVERY_TIME_SENTINEL,
     days_since_delivery,
-    latest_due_unpublished_stage,
     plan_followup_mutation,
 )
 from assistant.domain.message_templates import TEMPLATE_VERSION, choose_template_key, render_followup_message
 from assistant.domain.policies import choose_followup_creator_type, choose_followup_language
 from assistant.domain.sku_images import resolve_followup_attachment
-from assistant.domain.timeutil import beijing_date, beijing_now
+from assistant.domain.timeutil import beijing_now
 from scripts.lib.filters import ACTIVE_HERO_PRODUCT_ID
 
 
@@ -63,12 +62,15 @@ class FollowupService:
                     ],
                     days=days,
                     has_confirmed_content=False,
+                    today=effective_now.date(),
                 )
-                latest = latest_due_unpublished_stage(days)
-                if latest and mutation["create"]:
-                    stage, offset = latest
-                    scheduled_for = beijing_date(shipment.delivered_at) + timedelta(days=offset)
-                    created += self._upsert_stage(session, sample_case, stage, scheduled_for)
+                for task_creation in mutation["create"]:
+                    created += self._upsert_stage(
+                        session,
+                        sample_case,
+                        task_creation["stage"],
+                        task_creation["scheduled_for"],
+                    )
                 for suppression in mutation["suppress"]:
                     task = session.scalar(
                         select(FollowupTask).where(

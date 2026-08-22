@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -57,6 +57,34 @@ class FollowupGenerateTests(unittest.TestCase):
         FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
         with self.session_factory() as session:
             self.assertEqual([task.stage for task in session.scalars(select(FollowupTask)).all()], ["day_3"])
+
+    def test_generate_reuses_injected_today_for_stage_and_scheduled_for(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 6, 16, 0, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        frozen_now = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+        planner_default_now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        service = FollowupService(self.session_factory)
+
+        with patch(
+            "assistant.domain.followup_stage.beijing_now",
+            return_value=planner_default_now,
+        ) as planner_clock:
+            first_result = service.generate(frozen_now)
+            second_result = service.generate(frozen_now)
+
+        planner_clock.assert_not_called()
+        self.assertEqual(first_result, {"created": 1})
+        self.assertEqual(second_result, {"created": 0})
+        with self.session_factory() as session:
+            tasks = session.scalars(select(FollowupTask)).all()
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].stage, "day_3")
+            self.assertEqual(tasks[0].scheduled_for, date(2026, 8, 10))
+            self.assertNotEqual(tasks[0].status, "suppressed")
 
     def test_day_11_processing_gets_list_but_shipped_does_not(self) -> None:
         self.add_case(curr_status=40, delivered_at=datetime(2026, 8, 1, tzinfo=timezone.utc), is_video_creator="是", language="en")

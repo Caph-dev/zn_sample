@@ -31,6 +31,16 @@ class FollowupStageTests(unittest.TestCase):
             3,
         )
 
+    def test_beijing_natural_day_changes_at_utc_sixteen_hundred(self) -> None:
+        self.assertEqual(
+            beijing_date(datetime(2026, 8, 21, 15, 59, tzinfo=timezone.utc)),
+            date(2026, 8, 21),
+        )
+        self.assertEqual(
+            beijing_date(datetime(2026, 8, 21, 16, 0, tzinfo=timezone.utc)),
+            date(2026, 8, 22),
+        )
+
     def test_stage_calendar_has_only_latest_due_stage(self) -> None:
         expected_stages = {
             0: ("arrival", 0),
@@ -50,14 +60,21 @@ class FollowupStageTests(unittest.TestCase):
         self.assertIsNone(latest_due_unpublished_stage(-1))
 
     def test_first_generation_at_day_six_creates_only_day_three(self) -> None:
+        today = date(2026, 8, 22)
         mutation = plan_followup_mutation(
-            existing_unpublished=[], days=6, has_confirmed_content=False
+            existing_unpublished=[],
+            days=6,
+            has_confirmed_content=False,
+            today=today,
         )
-        self.assertEqual([task["stage"] for task in mutation["create"]], ["day_3"])
+        self.assertEqual(
+            mutation["create"],
+            [{"stage": "day_3", "scheduled_for": date(2026, 8, 19), "status": "pending"}],
+        )
         self.assertEqual(mutation["suppress"], [])
 
     def test_later_stage_suppresses_pending_earlier_stage(self) -> None:
-        today = beijing_date(beijing_now())
+        today = date(2026, 8, 22)
         arrival_date = today - timedelta(days=3)
         mutation = plan_followup_mutation(
             existing_unpublished=[
@@ -69,6 +86,7 @@ class FollowupStageTests(unittest.TestCase):
             ],
             days=3,
             has_confirmed_content=False,
+            today=today,
         )
         self.assertEqual(mutation["create"][0]["stage"], "day_3")
         self.assertEqual(mutation["suppress"][0]["stage"], "arrival")
@@ -77,13 +95,14 @@ class FollowupStageTests(unittest.TestCase):
         )
 
     def test_existing_current_stage_is_not_duplicated_or_suppressed(self) -> None:
-        today = beijing_date(beijing_now())
+        today = date(2026, 8, 22)
         mutation = plan_followup_mutation(
             existing_unpublished=[
                 {"stage": "day_7", "scheduled_for": today, "status": "ready"}
             ],
             days=7,
             has_confirmed_content=False,
+            today=today,
         )
         self.assertEqual(mutation, {"create": [], "suppress": []})
 
