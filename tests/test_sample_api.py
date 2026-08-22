@@ -22,6 +22,7 @@ from lib.sample_api import (  # noqa: E402
     locate_pending_application,
     parse_pending_list_payload,
     scrape_pending_list_api,
+    scrape_processing_list_api,
     scrape_shipped_list_api,
 )
 from lib.sample_data_source import compare_pending_rows  # noqa: E402
@@ -86,6 +87,30 @@ class SampleApiParserTests(unittest.TestCase):
         self.assertEqual(request_bodies[0]["tab"], 30)
         self.assertEqual(rows[0]["main_order_id"], "order-test-001")
         self.assertEqual(rows[0]["_shop_id"], "shop-test")
+
+    def test_processing_scraper_forces_tab_without_pending_navigation(self) -> None:
+        request_bodies: list[dict] = []
+
+        def request_json(store_id: str, endpoint: str, body: dict, **kwargs) -> dict:
+            request_bodies.append(body)
+            return {"code": 0, "agg_info": [], "total_count": 0, "has_more": False}
+
+        with patch("lib.sample_api.assert_on_pending_list") as assert_pending:
+            rows = scrape_processing_list_api(
+                "store-test",
+                max_pages=1,
+                request_json=request_json,
+                context=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+                ensure_page=True,
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(request_bodies[0]["tab"], 40)
+        assert_pending.assert_not_called()
 
     def test_scraper_follows_has_more_and_deduplicates(self) -> None:
         first_payload = load_fixture()

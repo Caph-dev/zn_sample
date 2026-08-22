@@ -19,6 +19,7 @@ from .sample_dom import assert_on_pending_list
 PENDING_TAB = 10
 READY_TO_SHIP_TAB = 20
 SHIPPED_TAB = 30
+PROCESSING_TAB = 40  # 免费样品【处理中】= 已到货。D+10 只出这个 tab。
 DEFAULT_PAGE_SIZE = 50
 
 RequestJson = Callable[
@@ -284,6 +285,14 @@ def scrape_shipped_list_api(
         context=resolved_context,
         tab=SHIPPED_TAB,
     )
+
+
+def scrape_processing_list_api(store_id: str, **kwargs) -> list[dict[str, Any]]:
+    """只读免费样品「处理中」列表，禁止触发待审核页导航。"""
+    kwargs.setdefault("ensure_page", False)
+    kwargs["tab"] = PROCESSING_TAB
+    kwargs["ensure_page"] = False
+    return scrape_pending_list_api(store_id, **kwargs)
 
 
 def locate_pending_application(
