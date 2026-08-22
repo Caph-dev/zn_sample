@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>样品跟进操作台</h1>
+<dl>
+  <dt>数据目录</dt><dd>{{ data_directory }}</dd>
+  <dt>数据库</dt><dd>{{ "已打开" if database_ready else "待初始化" }}</dd>
+  <dt>运行店铺</dt>
+  <dd>{% if store_summary.ok %}{{ store_summary.store.storeName }}（{{ store_summary.store.storeId }}）{% else %}{{ store_summary.error }}{% endif %}</dd>
+</dl>
+<section><h2>今日待办</h2><p>待办尚未生成</p></section>
+{% endblock %}
