@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>任务</h1>
+<form method="post" action="/api/jobs/environment-check">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">运行环境检查</button>
+</form>
+{% if jobs %}
+<ul>
+{% for job in jobs %}
+  <li><a href="/jobs/{{ job.id }}">{{ job.job_type }} · {{ job.status }}</a></li>
+{% endfor %}
+</ul>
+{% else %}<p>暂无任务</p>{% endif %}
+{% endblock %}

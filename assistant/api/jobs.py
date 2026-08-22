@@ -1,0 +1,119 @@
+"""Authenticated durable jobs API and resumable SSE stream."""
+from __future__ import annotations
+
+import json
+import time
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from assistant.database.models import Job
+from assistant.jobs.locks import create_or_get_pending_job, request_cancellation
+from assistant.jobs.progress import list_events
+
+
+router = APIRouter()
+TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "interrupted"}
+)
+
+
+def _session_factory(request: Request):
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="job-database-unavailable")
+    return session_factory
+
+
+def _job_payload(job: Job) -> dict:
+    return {
+        "id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "store_id": job.store_id,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "progress_message": job.progress_message,
+        "error_code": job.error_code,
+        "error_summary": job.error_summary,
+        "result_summary": job.result_summary,
+        "created_at": job.created_at.isoformat(),
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+@router.post("/api/jobs/environment-check")
+def create_environment_check(request: Request, store_id: str | None = None) -> dict:
+    """Create or deduplicate one pending read-only environment check."""
+    session_factory = _session_factory(request)
+    normalized_store_id = str(store_id).strip() if store_id else None
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type="environment_check",
+        store_id=normalized_store_id,
+    )
+    return {"job_id": job_id, "deduplicated": deduplicated}
+
+
+@router.get("/api/jobs/{job_id}")
+def get_job(job_id: str, request: Request) -> dict:
+    session_factory = _session_factory(request)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job-not-found")
+        return _job_payload(job)
+
+
+@router.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, request: Request) -> dict:
+    session_factory = _session_factory(request)
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job-not-found")
+        if job.status == "pending":
+            job.status = "cancelled"
+            job.finished_at = datetime.now(timezone.utc)
+            session.commit()
+            return {"job_id": job_id, "status": "cancelled"}
+        if job.status == "running":
+            request_cancellation(job_id)
+            job.progress_message = "已请求取消，将在安全检查点停止"
+            session.commit()
+            return {"job_id": job_id, "status": "cancellation-requested"}
+        raise HTTPException(status_code=409, detail="job-not-cancellable")
+
+
+@router.get("/api/jobs/{job_id}/stream")
+def stream_job(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
+    session_factory = _session_factory(request)
+    with session_factory() as session:
+        if session.get(Job, job_id) is None:
+            raise HTTPException(status_code=404, detail="job-not-found")
+
+    def event_stream():
+        latest_sequence = max(0, after)
+        while True:
+            events = list_events(session_factory, job_id, after=latest_sequence)
+            for event in events:
+                latest_sequence = int(event["sequence"])
+                safe_data = {
+                    "sequence": latest_sequence,
+                    "level": event["level"],
+                    "message": event["message"],
+                }
+                yield (
+                    f"event: {event['event_type']}\n"
+                    f"data: {json.dumps(safe_data, ensure_ascii=False)}\n\n"
+                )
+            with session_factory() as session:
+                job = session.get(Job, job_id)
+                is_terminal = job is None or job.status in TERMINAL_STATUSES
+            if is_terminal and not events:
+                return
+            if not events:
+                yield ": keepalive\n\n"
+            time.sleep(0.2)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
