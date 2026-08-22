@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>任务详情</h1>
+<section id="job-status" hx-get="/api/jobs/{{ job.id }}" hx-trigger="every 2s" hx-swap="innerHTML">
+  <p>类型：{{ job.job_type }}</p>
+  <p>状态：{{ job.status }}</p>
+  <p>进度：{{ job.progress_current }}/{{ job.progress_total }}</p>
+  <p>{{ job.progress_message }}</p>
+</section>
+<form method="post" action="/api/jobs/{{ job.id }}/cancel">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">取消任务</button>
+</form>
+{% endblock %}

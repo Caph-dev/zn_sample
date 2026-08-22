@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Callable
 
 import uvicorn
+from sqlalchemy.orm import sessionmaker
 
 from assistant.app import create_app
+from assistant.database.engine import create_database_engine
+from assistant.database.models import Base
+from assistant.jobs.locks import install_ziniao_busy_guard
+from assistant.jobs.worker import start_worker
 from assistant.paths import ensure_user_dirs
 from assistant.settings import APP_NAME, BIND_HOST, preferred_port
 
@@ -97,6 +102,17 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
 
     port = choose_available_port(preferred_port())
     application = create_app(runtime_directory=runtime_directory, port=port)
+    database_engine = create_database_engine(
+        application_directory / "assistant.sqlite3"
+    )
+    # Production startup has already run Alembic; this keeps direct test and
+    # library invocation safe without replacing the migration path.
+    Base.metadata.create_all(database_engine)
+    session_factory = sessionmaker(bind=database_engine, expire_on_commit=False)
+    application.state.database_engine = database_engine
+    application.state.session_factory = session_factory
+    install_ziniao_busy_guard(application, session_factory)
+    worker_controller = start_worker(session_factory)
     token = application.state.session_manager.issue_bootstrap_token()
     state_path.write_text(
         json.dumps(
@@ -120,6 +136,8 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
             access_log=False,
         )
     finally:
+        worker_controller.stop(timeout=5.0)
+        database_engine.dispose()
         application.state.session_manager.cleanup()
         state_path.unlink(missing_ok=True)
         instance_lock.release()
