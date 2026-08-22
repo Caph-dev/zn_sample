@@ -4,7 +4,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
 from assistant.database.models import AppSetting, Base, set_setting
-from assistant.lifecycle import run_assistant
+from assistant.lifecycle import InstanceLock, _is_process_alive, run_assistant
 
 
 class ApplicationSkeletonTests(unittest.TestCase):
@@ -126,6 +127,88 @@ class ApplicationSkeletonTests(unittest.TestCase):
             )
         engine.dispose()
 
+    def test_windows_lock_records_pid_and_releases_owned_file(self) -> None:
+        lock_path = self.root / "runtime" / "instance.lock"
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.os.getpid", return_value=4123),
+        ):
+            instance_lock = InstanceLock(lock_path)
+            self.assertTrue(instance_lock.acquire())
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "4123\n")
+            instance_lock.release()
+        self.assertFalse(lock_path.exists())
+
+    def test_windows_lock_reclaims_confirmed_orphan_and_retries_atomically(self) -> None:
+        lock_path = self.root / "runtime" / "instance.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text("987654\n", encoding="ascii")
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle._is_process_alive", return_value=False) as is_alive,
+            patch("assistant.lifecycle.os.getpid", return_value=4123),
+        ):
+            instance_lock = InstanceLock(lock_path)
+            self.assertTrue(instance_lock.acquire())
+            is_alive.assert_called_once_with(987654)
+            self.assertEqual(lock_path.read_text(encoding="ascii"), "4123\n")
+            instance_lock.release()
+        self.assertFalse(lock_path.exists())
+
+    def test_windows_lock_does_not_reclaim_live_or_unknown_owner(self) -> None:
+        for owner_status in (True, None):
+            with self.subTest(owner_status=owner_status):
+                lock_path = self.root / f"runtime-{owner_status}" / "instance.lock"
+                lock_path.parent.mkdir(parents=True)
+                lock_path.write_text("987654\n", encoding="ascii")
+                with (
+                    patch("assistant.lifecycle.sys.platform", "win32"),
+                    patch(
+                        "assistant.lifecycle._is_process_alive",
+                        return_value=owner_status,
+                    ) as is_alive,
+                ):
+                    instance_lock = InstanceLock(lock_path)
+                    self.assertFalse(instance_lock.acquire())
+                    is_alive.assert_called_once_with(987654)
+                self.assertTrue(lock_path.exists())
+
+    def test_windows_lock_rejects_untrusted_owner_format(self) -> None:
+        for lock_contents in ("not-a-pid", "0\n", "123\nextra"):
+            with self.subTest(lock_contents=lock_contents):
+                lock_path = self.root / f"runtime-{hash(lock_contents)}" / "instance.lock"
+                lock_path.parent.mkdir(parents=True)
+                lock_path.write_text(lock_contents, encoding="ascii")
+                with (
+                    patch("assistant.lifecycle.sys.platform", "win32"),
+                    patch("assistant.lifecycle._is_process_alive") as is_alive,
+                ):
+                    instance_lock = InstanceLock(lock_path)
+                    self.assertFalse(instance_lock.acquire())
+                    is_alive.assert_not_called()
+                self.assertTrue(lock_path.exists())
+
+    def test_process_liveness_fails_closed_on_permission_error(self) -> None:
+        with patch(
+            "assistant.lifecycle.os.kill",
+            side_effect=PermissionError,
+        ):
+            self.assertIsNone(_is_process_alive(987654))
+
+    def test_windows_release_does_not_delete_replacement_lock(self) -> None:
+        lock_path = self.root / "runtime" / "instance.lock"
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.os.getpid", return_value=4123),
+        ):
+            instance_lock = InstanceLock(lock_path)
+            self.assertTrue(instance_lock.acquire())
+            lock_path.unlink()
+            lock_path.write_text("987654\n", encoding="ascii")
+            instance_lock.release()
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(lock_path.read_text(encoding="ascii"), "987654\n")
+
     def test_lifecycle_binds_only_to_loopback(self) -> None:
         with (
             patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
@@ -141,6 +224,132 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertEqual(calls[0]["host"], "127.0.0.1")
         self.assertEqual(calls[0]["port"], 8765)
         self.assertFalse(calls[0]["access_log"])
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
+
+    def test_lifecycle_releases_created_resources_when_worker_start_fails(self) -> None:
+        session_manager = MagicMock()
+        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        database_engine = MagicMock()
+        session_factory = object()
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
+            patch("assistant.lifecycle.choose_available_port", return_value=8765),
+            patch("assistant.lifecycle.create_app", return_value=application),
+            patch("assistant.lifecycle.create_database_engine", return_value=database_engine),
+            patch("assistant.lifecycle.Base.metadata.create_all"),
+            patch("assistant.lifecycle.sessionmaker", return_value=session_factory),
+            patch("assistant.lifecycle.install_ziniao_busy_guard"),
+            patch(
+                "assistant.lifecycle.start_worker",
+                side_effect=RuntimeError("worker-start-failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker-start-failed"):
+                run_assistant(uvicorn_runner=MagicMock())
+        database_engine.dispose.assert_called_once_with()
+        session_manager.cleanup.assert_called_once_with()
+        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
+
+    def test_lifecycle_releases_resources_when_token_issue_fails(self) -> None:
+        session_manager = MagicMock()
+        session_manager.issue_bootstrap_token.side_effect = RuntimeError(
+            "token-issue-failed"
+        )
+        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        database_engine = MagicMock()
+        worker_controller = MagicMock()
+        session_factory = object()
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
+            patch("assistant.lifecycle.choose_available_port", return_value=8765),
+            patch("assistant.lifecycle.create_app", return_value=application),
+            patch("assistant.lifecycle.create_database_engine", return_value=database_engine),
+            patch("assistant.lifecycle.Base.metadata.create_all"),
+            patch("assistant.lifecycle.sessionmaker", return_value=session_factory),
+            patch("assistant.lifecycle.install_ziniao_busy_guard"),
+            patch("assistant.lifecycle.start_worker", return_value=worker_controller),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "token-issue-failed"):
+                run_assistant(uvicorn_runner=MagicMock())
+        worker_controller.stop.assert_called_once_with(timeout=5.0)
+        database_engine.dispose.assert_called_once_with()
+        session_manager.cleanup.assert_called_once_with()
+        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
+
+    def test_lifecycle_releases_resources_when_state_write_fails(self) -> None:
+        session_manager = MagicMock()
+        session_manager.issue_bootstrap_token.return_value = "test-token"
+        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        database_engine = MagicMock()
+        worker_controller = MagicMock()
+        session_factory = object()
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
+            patch("assistant.lifecycle.choose_available_port", return_value=8765),
+            patch("assistant.lifecycle.create_app", return_value=application),
+            patch("assistant.lifecycle.create_database_engine", return_value=database_engine),
+            patch("assistant.lifecycle.Base.metadata.create_all"),
+            patch("assistant.lifecycle.sessionmaker", return_value=session_factory),
+            patch("assistant.lifecycle.install_ziniao_busy_guard"),
+            patch("assistant.lifecycle.start_worker", return_value=worker_controller),
+            patch("assistant.lifecycle.Path.write_text", side_effect=OSError("state-write-failed")),
+        ):
+            with self.assertRaisesRegex(OSError, "state-write-failed"):
+                run_assistant(uvicorn_runner=MagicMock())
+        worker_controller.stop.assert_called_once_with(timeout=5.0)
+        database_engine.dispose.assert_called_once_with()
+        session_manager.cleanup.assert_called_once_with()
+        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
+
+    def test_lifecycle_releases_lock_when_app_creation_fails(self) -> None:
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
+            patch("assistant.lifecycle.choose_available_port", return_value=8765),
+            patch(
+                "assistant.lifecycle.create_app",
+                side_effect=RuntimeError("app-create-failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "app-create-failed"):
+                run_assistant(uvicorn_runner=MagicMock())
+        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
+
+    def test_cleanup_failure_does_not_prevent_later_cleanup_steps(self) -> None:
+        session_manager = MagicMock()
+        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        database_engine = MagicMock()
+        worker_controller = MagicMock()
+        worker_controller.stop.side_effect = RuntimeError("worker-stop-failed")
+        database_engine.dispose.side_effect = RuntimeError("engine-dispose-failed")
+        session_manager.cleanup.side_effect = RuntimeError("session-cleanup-failed")
+        session_factory = object()
+        with (
+            patch("assistant.lifecycle.sys.platform", "win32"),
+            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
+            patch("assistant.lifecycle.choose_available_port", return_value=8765),
+            patch("assistant.lifecycle.create_app", return_value=application),
+            patch("assistant.lifecycle.create_database_engine", return_value=database_engine),
+            patch("assistant.lifecycle.Base.metadata.create_all"),
+            patch("assistant.lifecycle.sessionmaker", return_value=session_factory),
+            patch("assistant.lifecycle.install_ziniao_busy_guard"),
+            patch("assistant.lifecycle.start_worker", return_value=worker_controller),
+            patch("assistant.lifecycle.webbrowser.open"),
+            patch("assistant.lifecycle.logger.exception"),
+        ):
+            self.assertEqual(run_assistant(uvicorn_runner=MagicMock()), 0)
+        worker_controller.stop.assert_called_once_with(timeout=5.0)
+        database_engine.dispose.assert_called_once_with()
+        session_manager.cleanup.assert_called_once_with()
+        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
+        self.assertFalse((self.root / "runtime" / "state.json").exists())
 
     def test_second_instance_opens_only_verified_existing_application(self) -> None:
         with (
