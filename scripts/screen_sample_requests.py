@@ -70,7 +70,13 @@ from lib.feishu_hero import (  # noqa: E402
     load_hero_from_feishu,
     match_hero,
 )
-from lib.filters import Criteria, evaluate_row  # noqa: E402
+from lib.filters import (  # noqa: E402
+    ACTIVE_HERO_PRODUCT_ID,
+    DEFAULT_ACTIVE_HERO_PRODUCT_IDS,
+    Criteria,
+    evaluate_row,
+    reject_if_not_active_hero_product,
+)
 from lib.network_observer import (  # noqa: E402
     arm_network_observer,
     drain_network_observer,
@@ -116,15 +122,21 @@ def _load_export_rows(path: Path) -> list[dict[str, Any]]:
 def _reject_if_not_exact_hero(
     row: dict[str, Any],
     hero_data: dict[str, Any] | None,
+    allowed_product_ids: set[str] | frozenset[str] | None = None,
 ) -> str | None:
-    """hero_keys 有值时必须精确命中主推货号/商品 ID；空表交给后续解析拦截。"""
+    """hero_keys 有值时必须精确命中主推货号/商品 ID；空表交给后续解析拦截。
+
+    allowed_product_ids 非空时再限制当前跟进款（默认仅指定 B005）。
+    """
     keys = set((hero_data or {}).get("hero_keys") or set())
-    if not keys:
-        return None
-    matched, reason = match_hero(row, keys)
-    if matched:
-        return None
-    return f"非主推款({reason})"
+    if keys:
+        matched, reason = match_hero(row, keys)
+        if not matched:
+            return f"非主推款({reason})"
+    return reject_if_not_active_hero_product(
+        row.get("product_id"),
+        allowed_product_ids,
+    )
 
 
 def _select_execute_candidates_from_export(
@@ -355,6 +367,7 @@ def _run_execute_pipeline(
     page_wait: float,
     observe_approve_network: bool,
     write_source: str = "api",
+    allowed_product_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """对筛查通过行执行：解析货号 →（可选查重）→ 同意 →（可选写飞书）。"""
     product_id_to_sku = build_product_id_to_sku_map(hero_data or {})
@@ -430,13 +443,19 @@ def _run_execute_pipeline(
             row["action"] = "skipped-cannot-approve"
             continue
 
-        not_hero = _reject_if_not_exact_hero(row, hero_data)
+        not_hero = _reject_if_not_exact_hero(
+            row, hero_data, allowed_product_ids=allowed_product_ids
+        )
         if not_hero:
             row["approve_status"] = "skipped"
             row["feishu_status"] = "skipped"
             row["approve_error"] = not_hero
             row["feishu_error"] = not_hero
-            row["action"] = "skipped-not-hero"
+            row["action"] = (
+                "skipped-not-active-product"
+                if str(not_hero).startswith("非当前跟进款")
+                else "skipped-not-hero"
+            )
             logger.info(f"  [跳过] {creator_name} apply={apply_id} 原因={not_hero}")
             continue
 
@@ -765,6 +784,7 @@ def _run_confirm_pipeline(
     execute_limit: int,
     config_path: str | None,
     order_backfill_rows: list[dict[str, Any]] | None = None,
+    allowed_product_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """延后确认平台列表是否已转入待发货；可选补写飞书并回填订单号。
 
@@ -870,7 +890,9 @@ def _run_confirm_pipeline(
                 row["feishu_order_status"] = "skipped-invalid-order-no"
             continue
 
-        not_hero = _reject_if_not_exact_hero(row, hero_data)
+        not_hero = _reject_if_not_exact_hero(
+            row, hero_data, allowed_product_ids=allowed_product_ids
+        )
         if not_hero:
             row["feishu_status"] = "skipped"
             row["feishu_error"] = not_hero
@@ -1064,6 +1086,14 @@ def main() -> int:
         "--skip-hero-check",
         action="store_true",
         help="跳过主推条件（放松 SOP；正式筛查禁止）",
+    )
+    ap.add_argument(
+        "--all-hero-products",
+        action="store_true",
+        help=(
+            "筛查/批准恢复全部「是否主推=是」的货号。"
+            f"默认只过商品 ID {ACTIVE_HERO_PRODUCT_ID}（指定 B005）"
+        ),
     )
     ap.add_argument(
         "--with-detail",
@@ -1260,6 +1290,20 @@ def main() -> int:
     if store_id == DEFAULT_TEST_STORE_ID:
         logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
 
+    allowed_product_ids: frozenset[str] = (
+        frozenset()
+        if args.all_hero_products
+        else DEFAULT_ACTIVE_HERO_PRODUCT_IDS
+    )
+    if allowed_product_ids:
+        logger.info(
+            "[主推] 当前只过商品 ID "
+            + ", ".join(sorted(allowed_product_ids))
+            + "；全部主推请加 --all-hero-products"
+        )
+    else:
+        logger.info("[主推] --all-hero-products：凡主推=是均可（不限指定 B005）")
+
     # 主推表：仅飞书。先读飞书再跳样品申请，避免订单页 SPA 在等待期间把页面弹回去。
     hero_keys: set[str] = set()
     hero_data: dict[str, Any] | None = None
@@ -1387,6 +1431,7 @@ def main() -> int:
                 hero_keys=hero_keys,
                 skip_hero_check=args.skip_hero_check,
                 require_detail=False,
+                allowed_product_ids=allowed_product_ids,
             )
             for r in raw_rows
         ]
@@ -1515,6 +1560,7 @@ def main() -> int:
                     hero_keys=hero_keys,
                     skip_hero_check=args.skip_hero_check,
                     require_detail=args.require_detail,
+                    allowed_product_ids=allowed_product_ids,
                 )
                 reevaluated_row["initial_screen_eligible"] = True
                 reevaluated_row["initial_screen_failure_reason"] = ""
@@ -1604,6 +1650,7 @@ def main() -> int:
             execute_limit=args.execute_limit,
             config_path=args.config,
             order_backfill_rows=order_backfill_rows,
+            allowed_product_ids=allowed_product_ids,
         )
     elif args.execute:
         # 批准前备份（可回看筛查结果；平台侧「同意」不可自动撤销）
@@ -1645,6 +1692,7 @@ def main() -> int:
             page_wait=args.page_wait,
             observe_approve_network=bool(args.observe_approve_network),
             write_source=args.write_source,
+            allowed_product_ids=allowed_product_ids,
         )
         # 非通过行保持 export-only
         for row in pre:

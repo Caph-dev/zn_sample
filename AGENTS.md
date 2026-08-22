@@ -1,7 +1,7 @@
 # zn_sample · AGENTS.md
 
 本文件给 **Agent / 技术维护**：纪律、数据 ID、实现契约。  
-日常双击 / 出问题只写 [README.md](./README.md)。新电脑配机只写 [快速开始.md](./快速开始.md)。规则原文见 `样品申请筛查sop/样品申请筛查sop.md`。
+日常双击 / 出问题只写 [README.md](./README.md)。新电脑配机只写 [快速开始.md](./快速开始.md)。规则原文见 `样品申请筛查sop/1-样品申请筛查sop.md`；到货跟进见 `样品申请筛查sop/2-查看到货+达人跟进.md`（忽略飞书 wiki 里的 B006-A 与旧的「第五天 / 每隔两天」）。
 
 紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。勿混用 `zn_daren` 的 `--execute` 取消逻辑。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
 
@@ -41,7 +41,7 @@
 
    不要默认写旧表 `tbl1Sc97Gkpc96xI`。  
    新建：人员=**王良希（技术）**，合作状态=待发货，是否已寄样=否。  
-   写入 TikTok 物流单号后：已寄样=是，待发货→待发布；不回退「已发布」等。无匹配行（红人ID+寄样产品）不新建。
+   写入 TikTok 物流单号后：已寄样=是，待发货→待发布；不回退「已发布」等。D+15 未履约写 **未发布**（不是待发布）。无匹配行（红人ID+寄样产品）不新建。
 
 5. 只改任务相关代码。密钥 / `apiKey` / 密码不写入本文件、不提交 git、不进聊天。默认中文沟通。
 
@@ -96,6 +96,7 @@
 | `--from-export` | 跳过扫表/详情。筛查脚本：批准或补写。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
 | `--confirm-export` | 只补写/核对/回填订单号，不重批；回填与补写共享 `--execute-limit` |
 | `--with-detail --require-detail` | 正式筛查必须成对；禁止 `--detail-limit`、`--skip-hero-check` |
+| `--all-hero-products` | 恢复批准/筛查全部主推款；默认只过 `1732414717062320994` |
 | `--execute --yes` | 唯一批准/真发门闩；缺一退出码 2 |
 | `--execute-limit` | 默认 1 |
 | `--write-feishu` | 筛查脚本不能单独用来「只筛查但写表」。物流无匹配行不新建 |
@@ -127,6 +128,12 @@
 导出「视频达人/直播达人」=「是」或空，可同时为是；**≠** 该侧已过 SOP。看 `eligible`。  
 条件 2：`hero_keys` 只含「是否主推=是」的货号+商品ID；只精确匹配这两类字段。禁止标题/描述/TikTok `sku_id`、禁止子串。批准解析同样只认主推行；货号无法映射或不主推 → 不批不写。列表 `product_id` ≠ 货号。
 
+**当前再收窄：** 默认只过商品 ID `1732414717062320994`（指定 B005）。其它主推款筛掉、不批、不跟进。恢复全部主推：`--all-hero-products`（`allowed_product_ids` 为空）。禁止 `--skip-hero-check` 做正式跑。
+
+**跟进日历（仅免费样品【处理中】`tab=40`，且仅上述商品 ID）：** D0 / D+3 / D+7 发话术；D+10 只出名单；D+15 飞书合作状态写 **未发布**（业务含义=未履约，不是「待发布」）。达人发视频/直播 → 平台已完成 + 文档原文感谢话术 + 飞书 **已完成**。达人类型用筛查导出「视频达人/直播达人」，对不上就人工。不要把【已发货】当已送达。不扫买返。
+
+**跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。空简介默认英语、低置信。`sync_shipped_tracking.py` 已是这个优先级。
+
 `detail_targets`：仅 `--with-detail` 只拉列表初判通过行；加 `--detail-all` 才拉全表。试跑限量用 `--max-rows`。
 
 ---
@@ -139,7 +146,7 @@
 - 可点：待审核/已发货 tab、翻页、头像/详情、返回、详情消息按钮。execute 还可点列表同意、确认弹窗。永不点邀请。
 - 进出商家订单页：异步 `location.replace` + 短轮询，禁止阻塞 `visit_page` 回样品申请。从订单等 SPA 子页出发时先 replace 掉历史，避免弹回订单页。
 - storeId：显式 > running 精确店名 > running 唯一 > 测试默认 1 号店。ZClaw Bridge `9481` ≠ WebDriver `16851`。
-- 语言只看详情简介；空简介默认英语，已有会话语言不改判。
+- 跟进/物流私信语言：飞书「使用语言」优先；否则详情简介 `detect_creator_lang`；空简介默认英语。已有会话语言不改判。
 
 脚本入口：`scripts/open_sample_store.py`、`screen_sample_requests.py`、`send_sample_intro.py`、`sync_shipped_tracking.py`。日常 0 号双击走 `--reopen`。`hero_xlsx.py` 已废。密钥在 gitignore 的 `config.toml`。
 

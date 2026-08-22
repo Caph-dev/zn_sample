@@ -270,6 +270,23 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertIsNotNone(reason)
         self.assertIn("非主推款", str(reason))
 
+    def test_reject_helper_blocks_hero_outside_active_allowlist(self) -> None:
+        reason = _reject_if_not_exact_hero(
+            {"product_id": "1732060411527205730"},
+            {"hero_keys": {"1732060411527205730", "1732414717062320994"}},
+            allowed_product_ids={"1732414717062320994"},
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("非当前跟进款", str(reason))
+
+    def test_reject_helper_allows_active_hero_product(self) -> None:
+        reason = _reject_if_not_exact_hero(
+            {"product_id": "1732414717062320994"},
+            {"hero_keys": {"1732414717062320994"}},
+            allowed_product_ids={"1732414717062320994"},
+        )
+        self.assertIsNone(reason)
+
     def test_from_export_skips_approved_and_unknown_rows(self) -> None:
         rows = [
             {"eligible": False, "apply_id": "skip-fail", "creator_name": "a"},

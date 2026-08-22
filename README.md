@@ -7,7 +7,7 @@
 | [快速开始.md](./快速开始.md) | 新电脑装 Python / Node / `ziniao-cli` |
 | 本文 | 日常双击、检查环境、出问题 |
 | [AGENTS.md](./AGENTS.md) | Agent / 维护：门闩、阈值、页面契约 |
-| [样品申请筛查 SOP](./样品申请筛查sop/样品申请筛查sop.md) | 规则原文 |
+| [样品申请筛查 SOP](./样品申请筛查sop/1-样品申请筛查sop.md) | 规则原文 |
 
 不点「拒绝」「邀请」。
 
@@ -157,6 +157,7 @@ Windows（cmd / PowerShell）：`python3` 换成 `py -3`。路径一律用正斜
 | `--no-default-store` | 禁止 0 号在无 running 时默认开 2 号店 |
 | `--from-seller-home` | 从已登录商家中心（任意子页）进入待审核 |
 | `--with-detail --require-detail` | 正式筛查必带 |
+| `--all-hero-products` | 批准/筛查恢复全部主推款；默认只过指定 B005（`1732414717062320994`） |
 | `--from-export` | 用筛查 JSON。不写路径则用最新一份 |
 | `--confirm-export` | 核对「待发货」、补写飞书并回填订单号，不重新批准 |
 | `--execute --yes` | 批准或发送私信 |

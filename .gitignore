@@ -16,3 +16,7 @@ exports/
 .exports/
 .DS_Store
 *.log
+
+# 其他
+.vscode/
+.agents/

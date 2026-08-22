@@ -95,6 +95,36 @@ class EvaluateHeroGateTests(unittest.TestCase):
         self.assertFalse(row["is_hero"])
         self.assertTrue(any("非主推款" in item for item in row["fail_reasons"]))
 
+    def test_active_product_allowlist_rejects_other_hero(self) -> None:
+        row = evaluate_row(
+            {"product_id": "1732060411527205730"},
+            criteria=Criteria(),
+            hero_keys={"1732060411527205730", "1732414717062320994"},
+            allowed_product_ids={"1732414717062320994"},
+        )
+        self.assertTrue(row["is_hero"])
+        self.assertTrue(any("非当前跟进款" in item for item in row["fail_reasons"]))
+
+    def test_active_product_allowlist_accepts_listed_id(self) -> None:
+        row = evaluate_row(
+            {"product_id": "1732414717062320994"},
+            criteria=Criteria(),
+            hero_keys={"1732414717062320994"},
+            allowed_product_ids={"1732414717062320994"},
+        )
+        self.assertTrue(row["is_hero"])
+        self.assertFalse(any("非当前跟进款" in item for item in row["fail_reasons"]))
+
+    def test_empty_allowlist_does_not_restrict_hero_products(self) -> None:
+        row = evaluate_row(
+            {"product_id": "1732060411527205730"},
+            criteria=Criteria(),
+            hero_keys={"1732060411527205730"},
+            allowed_product_ids=set(),
+        )
+        self.assertTrue(row["is_hero"])
+        self.assertFalse(any("非当前跟进款" in item for item in row["fail_reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,8 @@
 
 ## 申请的样品必须是 [tk产品图\+货号](https://rsed6zggjt.feishu.cn/wiki/Bw0cwepLyiivGjkJH5IcVknJnQc?from=from_copylink) 里的“主推款”（是否主推=是）
 
+当前批准默认 **只过** 商品 ID `1732414717062320994`（货号 B005 且是否主推=是）。其它主推款筛为不通过。恢复全部主推：`--all-hero-products`。
+
 ## 找到都满足条件的达人后进入第五步
 
 # 第五步：记录达人信息，点击同意样品申请，并同步到表格[内部达人建联记录表](https://rsed6zggjt.feishu.cn/base/CJXSbLIQWahB8esVOiscX7j1nLc?from=from_copylink)
