@@ -8,6 +8,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
+import assistant.api.jobs as jobs_api
+import assistant.jobs.worker as worker_module
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, Job, Store
@@ -24,11 +27,14 @@ from assistant.jobs.locks import (
     clear_cancellation,
     install_ziniao_busy_guard,
     is_cancellation_requested,
+    request_cancellation,
 )
 from assistant.jobs.progress import append_event, list_events
 from assistant.jobs.worker import (
     _heartbeat_loop,
+    _run_worker_loop,
     mark_stale_jobs_interrupted,
+    start_worker,
     worker_loop_once,
 )
 
@@ -76,6 +82,24 @@ class JobTestCase(unittest.TestCase):
             return job
 
 
+class AdvancingStopEvent:
+    """Advance a virtual clock whenever the worker would poll."""
+
+    def __init__(self) -> None:
+        self.current_time = 0.0
+        self.stop_requested = False
+
+    def is_set(self) -> bool:
+        return self.stop_requested
+
+    def set(self) -> None:
+        self.stop_requested = True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.current_time += worker_module.STALE_REAPER_INTERVAL_SECONDS + 1
+        return self.stop_requested
+
+
 class JobWorkerTests(JobTestCase):
     def test_stale_running_becomes_interrupted(self) -> None:
         stale_job_id = self.add_job(
@@ -87,6 +111,110 @@ class JobWorkerTests(JobTestCase):
         self.assertEqual(mark_stale_jobs_interrupted(self.session_factory), 1)
         self.assertEqual(self.get_job(stale_job_id).status, "interrupted")
         self.assertEqual(self.get_job(pending_job_id).status, "pending")
+
+    def test_runtime_reaper_unblocks_pending_job_after_stale_orphan(self) -> None:
+        orphan_job_id = self.add_job(
+            status="running",
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+        )
+        pending_job_id = self.add_job(status="pending")
+
+        self.assertEqual(mark_stale_jobs_interrupted(self.session_factory), 0)
+        self.assertIsNone(worker_loop_once(self.session_factory))
+        self.assertEqual(self.get_job(orphan_job_id).status, "running")
+        self.assertEqual(self.get_job(pending_job_id).status, "pending")
+
+        stop_event = AdvancingStopEvent()
+        virtual_start_time = datetime.now(timezone.utc)
+        original_worker_loop_once = worker_module.worker_loop_once
+        claimed_job_ids: list[str] = []
+
+        def complete_job(claimed_job_id: str, session_factory) -> str:
+            return "completed"
+
+        def run_worker_iteration(session_factory):
+            claimed_job_id = original_worker_loop_once(session_factory)
+            if claimed_job_id is not None:
+                claimed_job_ids.append(claimed_job_id)
+                stop_event.set()
+            return claimed_job_id
+
+        with (
+            patch.object(
+                worker_module,
+                "utc_now",
+                side_effect=lambda: virtual_start_time
+                + timedelta(seconds=stop_event.current_time),
+            ),
+            patch.object(worker_module, "get_handler", return_value=complete_job),
+            patch.object(
+                worker_module,
+                "worker_loop_once",
+                side_effect=run_worker_iteration,
+            ),
+        ):
+            _run_worker_loop(
+                self.session_factory,
+                stop_event,
+                monotonic=lambda: stop_event.current_time,
+            )
+
+        self.assertEqual(self.get_job(orphan_job_id).status, "interrupted")
+        self.assertEqual(self.get_job(pending_job_id).status, "succeeded")
+        self.assertEqual(claimed_job_ids, [pending_job_id])
+
+    def test_claim_event_failure_clears_active_worker_state(self) -> None:
+        job_id = self.add_job()
+        request_cancellation(job_id)
+        try:
+            with patch.object(
+                worker_module,
+                "append_event",
+                side_effect=RuntimeError("event failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "event failure"):
+                    worker_loop_once(self.session_factory)
+
+            self.assertIsNone(worker_module._active_job_id)
+            self.assertFalse(is_cancellation_requested(job_id))
+            self.assertEqual(self.get_job(job_id).status, "running")
+        finally:
+            clear_cancellation(job_id)
+
+    def test_worker_iteration_error_does_not_kill_daemon(self) -> None:
+        first_iteration_started = threading.Event()
+        second_iteration_started = threading.Event()
+        iteration_count = 0
+
+        def run_worker_iteration(session_factory):
+            nonlocal iteration_count
+            iteration_count += 1
+            if iteration_count == 1:
+                first_iteration_started.set()
+                raise RuntimeError("transient worker failure")
+            second_iteration_started.set()
+            return None
+
+        with (
+            patch.object(
+                worker_module,
+                "worker_loop_once",
+                side_effect=run_worker_iteration,
+            ),
+            patch.object(worker_module.logger, "exception") as log_exception,
+        ):
+            worker_controller = start_worker(self.session_factory)
+            try:
+                self.assertTrue(first_iteration_started.wait(timeout=1.0))
+                self.assertTrue(worker_controller.thread.is_alive())
+                self.assertTrue(second_iteration_started.wait(timeout=1.0))
+                self.assertTrue(worker_controller.thread.is_alive())
+            finally:
+                worker_controller.stop(timeout=1.0)
+
+        self.assertFalse(worker_controller.thread.is_alive())
+        self.assertGreaterEqual(iteration_count, 2)
+        log_exception.assert_any_call("job worker iteration failed")
 
     def test_unknown_job_type_fails_closed(self) -> None:
         job_id = self.add_job(job_type="unregistered")
@@ -270,6 +398,110 @@ class JobApiTests(JobTestCase):
             self.assertTrue(is_cancellation_requested(job_id))
         finally:
             clear_cancellation(job_id)
+
+    def test_pending_cancel_cannot_overwrite_worker_claim(self) -> None:
+        job_id = self.add_job()
+        cancel_update_barrier = threading.Barrier(2)
+        cancel_update_reached = threading.Event()
+        worker_claimed = threading.Event()
+        handler_started = threading.Event()
+        handler_release = threading.Event()
+        handler_observed_cancellation: list[bool] = []
+        cancellation_result: dict[str, dict] = {}
+        cancellation_errors: list[Exception] = []
+        worker_result: dict[str, str | None] = {}
+        worker_errors: list[Exception] = []
+        cancellation_request = SimpleNamespace(app=self.app)
+        original_update = jobs_api.update
+        original_claim_next_job = worker_module._claim_next_job
+
+        def gated_update(model):
+            update_statement = original_update(model)
+            cancel_update_reached.set()
+            cancel_update_barrier.wait(timeout=1.0)
+            return update_statement
+
+        def claim_and_release(session_factory):
+            claimed_job_id = original_claim_next_job(session_factory)
+            if claimed_job_id == job_id:
+                worker_claimed.set()
+                cancel_update_barrier.wait(timeout=1.0)
+            return claimed_job_id
+
+        def continue_at_safe_checkpoint(
+            claimed_job_id: str,
+            session_factory,
+        ) -> str:
+            handler_started.set()
+            if not handler_release.wait(timeout=1.0):
+                raise AssertionError("handler release timed out")
+            handler_observed_cancellation.append(
+                is_cancellation_requested(claimed_job_id)
+            )
+            return "safe-checkpoint"
+
+        def run_cancellation() -> None:
+            try:
+                cancellation_result["response"] = jobs_api.cancel_job(
+                    job_id,
+                    cancellation_request,
+                )
+            except Exception as error:
+                cancellation_errors.append(error)
+
+        def run_worker() -> None:
+            try:
+                worker_result["job_id"] = worker_loop_once(self.session_factory)
+            except Exception as error:
+                worker_errors.append(error)
+
+        cancellation_thread = threading.Thread(
+            target=run_cancellation,
+            name="test-cancellation-request",
+            daemon=True,
+        )
+        worker_thread = threading.Thread(
+            target=run_worker,
+            name="test-worker-claim",
+            daemon=True,
+        )
+
+        with (
+            patch.object(jobs_api, "update", side_effect=gated_update),
+            patch.object(
+                worker_module,
+                "_claim_next_job",
+                side_effect=claim_and_release,
+            ),
+            patch.object(
+                worker_module,
+                "get_handler",
+                return_value=continue_at_safe_checkpoint,
+            ),
+        ):
+            cancellation_thread.start()
+            self.assertTrue(cancel_update_reached.wait(timeout=1.0))
+            worker_thread.start()
+            self.assertTrue(worker_claimed.wait(timeout=1.0))
+            self.assertTrue(handler_started.wait(timeout=1.0))
+            cancellation_thread.join(timeout=1.0)
+            self.assertFalse(cancellation_thread.is_alive())
+            self.assertEqual(cancellation_errors, [])
+            self.assertEqual(
+                cancellation_result["response"],
+                {"job_id": job_id, "status": "cancellation-requested"},
+            )
+            self.assertEqual(self.get_job(job_id).status, "running")
+            self.assertTrue(is_cancellation_requested(job_id))
+            handler_release.set()
+            worker_thread.join(timeout=1.0)
+
+        self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertEqual(worker_result["job_id"], job_id)
+        self.assertEqual(handler_observed_cancellation, [True])
+        self.assertEqual(self.get_job(job_id).status, "succeeded")
+        self.assertFalse(is_cancellation_requested(job_id))
 
     def test_job_detail_has_fixed_public_shape(self) -> None:
         job_id = self.add_job()

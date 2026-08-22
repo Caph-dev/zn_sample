@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import update
+
 from assistant.database.models import Job
 from assistant.jobs.locks import create_or_get_pending_job, request_cancellation
 from assistant.jobs.progress import list_events
@@ -69,14 +71,22 @@ def get_job(job_id: str, request: Request) -> dict:
 def cancel_job(job_id: str, request: Request) -> dict:
     session_factory = _session_factory(request)
     with session_factory() as session:
+        cancellation_result = session.execute(
+            update(Job)
+            .where(Job.id == job_id, Job.status == "pending")
+            .values(
+                status="cancelled",
+                finished_at=datetime.now(timezone.utc),
+            )
+        )
+        if cancellation_result.rowcount == 1:
+            session.commit()
+            return {"job_id": job_id, "status": "cancelled"}
+
+        session.rollback()
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job-not-found")
-        if job.status == "pending":
-            job.status = "cancelled"
-            job.finished_at = datetime.now(timezone.utc)
-            session.commit()
-            return {"job_id": job_id, "status": "cancelled"}
         if job.status == "running":
             request_cancellation(job_id)
             job.progress_message = "已请求取消，将在安全检查点停止"

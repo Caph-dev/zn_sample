@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +21,9 @@ from assistant.jobs.registry import HandlerFailure, JobCancelled, get_handler
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 5.0
+STALE_JOB_TIMEOUT_SECONDS = 60.0
+STALE_REAPER_INTERVAL_SECONDS = 30.0
+WORKER_POLL_INTERVAL_SECONDS = 0.2
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
 )
@@ -32,7 +37,7 @@ def utc_now() -> datetime:
 
 def mark_stale_jobs_interrupted(session_factory) -> int:
     """Mark abandoned running rows without retrying them."""
-    stale_before = utc_now() - timedelta(seconds=60)
+    stale_before = utc_now() - timedelta(seconds=STALE_JOB_TIMEOUT_SECONDS)
     with session_factory() as session:
         stale_jobs = session.scalars(
             select(Job).where(
@@ -128,6 +133,14 @@ def _heartbeat_loop(
             logger.exception("job heartbeat failed job_id=%s", job_id)
 
 
+def _clear_active_job_state(job_id: str) -> None:
+    clear_cancellation(job_id)
+    global _active_job_id
+    with _active_job_lock:
+        if _active_job_id == job_id:
+            _active_job_id = None
+
+
 def worker_loop_once(session_factory) -> str | None:
     """Claim and synchronously execute at most one durable job."""
     job_id = _claim_next_job(session_factory)
@@ -136,18 +149,22 @@ def worker_loop_once(session_factory) -> str | None:
     global _active_job_id
     with _active_job_lock:
         _active_job_id = job_id
-    with session_factory() as session:
-        job = session.get(Job, job_id)
-        job_type = str(job.job_type) if job is not None else ""
+    try:
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            job_type = str(job.job_type) if job is not None else ""
 
-    append_event(
-        session_factory,
-        job_id,
-        level="info",
-        event_type="job.started",
-        message="任务开始执行",
-    )
-    handler = get_handler(job_type)
+        append_event(
+            session_factory,
+            job_id,
+            level="info",
+            event_type="job.started",
+            message="任务开始执行",
+        )
+        handler = get_handler(job_type)
+    except Exception:
+        _clear_active_job_state(job_id)
+        raise
     if handler is None:
         _finish_job(
             session_factory,
@@ -163,9 +180,7 @@ def worker_loop_once(session_factory) -> str | None:
             event_type="job.failed",
             message="未知任务类型，已拒绝执行",
         )
-        clear_cancellation(job_id)
-        with _active_job_lock:
-            _active_job_id = None
+        _clear_active_job_state(job_id)
         return job_id
 
     heartbeat_stop_event = threading.Event()
@@ -235,9 +250,7 @@ def worker_loop_once(session_factory) -> str | None:
     finally:
         heartbeat_stop_event.set()
         heartbeat_thread.join(timeout=1.0)
-        clear_cancellation(job_id)
-        with _active_job_lock:
-            _active_job_id = None
+        _clear_active_job_state(job_id)
     return job_id
 
 
@@ -255,18 +268,36 @@ class WorkerController:
         self.thread.join(timeout=timeout)
 
 
+def _run_worker_loop(
+    session_factory,
+    stop_event: threading.Event,
+    *,
+    monotonic: Callable[[], float] | None = None,
+) -> None:
+    """Run the daemon loop with periodic recovery and an exception boundary."""
+    read_monotonic = monotonic or time.monotonic
+    next_stale_reap_at = read_monotonic() + STALE_REAPER_INTERVAL_SECONDS
+    while not stop_event.is_set():
+        try:
+            current_time = read_monotonic()
+            if current_time >= next_stale_reap_at:
+                next_stale_reap_at = (
+                    current_time + STALE_REAPER_INTERVAL_SECONDS
+                )
+                mark_stale_jobs_interrupted(session_factory)
+            worker_loop_once(session_factory)
+        except Exception:
+            logger.exception("job worker iteration failed")
+        stop_event.wait(WORKER_POLL_INTERVAL_SECONDS)
+
+
 def start_worker(session_factory) -> WorkerController:
     """Recover stale jobs and start exactly one daemon worker thread."""
     mark_stale_jobs_interrupted(session_factory)
     stop_event = threading.Event()
-
-    def worker_main() -> None:
-        while not stop_event.is_set():
-            worker_loop_once(session_factory)
-            stop_event.wait(0.2)
-
     thread = threading.Thread(
-        target=worker_main,
+        target=_run_worker_loop,
+        args=(session_factory, stop_event),
         name="zn-sample-job-worker",
         daemon=True,
     )
