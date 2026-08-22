@@ -306,6 +306,44 @@ class JobApiTests(JobTestCase):
         self.assertEqual(response.json()["stores"][0]["storeId"], "store-cached")
         list_running_stores.assert_not_called()
 
+    def test_diagnostics_use_cache_while_ziniao_job_is_running(self) -> None:
+        self._add_cached_store_and_running_job()
+        with (
+            patch("lib.zclaw.list_running_stores") as list_running_stores,
+            patch("lib.zclaw_cli.resolve_ziniao_cli_command", return_value=["node"]),
+            patch("lib.app_config.resolve_config_path", return_value=None),
+        ):
+            response = self.client.get("/diagnostics")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("ZINIAO_BUSY", response.text)
+        self.assertIn("store-cached", response.text)
+        list_running_stores.assert_not_called()
+
+    def test_home_uses_cache_while_ziniao_job_is_running(self) -> None:
+        self._add_cached_store_and_running_job()
+        with patch("lib.zclaw.list_running_stores") as list_running_stores:
+            response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("ziniao-busy", response.text)
+        list_running_stores.assert_not_called()
+
+    def _add_cached_store_and_running_job(self) -> None:
+        with self.session_factory() as session:
+            session.add(
+                Store(
+                    ziniao_store_id="store-cached",
+                    store_name="Cached",
+                )
+            )
+            session.add(
+                Job(
+                    job_type="environment_check",
+                    status="running",
+                    requested_by="test",
+                )
+            )
+            session.commit()
+
     def test_sse_is_session_protected_and_hides_payload_summary(self) -> None:
         job_id = self.add_job(status="succeeded")
         append_event(

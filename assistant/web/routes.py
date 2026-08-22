@@ -12,6 +12,7 @@ from sqlalchemy import select
 from assistant.api.jobs import router as jobs_api_router
 from assistant.api.stores import running_store_summary
 from assistant.database.models import Job
+from assistant.jobs.locks import request_safe_store_summary
 from assistant.paths import database_path, user_data_dir
 from assistant.security.secret_redaction import redact_text
 
@@ -33,6 +34,13 @@ def _base_context(request: Request) -> dict:
     }
 
 
+def _request_store_summary(request: Request) -> dict:
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        return running_store_summary()
+    return request_safe_store_summary(session_factory)
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     context = _base_context(request)
@@ -40,7 +48,7 @@ def home(request: Request) -> HTMLResponse:
         {
             "data_directory": redact_text(user_data_dir()),
             "database_ready": database_path().is_file(),
-            "store_summary": running_store_summary(),
+            "store_summary": _request_store_summary(request),
         }
     )
     return templates.TemplateResponse(request, "home.html", context)
@@ -60,10 +68,12 @@ def diagnostics(request: Request) -> HTMLResponse:
     config_path = resolve_config_path()
     raw_config = load_raw_config() if config_path else {}
     feishu = raw_config.get("feishu") if isinstance(raw_config, dict) else {}
-    store_summary = running_store_summary()
+    store_summary = _request_store_summary(request)
     bridge_state = (
         "BRIDGE_UNAVAILABLE"
         if store_summary.get("error") == "running-query-failed"
+        else "ZINIAO_BUSY"
+        if store_summary.get("error") == "ziniao-busy"
         else "READY"
     )
     context.update(

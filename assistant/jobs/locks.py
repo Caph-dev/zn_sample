@@ -89,6 +89,15 @@ def cached_store_busy_response(session_factory) -> dict:
     return {"ok": False, "error": "ziniao-busy", "stores": safe_stores}
 
 
+def request_safe_store_summary(session_factory) -> dict:
+    """Use cached stores while the worker owns Zinao; otherwise read live."""
+    if has_running_ziniao_job(session_factory):
+        return cached_store_busy_response(session_factory)
+    from assistant.api.stores import running_store_summary
+
+    return running_store_summary()
+
+
 def install_ziniao_busy_guard(application, session_factory) -> None:
     """Prevent request-thread Zinao reads while the worker owns the channel."""
 
