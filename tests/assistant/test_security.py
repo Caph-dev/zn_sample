@@ -77,6 +77,16 @@ class LocalSecurityTests(unittest.TestCase):
             self.client.post(
                 "/test-post",
                 headers={
+                    "Origin": "http://localhost:not-a-port",
+                    "X-CSRF-Token": csrf_token,
+                },
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/test-post",
+                headers={
                     "Origin": "http://localhost:8765",
                     "X-CSRF-Token": csrf_token,
                 },

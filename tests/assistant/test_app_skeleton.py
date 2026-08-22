@@ -75,7 +75,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
     def test_diagnostics_never_render_configuration_values(self) -> None:
         self.authenticate()
         with (
-            patch("lib.zclaw.list_running_stores", return_value=[]),
+            patch("lib.zclaw.list_running_stores", return_value=[]) as list_stores,
             patch("lib.zclaw_cli.resolve_ziniao_cli_command", return_value=["node", "run.js"]),
             patch("lib.app_config.resolve_config_path", return_value=Path("config.toml")),
             patch(
@@ -85,8 +85,27 @@ class ApplicationSkeletonTests(unittest.TestCase):
         ):
             response = self.client.get("/diagnostics")
         self.assertEqual(response.status_code, 200)
+        self.assertIn("<dt>Bridge</dt><dd>READY</dd>", response.text)
         self.assertNotIn("must-not-render", response.text)
         self.assertNotIn("app_secret", response.text)
+        list_stores.assert_called_once_with()
+
+    def test_diagnostics_reports_bridge_unavailable_without_retrying(self) -> None:
+        self.authenticate()
+        with (
+            patch(
+                "lib.zclaw.list_running_stores",
+                side_effect=RuntimeError("bridge unavailable"),
+            ) as list_stores,
+            patch("lib.zclaw_cli.resolve_ziniao_cli_command", return_value=["node", "run.js"]),
+            patch("lib.app_config.resolve_config_path", return_value=None),
+        ):
+            response = self.client.get("/diagnostics")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "<dt>Bridge</dt><dd>BRIDGE_UNAVAILABLE</dd>", response.text
+        )
+        list_stores.assert_called_once_with()
 
     def test_database_schema_and_sensitive_setting_guard(self) -> None:
         engine = create_database_engine(self.root / "assistant.sqlite3")
