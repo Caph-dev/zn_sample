@@ -67,6 +67,24 @@ class Criteria:
     require_hero_sku: bool = True
 
 
+# 当前只批准 / 跟进这一款 B005。空集合 = 全部主推（--all-hero-products）。
+ACTIVE_HERO_PRODUCT_ID = "1732414717062320994"
+DEFAULT_ACTIVE_HERO_PRODUCT_IDS = frozenset({ACTIVE_HERO_PRODUCT_ID})
+
+
+def reject_if_not_active_hero_product(
+    product_id: str | None,
+    allowed_product_ids: set[str] | frozenset[str] | None,
+) -> str | None:
+    """允许集合为空则不额外限制（恢复凡主推均可）。"""
+    if not allowed_product_ids:
+        return None
+    pid = str(product_id or "").strip()
+    if pid in allowed_product_ids:
+        return None
+    return f"非当前跟进款({pid or '无product_id'})"
+
+
 def normalize_category(name: str) -> str:
     s = (name or "").strip()
     return CATEGORY_ALIASES.get(s, s)
@@ -175,6 +193,7 @@ def evaluate_row(
     hero_keys: set[str] | None = None,
     skip_hero_check: bool = False,
     require_detail: bool = False,
+    allowed_product_ids: set[str] | frozenset[str] | None = None,
 ) -> dict:
     """返回带 eligible / reason / metrics 的行。"""
     from .feishu_hero import match_hero  # 避免循环
@@ -358,6 +377,13 @@ def evaluate_row(
         elif hero is None:
             unknowns.append(hero_match_reason)
             need(False, f"非主推款({hero_match_reason})")
+
+    active_product_reason = reject_if_not_active_hero_product(
+        row.get("product_id") or raw.get("product_id"),
+        allowed_product_ids,
+    )
+    if active_product_reason:
+        need(False, active_product_reason)
 
     eligible = len(fails) == 0
     reason = "通过" if eligible else "; ".join(fails)
