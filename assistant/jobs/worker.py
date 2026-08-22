@@ -18,6 +18,7 @@ from assistant.jobs.registry import HandlerFailure, JobCancelled, get_handler
 
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 5.0
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
 )
@@ -107,6 +108,26 @@ def _finish_job(
         session.commit()
 
 
+def _heartbeat_loop(
+    session_factory,
+    job_id: str,
+    stop_event: threading.Event,
+    *,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """Refresh one running job while its read-only handler is blocked."""
+    while not stop_event.wait(interval):
+        try:
+            with session_factory() as session:
+                job = session.get(Job, job_id)
+                if job is None or job.status != "running":
+                    return
+                job.heartbeat_at = utc_now()
+                session.commit()
+        except Exception:
+            logger.exception("job heartbeat failed job_id=%s", job_id)
+
+
 def worker_loop_once(session_factory) -> str | None:
     """Claim and synchronously execute at most one durable job."""
     job_id = _claim_next_job(session_factory)
@@ -147,6 +168,14 @@ def worker_loop_once(session_factory) -> str | None:
             _active_job_id = None
         return job_id
 
+    heartbeat_stop_event = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(session_factory, job_id, heartbeat_stop_event),
+        name=f"job-heartbeat-{job_id}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     try:
         result_summary = handler(job_id, session_factory)
     except JobCancelled:
@@ -204,6 +233,8 @@ def worker_loop_once(session_factory) -> str | None:
             message="任务执行完成",
         )
     finally:
+        heartbeat_stop_event.set()
+        heartbeat_thread.join(timeout=1.0)
         clear_cancellation(job_id)
         with _active_job_lock:
             _active_job_id = None

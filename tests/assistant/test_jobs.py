@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ from assistant.jobs.locks import (
 )
 from assistant.jobs.progress import append_event, list_events
 from assistant.jobs.worker import (
+    _heartbeat_loop,
     mark_stale_jobs_interrupted,
     worker_loop_once,
 )
@@ -100,6 +103,25 @@ class JobWorkerTests(JobTestCase):
 
         self.assertIsNone(worker_loop_once(self.session_factory))
         self.assertEqual(self.get_job(pending_job_id).status, "pending")
+
+    def test_running_job_heartbeat_refreshes_while_handler_can_block(self) -> None:
+        old_heartbeat = datetime.now(timezone.utc) - timedelta(seconds=30)
+        job_id = self.add_job(status="running", heartbeat_at=old_heartbeat)
+        stop_event = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop,
+            args=(self.session_factory, job_id, stop_event),
+            kwargs={"interval": 0.01},
+        )
+        heartbeat_thread.start()
+        try:
+            time.sleep(0.04)
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=1.0)
+
+        refreshed_heartbeat = self.get_job(job_id).heartbeat_at
+        self.assertGreater(refreshed_heartbeat, old_heartbeat.replace(tzinfo=None))
 
     def test_environment_check_with_zero_stores_succeeds(self) -> None:
         job_id = self.add_job()

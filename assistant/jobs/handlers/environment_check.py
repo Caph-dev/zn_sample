@@ -115,6 +115,7 @@ def run_environment_check(job_id: str, session_factory) -> str:
                 event_type="job.warning",
                 message="店铺页面探活失败；未执行开店或切店。",
             )
+    _check_cancelled(job_id)
     update_progress(
         session_factory,
         job_id,
