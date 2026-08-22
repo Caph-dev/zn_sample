@@ -11,7 +11,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from assistant.domain import message_templates
 from assistant.domain.message_templates import (
-    TEMPLATE_VERSION,
     choose_template_key,
     render_followup_message,
 )
@@ -139,19 +138,13 @@ class FollowupMessageTemplateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             render_followup_message("missing", creator_name="Creator")
 
-    def test_template_version_does_not_change_message_idempotency_key(self) -> None:
-        original_key = message_send_idempotency_key(
-            "store", "creator", "product", "day_3", date(2026, 8, 22)
-        )
-        original_version = message_templates.TEMPLATE_VERSION
-        try:
-            message_templates.TEMPLATE_VERSION = TEMPLATE_VERSION + 1
-            changed_version_key = message_send_idempotency_key(
+    def test_message_idempotency_key_uses_stable_business_key_format(self) -> None:
+        self.assertEqual(
+            message_send_idempotency_key(
                 "store", "creator", "product", "day_3", date(2026, 8, 22)
-            )
-        finally:
-            message_templates.TEMPLATE_VERSION = original_version
-        self.assertEqual(original_key, changed_version_key)
+            ),
+            "store|creator|product|day_3|2026-08-22",
+        )
 
 
 if __name__ == "__main__":

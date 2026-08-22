@@ -234,6 +234,7 @@ class JobWorkerTests(JobTestCase):
 
     def test_running_job_heartbeat_refreshes_while_handler_can_block(self) -> None:
         old_heartbeat = datetime.now(timezone.utc) - timedelta(seconds=30)
+        stored_old_heartbeat = old_heartbeat.replace(tzinfo=None)
         job_id = self.add_job(status="running", heartbeat_at=old_heartbeat)
         stop_event = threading.Event()
         heartbeat_thread = threading.Thread(
@@ -243,13 +244,25 @@ class JobWorkerTests(JobTestCase):
         )
         heartbeat_thread.start()
         try:
-            time.sleep(0.04)
+            heartbeat_deadline = time.monotonic() + 1.0
+            refreshed_heartbeat: datetime | None = None
+            while time.monotonic() < heartbeat_deadline:
+                current_heartbeat = self.get_job(job_id).heartbeat_at
+                if (
+                    current_heartbeat is not None
+                    and current_heartbeat > stored_old_heartbeat
+                ):
+                    refreshed_heartbeat = current_heartbeat
+                    break
+                time.sleep(0.01)
+
+            self.assertIsNotNone(
+                refreshed_heartbeat,
+                "Job heartbeat did not advance within one second.",
+            )
         finally:
             stop_event.set()
             heartbeat_thread.join(timeout=1.0)
-
-        refreshed_heartbeat = self.get_job(job_id).heartbeat_at
-        self.assertGreater(refreshed_heartbeat, old_heartbeat.replace(tzinfo=None))
 
     def test_environment_check_with_zero_stores_succeeds(self) -> None:
         job_id = self.add_job()
