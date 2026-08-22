@@ -153,12 +153,31 @@ def shipment_detail_page(shipment_id: int, request: Request) -> HTMLResponse:
 
 
 @router.get("/followups", response_class=HTMLResponse)
-def followups_page(request: Request) -> HTMLResponse:
+def followups_page(
+    request: Request,
+    stage: str = "",
+    status: str = "",
+    language: str = "",
+    curr_status: int | None = None,
+) -> HTMLResponse:
     context = _base_context(request)
     with request.app.state.session_factory() as session:
-        context["rows"] = session.execute(
+        query = (
             select(FollowupTask, SampleCase).join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
-        ).all()
+        )
+        if stage:
+            query = query.where(FollowupTask.stage == stage)
+        if status:
+            query = query.where(FollowupTask.status == status)
+        if language:
+            query = query.where(FollowupTask.language == language)
+        if curr_status is not None:
+            query = query.where(SampleCase.curr_status == curr_status)
+        context["rows"] = session.execute(query).all()
+    context["filters"] = {
+        "stage": stage, "status": status, "language": language,
+        "curr_status": curr_status,
+    }
     return templates.TemplateResponse(request, "followups.html", context)
 
 

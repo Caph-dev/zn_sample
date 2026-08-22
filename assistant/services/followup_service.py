@@ -179,13 +179,18 @@ class FollowupService:
         if sample_case.language or sample_case.feishu_lang:
             return
         try:
+            from lib.app_config import load_bitable_settings
             from lib.feishu_bitable import (
+                DEFAULT_BITABLE_APP_ID,
                 _field_plain,
                 find_duplicate_record,
                 get_bitable_access_token,
                 list_sample_product_options,
                 match_sample_product_option,
             )
+            settings = load_bitable_settings(default_app_id=DEFAULT_BITABLE_APP_ID)
+            if not settings.get("app_id") or not settings.get("app_secret"):
+                return
             token = get_bitable_access_token()
             sample_product = sample_case.sample_product_option
             if not sample_product:
