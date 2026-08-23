@@ -9,7 +9,8 @@
   <ol class="task-events" data-job-events aria-label="任务执行过程"></ol>
 </section>
 <section class="task-result" data-job-result aria-live="polite"></section>
-{% if job.status in ["pending", "running"] %}
+{% set operator_job_types = ["operator_prepare", "operator_screen", "operator_pipeline", "operator_tracking"] %}
+{% if job.status in ["pending", "running"] and job.job_type not in operator_job_types %}
 <form method="post" action="/api/jobs/{{ job.id }}/cancel" data-job-cancel data-job-id="{{ job.id }}">
   <button type="submit" class="button--destructive">取消这项任务</button>
 </form>

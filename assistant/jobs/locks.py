@@ -104,7 +104,10 @@ def install_ziniao_busy_guard(application, session_factory) -> None:
 
     @application.middleware("http")
     async def guard_stores_during_ziniao_jobs(request: Request, call_next):
-        is_stores_get = request.method == "GET" and request.url.path == "/api/stores"
+        is_stores_get = request.method == "GET" and request.url.path in {
+            "/api/stores",
+            "/api/stores/preparation-status",
+        }
         if not is_stores_get or not is_local_host(request.headers.get("host", "")):
             return await call_next(request)
         if has_running_ziniao_job(session_factory):

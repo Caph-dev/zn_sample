@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 
@@ -17,6 +17,14 @@ from assistant.jobs.progress import list_events
 router = APIRouter()
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
+)
+OPERATOR_JOB_TYPES = frozenset(
+    {
+        "operator_prepare",
+        "operator_screen",
+        "operator_pipeline",
+        "operator_tracking",
+    }
 )
 
 
@@ -69,6 +77,80 @@ def create_daily_refresh(request: Request) -> dict:
     return {"job_id": job_id, "deduplicated": deduplicated}
 
 
+def _create_operator_job(
+    request: Request,
+    *,
+    job_type: str,
+    request_payload: dict | None = None,
+) -> dict:
+    """Create one allowlisted operator task without accepting shell arguments."""
+    if job_type not in OPERATOR_JOB_TYPES:
+        raise HTTPException(status_code=404, detail="operator-job-not-found")
+    session_factory = _session_factory(request)
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type=job_type,
+        store_id=None,
+        result_summary=json.dumps(
+            request_payload or {},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+    return {"job_id": job_id, "deduplicated": deduplicated}
+
+
+@router.post("/api/jobs/operator/prepare")
+def create_operator_prepare(request: Request) -> dict:
+    """Run the same fixed prepare operation as launcher 0."""
+    return _create_operator_job(request, job_type="operator_prepare")
+
+
+@router.post("/api/jobs/operator/screen")
+def create_operator_screen(request: Request) -> dict:
+    """Run the same read-only formal screening operation as launcher 1."""
+    return _create_operator_job(request, job_type="operator_screen")
+
+
+@router.post("/api/jobs/operator/pipeline")
+def create_operator_pipeline(
+    request: Request,
+    confirmation: str = Form(default=""),
+) -> dict:
+    """Create launcher 2 only after an explicit typed confirmation."""
+    if confirmation.strip().lower() not in {"y", "yes"}:
+        raise HTTPException(status_code=400, detail="operator-confirmation-required")
+    return _create_operator_job(request, job_type="operator_pipeline")
+
+
+@router.post("/api/jobs/operator/tracking")
+def create_operator_tracking(
+    request: Request,
+    confirmation: str = Form(default=""),
+    force_confirmation: str = Form(default=""),
+) -> dict:
+    """Create launcher 3 with both write and Beijing-time gates enforced."""
+    from lib.operator_launch import beijing_clock, before_four_pm_beijing
+
+    if confirmation.strip().lower() not in {"y", "yes"}:
+        raise HTTPException(status_code=400, detail="operator-confirmation-required")
+    force_requested = force_confirmation.strip() == "FORCE"
+    if before_four_pm_beijing() and not force_requested:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "force-required",
+                "clock": beijing_clock(),
+                "message": "北京时间 16:00 前默认不运行物流写入和私信任务。",
+            },
+        )
+    return _create_operator_job(
+        request,
+        job_type="operator_tracking",
+        request_payload={"force": force_requested},
+    )
+
+
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, request: Request) -> dict:
     session_factory = _session_factory(request)
@@ -100,6 +182,11 @@ def cancel_job(job_id: str, request: Request) -> dict:
         if job is None:
             raise HTTPException(status_code=404, detail="job-not-found")
         if job.status == "running":
+            if job.job_type in OPERATOR_JOB_TYPES:
+                raise HTTPException(
+                    status_code=409,
+                    detail="operator-job-not-cancellable",
+                )
             request_cancellation(job_id)
             job.progress_message = "已请求取消，将在安全检查点停止"
             session.commit()

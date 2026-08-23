@@ -35,7 +35,18 @@
     shipment_sync: "物流同步",
     followup_generate: "跟进待办生成",
     report_export: "报表导出",
+    operator_prepare: "打开店铺",
+    operator_screen: "只出名单",
+    operator_pipeline: "筛查批准写飞书发私信",
+    operator_tracking: "获取物流信息写飞书发单号",
   };
+
+  const operatorJobTypes = new Set([
+    "operator_prepare",
+    "operator_screen",
+    "operator_pipeline",
+    "operator_tracking",
+  ]);
 
   const statusLabels = {
     pending: "等待执行",
@@ -65,6 +76,8 @@
   ];
 
   const activeMonitors = new Map();
+  let preparationStatusRefreshTimer = null;
+  let preparationStatusRequestInFlight = false;
 
   function getJobTypeLabel(jobType) {
     return jobTypeLabels[jobType] || jobType || "后台任务";
@@ -119,6 +132,205 @@
       element.textContent = textContent;
     }
     return element;
+  }
+
+  function setPreparationButtonState(button, debugReady) {
+    if (!button) {
+      return;
+    }
+    button.classList.remove(
+      "button--primary",
+      "button--secondary",
+      "button--prepare-ready",
+    );
+    if (debugReady) {
+      button.classList.add("button--prepare-ready");
+      button.title = "调试口已就绪；如需重新打开店铺，仍可点击";
+      return;
+    }
+    button.classList.add("button--primary");
+    button.title = "调试口尚未就绪，请点击打开店铺";
+  }
+
+  function formatPreparationStore(payload) {
+    if (payload.ok && payload.store) {
+      const storeName = payload.store.storeName || "未命名店铺";
+      const storeId = payload.store.storeId || "未知 ID";
+      return `${storeName}（${storeId}）`;
+    }
+    if (payload.error === "running-query-failed") {
+      return "暂时无法读取当前店铺";
+    }
+    const runningStores = Array.isArray(payload.stores) ? payload.stores : [];
+    if (runningStores.length === 0) {
+      return "当前没有打开的店铺";
+    }
+    if (runningStores.length > 1) {
+      return `当前打开了 ${runningStores.length} 家店铺，请只保留一家`;
+    }
+    const store = runningStores[0];
+    return `${store.storeName || "未命名店铺"}（${store.storeId || "未知 ID"}）`;
+  }
+
+  function renderPreparationStatus(payload) {
+    const statusPanel = document.querySelector("[data-preparation-status]");
+    const prepareButton = document.querySelector("[data-store-prepare-button]");
+    if (!statusPanel || !prepareButton) {
+      return;
+    }
+
+    const summaryTarget = statusPanel.querySelector("[data-preparation-status-summary]");
+    const storeTarget = statusPanel.querySelector("[data-preparation-store]");
+    const debugTarget = statusPanel.querySelector("[data-preparation-debug]");
+    const hintTarget = statusPanel.querySelector("[data-preparation-status-hint]");
+    const statusDot = statusPanel.querySelector("[data-preparation-status-dot]");
+
+    if (storeTarget) {
+      storeTarget.textContent = formatPreparationStore(payload);
+    }
+
+    if (payload.error === "ziniao-busy") {
+      if (summaryTarget) {
+        summaryTarget.textContent = "店铺任务运行中";
+      }
+      if (debugTarget) {
+        debugTarget.textContent = "任务结束后自动重新检测";
+      }
+      if (hintTarget) {
+        hintTarget.textContent = "当前不会并发探测调试口，避免干扰正在运行的任务。";
+      }
+      if (statusDot) {
+        statusDot.className = "status-dot status-dot--info";
+      }
+      return;
+    }
+
+    const debugReady = payload.ok === true && payload.debug_ready === true;
+    setPreparationButtonState(prepareButton, debugReady);
+    if (debugReady) {
+      if (summaryTarget) {
+        summaryTarget.textContent = "店铺已准备好";
+      }
+      if (debugTarget) {
+        debugTarget.textContent = "已打开，可以进入下一步";
+      }
+      if (hintTarget) {
+        hintTarget.textContent = "当前已满足自动化脚本的运行要求；再次点击“打开店铺”按钮可以重新打开店铺";
+      }
+      if (statusDot) {
+        statusDot.className = "status-dot status-dot--success";
+      }
+      return;
+    }
+
+    if (summaryTarget) {
+      summaryTarget.textContent = "店铺尚未准备好";
+    }
+    if (debugTarget) {
+      debugTarget.textContent = "未打开或尚未就绪";
+    }
+    if (hintTarget) {
+      hintTarget.textContent = payload.error === "running-query-failed"
+        ? "暂时无法读取紫鸟状态，请检查紫鸟 GUI 和 Bridge。"
+        : "请点击高亮的“打开店铺”，等待调试口就绪后再进入下一步。";
+    }
+    if (statusDot) {
+      statusDot.className = "status-dot status-dot--warning";
+    }
+  }
+
+  async function refreshPreparationStatus() {
+    if (
+      !document.querySelector("[data-preparation-status]") ||
+      preparationStatusRequestInFlight
+    ) {
+      return;
+    }
+    preparationStatusRequestInFlight = true;
+    try {
+      const response = await fetch("/api/stores/preparation-status", {
+        credentials: "same-origin",
+        headers: {Accept: "application/json"},
+      });
+      if (!response.ok) {
+        throw new Error(`店铺准备状态读取失败（${response.status}）`);
+      }
+      renderPreparationStatus(await response.json());
+    } catch (_error) {
+      renderPreparationStatus({
+        ok: false,
+        error: "running-query-failed",
+        stores: [],
+        debug_ready: false,
+      });
+    } finally {
+      preparationStatusRequestInFlight = false;
+      if (preparationStatusRefreshTimer) {
+        window.clearTimeout(preparationStatusRefreshTimer);
+      }
+      preparationStatusRefreshTimer = window.setTimeout(
+        refreshPreparationStatus,
+        10000,
+      );
+    }
+  }
+
+  function requestTypedConfirmation({title, description, token, actionLabel}) {
+    const dialog = document.querySelector("[data-confirm-dialog]");
+    const dialogForm = dialog?.querySelector("[data-confirm-dialog-form]");
+    const titleTarget = dialog?.querySelector("[data-confirm-dialog-title]");
+    const descriptionTarget = dialog?.querySelector("[data-confirm-dialog-description]");
+    const tokenTarget = dialog?.querySelector("[data-confirm-dialog-token]");
+    const input = dialog?.querySelector("[data-confirm-dialog-input]");
+    const errorTarget = dialog?.querySelector("[data-confirm-dialog-error]");
+    const actionButton = dialog?.querySelector("[data-confirm-dialog-action]");
+
+    if (!dialog || !dialogForm || !input || typeof dialog.showModal !== "function") {
+      const typedValue = window.prompt(`${title}\n\n${description}\n\n请输入 ${token} 继续：`);
+      return Promise.resolve(typedValue?.trim() === token ? token : null);
+    }
+
+    titleTarget.textContent = title;
+    descriptionTarget.textContent = description;
+    tokenTarget.textContent = token;
+    actionButton.textContent = actionLabel;
+    input.value = "";
+    errorTarget.hidden = true;
+
+    return new Promise((resolve) => {
+      function finish(value) {
+        dialogForm.removeEventListener("submit", handleSubmit);
+        dialog.removeEventListener("cancel", handleCancel);
+        if (dialog.open) {
+          dialog.close(value ? "confirm" : "cancel");
+        }
+        resolve(value);
+      }
+
+      function handleCancel(event) {
+        event.preventDefault();
+        finish(null);
+      }
+
+      function handleSubmit(event) {
+        event.preventDefault();
+        if (event.submitter?.value === "cancel") {
+          finish(null);
+          return;
+        }
+        if (input.value.trim() !== token) {
+          errorTarget.hidden = false;
+          input.focus();
+          return;
+        }
+        finish(token);
+      }
+
+      dialogForm.addEventListener("submit", handleSubmit);
+      dialog.addEventListener("cancel", handleCancel);
+      dialog.showModal();
+      input.focus();
+    });
   }
 
   function createStatusToken(status) {
@@ -206,6 +418,17 @@
 
     if (job.job_type === "report_export") {
       return [["报表类型", result.kind || "已生成"]];
+    }
+
+    if (operatorJobTypes.has(job.job_type)) {
+      const resultEntries = [["结果", result.summary || "操作已完成"]];
+      if (result.report_name) {
+        resultEntries.push(["报表", `exports/${result.report_name}`]);
+      }
+      if (result.force_used) {
+        resultEntries.push(["时间门", "已明确输入 FORCE 并绕过"]);
+      }
+      return resultEntries;
     }
 
     if (result.summary) {
@@ -322,7 +545,8 @@
       status.replaceChildren(createStatusToken(job.status));
     }
     if (cancelForm && cancelButton) {
-      const cancellable = !terminalStatuses.has(job.status);
+      const cancellable =
+        !terminalStatuses.has(job.status) && !operatorJobTypes.has(job.job_type);
       if (cancellable) {
         cancelForm.action = `/api/jobs/${encodeURIComponent(job.id)}/cancel`;
         cancelForm.dataset.jobId = job.id;
@@ -504,14 +728,61 @@
     }
 
     try {
-      const response = await fetch(form.action, {
+      const requestBody = new FormData(form);
+      const confirmationToken = form.dataset.confirmToken || "";
+      if (confirmationToken) {
+        const confirmedValue = await requestTypedConfirmation({
+          title: form.dataset.confirmTitle || "确认执行",
+          description: form.dataset.confirmDescription || "此操作可能无法撤销。",
+          token: confirmationToken,
+          actionLabel: form.dataset.confirmAction || "确认并开始",
+        });
+        if (!confirmedValue) {
+          return;
+        }
+        requestBody.set("confirmation", confirmedValue);
+      }
+
+      let response = await fetch(form.action, {
         method: (form.method || "POST").toUpperCase(),
-        body: new FormData(form),
+        body: requestBody,
         credentials: "same-origin",
         headers: {Accept: "application/json"},
       });
+      if (response.status === 409 && form.dataset.forceGate === "tracking") {
+        const forcePayload = await response.json();
+        if (forcePayload.detail?.code === "force-required") {
+          const forceValue = await requestTypedConfirmation({
+            title: "强制在 16:00 前运行",
+            description: `现在北京时间 ${forcePayload.detail.clock}。强制运行只会绕过时间门，仍会写飞书并发送不可撤回的物流私信。`,
+            token: "FORCE",
+            actionLabel: "强制运行",
+          });
+          if (!forceValue) {
+            return;
+          }
+          requestBody.set("force_confirmation", forceValue);
+          response = await fetch(form.action, {
+            method: (form.method || "POST").toUpperCase(),
+            body: requestBody,
+            credentials: "same-origin",
+            headers: {Accept: "application/json"},
+          });
+        }
+      }
       if (!response.ok) {
-        throw new Error(`无法开始任务（${response.status}）`);
+        let errorMessage = `无法开始任务（${response.status}）`;
+        try {
+          const errorPayload = await response.json();
+          if (typeof errorPayload.detail === "string") {
+            errorMessage = errorPayload.detail;
+          } else if (errorPayload.detail?.message) {
+            errorMessage = errorPayload.detail.message;
+          }
+        } catch (_error) {
+          /* Keep the status-based fallback for non-JSON failures. */
+        }
+        throw new Error(errorMessage);
       }
       const payload = await response.json();
       dbgLog("job-submitted", {jobId: payload.job_id, deduplicated: payload.deduplicated});
@@ -592,6 +863,12 @@
     if (restoreJobId && !hasDedicatedJobMonitor) {
       startMonitor(restoreJobId, {useGlobalPanel: true});
     }
+    refreshPreparationStatus();
+    document.addEventListener("assistant:job-complete", (event) => {
+      if (event.detail?.job_type === "operator_prepare") {
+        window.setTimeout(refreshPreparationStatus, 500);
+      }
+    });
     document.querySelectorAll("form[data-job-form]").forEach((form) => {
       form.addEventListener("submit", (event) => submitJobForm(form, event));
     });

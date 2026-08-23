@@ -347,11 +347,6 @@ tbody tr:hover td {
   color: var(--color-text-red);
 }
 
-/* 紧随表单的提示框留出明确间距（如工作台「开始今日更新」下方） */
-.workflow-panel form + .banner {
-  margin-top: 1.25rem;
-}
-
 /* ---- Empty State（居中灰字，无边框） ---- */
 .empty-state {
   padding: 3rem 1rem;
@@ -511,6 +506,19 @@ textarea:focus-visible {
   color: var(--color-text-primary);
 }
 
+.button--muted {
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.button--muted:hover,
+.button--muted:active {
+  background: var(--color-overlay-hover);
+  border-color: var(--color-border-emphasized);
+  color: var(--color-text-primary);
+}
+
 .button--destructive {
   background: transparent;
   color: var(--color-text-red);
@@ -543,36 +551,230 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.workflow-panel {
-  padding: 1.5rem;
-  margin-bottom: 2rem;
-  background: var(--color-background-card);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-container);
-  box-shadow: none;
-}
-
-.workflow-panel h2 {
-  margin-top: 0.25rem;
-}
-
-.workflow-panel p:last-child {
-  margin-bottom: 0;
-}
-
 .workflow-description {
   max-width: 48rem;
   color: var(--color-text-secondary);
 }
 
-.action-list,
+.environment-details {
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.environment-details summary {
+  padding: 0.75rem 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.environment-details[open] summary {
+  color: var(--color-text-primary);
+}
+
+.environment-details dl.metadata {
+  margin-top: 0.25rem;
+}
+
+.operator-panel {
+  margin-bottom: 2rem;
+}
+
+.operator-panel h2 {
+  margin-top: 0.25rem;
+}
+
+.operator-group-heading {
+  margin: 1.5rem 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.operator-group-heading.operator-part-heading {
+  padding: 0.75rem 1rem;
+  color: var(--color-text-primary);
+  background: var(--color-background-muted);
+  border-radius: var(--radius-container);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+}
+
+.operator-list {
+  margin: 1.25rem 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.operator-list li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  margin: 0;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.operator-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-full);
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.operator-index--danger {
+  background: var(--color-error-muted);
+  color: var(--color-text-red);
+}
+
+.operator-list--prepare li {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.button--prepare-ready,
+.button--prepare-ready:hover,
+.button--prepare-ready:active {
+  background: var(--color-background-muted);
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.preparation-status {
+  margin: -0.5rem 0 1.5rem;
+  padding: 0.875rem 1rem;
+  background: var(--color-background-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+}
+
+.preparation-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+  font-size: var(--font-size-sm);
+}
+
+.preparation-status-details {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.preparation-status-details dt {
+  padding: 0.25rem 0;
+  color: var(--color-text-secondary);
+}
+
+.preparation-status-details dd {
+  margin: 0;
+  padding: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+.preparation-status-hint {
+  margin: 0.5rem 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.operator-list--readonly li {
+  grid-template-columns: 3rem minmax(0, 1fr) auto;
+}
+
+.operator-kind {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.operator-copy h3 {
+  margin: 0 0 0.25rem;
+  font-size: var(--font-size-base);
+}
+
+.operator-copy p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.operator-list form {
+  margin: 0;
+}
+
+.operator-list .operator-action-button {
+  box-sizing: border-box;
+  width: 4rem;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-element);
+}
+
+.confirmation-dialog {
+  width: min(34rem, calc(100% - 2rem));
+  padding: 0;
+  color: var(--color-text-primary);
+  background: var(--color-background-popover);
+  border: 1px solid var(--color-border-emphasized);
+  border-radius: var(--radius-container);
+  box-shadow: var(--shadow-med);
+}
+
+.confirmation-dialog::backdrop {
+  background: var(--color-overlay);
+}
+
+.confirmation-dialog form {
+  padding: 1.5rem;
+}
+
+.confirmation-dialog h2 {
+  margin: 0.25rem 0 0.75rem;
+}
+
+.confirmation-field {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.confirmation-field strong {
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+}
+
+.confirmation-error {
+  margin: 0.5rem 0 0;
+  color: var(--color-text-red);
+  font-size: var(--font-size-sm);
+}
+
+.confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.625rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+}
+
 .queue-list {
   list-style: none;
   margin: 0 0 1rem;
   padding: 0;
 }
 
-.action-list li,
 .queue-list li {
   display: flex;
   align-items: center;
@@ -581,17 +783,10 @@ button:disabled {
   border-bottom: 1px solid var(--color-border);
 }
 
-.action-list li:last-child,
 .queue-list li:last-child {
   border-bottom: none;
 }
 
-.action-list form {
-  flex: none;
-  margin: 0;
-}
-
-.action-list p,
 .queue-list p {
   margin: 0;
   color: var(--color-text-secondary);
@@ -835,6 +1030,33 @@ li {
 
   .task-event {
     display: block;
+  }
+
+  .operator-list li {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .operator-list form {
+    grid-column: 2;
+  }
+
+  .operator-list--prepare li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .operator-list--prepare form {
+    grid-column: 1;
+    justify-self: start;
+  }
+
+  .operator-list--readonly li {
+    grid-template-columns: 3rem minmax(0, 1fr);
+  }
+
+  .operator-list--readonly form,
+  .operator-list--readonly .button-link {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .task-event-time {

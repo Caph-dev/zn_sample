@@ -43,10 +43,81 @@ class ApplicationSkeletonTests(unittest.TestCase):
             response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("ZnSampleAssistant", response.text)
-        self.assertIn('action="/api/jobs/daily-refresh"', response.text)
-        self.assertIn("开始今日更新", response.text)
+        self.assertNotIn('action="/api/jobs/daily-refresh"', response.text)
+        self.assertNotIn("推荐操作", response.text)
+        self.assertNotIn("单独操作", response.text)
+        self.assertNotIn("0–3 脚本", response.text)
+        self.assertIn("运行前准备", response.text)
+        self.assertIn("1–3 脚本", response.text)
+        self.assertIn("到货与跟进（只读）", response.text)
+        self.assertIn('action="/api/jobs/operator/prepare"', response.text)
+        self.assertIn("data-preparation-status", response.text)
+        self.assertIn("data-store-prepare-button", response.text)
+        self.assertIn('action="/api/jobs/operator/screen"', response.text)
+        self.assertIn('action="/api/jobs/operator/pipeline"', response.text)
+        self.assertIn('action="/api/jobs/operator/tracking"', response.text)
+        self.assertLess(
+            response.text.index('action="/api/jobs/operator/prepare"'),
+            response.text.index("1–3 脚本"),
+        )
+        self.assertLess(
+            response.text.index('action="/api/jobs/operator/tracking"'),
+            response.text.index('action="/api/jobs/shipment-sync"'),
+        )
+        self.assertIn('<details class="environment-details">', response.text)
+        self.assertNotIn('<details class="environment-details" open>', response.text)
+        self.assertIn('data-confirm-token="y"', response.text)
         self.assertIn("/static/app.js", response.text)
         self.assertIn('data-theme="light"', response.text)
+
+    def test_preparation_status_reports_ready_execute_script_channel(self) -> None:
+        store = {"storeId": "store-custom", "storeName": "Custom"}
+        with (
+            patch("lib.zclaw.list_running_stores", return_value=[store]),
+            patch(
+                "lib.zclaw.probe_store_page",
+                return_value={"ready": "complete"},
+            ) as probe_store_page,
+        ):
+            response = self.client.get("/api/stores/preparation-status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["debug_ready"])
+        self.assertEqual(response.json()["debug_status"], "ready")
+        probe_store_page.assert_called_once_with(
+            "store-custom",
+            retries=0,
+            timeout=5,
+        )
+
+    def test_preparation_status_reports_open_store_without_debug_channel(self) -> None:
+        store = {"storeId": "store-custom", "storeName": "Custom"}
+        with (
+            patch("lib.zclaw.list_running_stores", return_value=[store]),
+            patch(
+                "lib.zclaw.probe_store_page",
+                side_effect=RuntimeError("debug channel unavailable"),
+            ),
+        ):
+            response = self.client.get("/api/stores/preparation-status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertFalse(response.json()["debug_ready"])
+        self.assertEqual(response.json()["debug_status"], "not-ready")
+        self.assertNotIn("debug channel unavailable", response.text)
+
+    def test_preparation_status_does_not_probe_without_unique_store(self) -> None:
+        with (
+            patch("lib.zclaw.list_running_stores", return_value=[]),
+            patch("lib.zclaw.probe_store_page") as probe_store_page,
+        ):
+            response = self.client.get("/api/stores/preparation-status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["debug_ready"])
+        self.assertEqual(response.json()["error"], "running-not-unique")
+        probe_store_page.assert_not_called()
 
     def test_stores_never_choose_a_default(self) -> None:
         with patch(

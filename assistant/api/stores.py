@@ -29,3 +29,33 @@ def running_store_summary() -> dict:
 @router.get("/api/stores")
 def stores() -> dict:
     return running_store_summary()
+
+
+@router.get("/api/stores/preparation-status")
+def preparation_status() -> dict:
+    """Report whether the unique running store has an execute_script channel."""
+    from lib.zclaw import probe_store_page
+
+    summary = running_store_summary()
+    if not summary.get("ok"):
+        return {
+            **summary,
+            "debug_ready": False,
+            "debug_status": "not-ready",
+        }
+
+    store = summary["store"]
+    store_id = str(store.get("storeId") or "").strip()
+    try:
+        probe_store_page(store_id, retries=0, timeout=5)
+    except Exception:
+        return {
+            **summary,
+            "debug_ready": False,
+            "debug_status": "not-ready",
+        }
+    return {
+        **summary,
+        "debug_ready": True,
+        "debug_status": "ready",
+    }

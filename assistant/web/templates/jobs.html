@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% import "_ui.html" as ui %}
 {% set job_tones = {"pending": "warning", "running": "info", "succeeded": "success", "failed": "error", "cancelled": "neutral", "interrupted": "neutral"} %}
-{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出"} %}
+{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出", "operator_prepare": "打开店铺", "operator_screen": "只出名单", "operator_pipeline": "筛查批准写飞书发私信", "operator_tracking": "获取物流信息写飞书发单号"} %}
 {% set status_labels = {"pending": "等待执行", "running": "正在执行", "succeeded": "已完成", "failed": "执行失败", "cancelled": "已取消", "interrupted": "已中断"} %}
 {% block content %}
 <h1>任务</h1>
-<p class="workflow-description">这里记录网页发起的同步、待办生成、检查和报表任务。点击后不用等待页面跳转，进度会在上方实时显示。</p>
+<p class="workflow-description">这里记录网页发起的筛查执行、同步、待办生成、检查和报表任务。点击后不用等待页面跳转，进度会在上方实时显示。</p>
 <form method="post" action="/api/jobs/environment-check" class="form-toolbar" data-job-form data-job-label="店铺连接检查">
   <button type="submit" class="button--secondary">检查店铺连接</button>
 </form>

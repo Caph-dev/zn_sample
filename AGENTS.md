@@ -51,7 +51,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 操作台 M3 | 只读物流同步 + 本地待办/话术预览 + CSV | 不批准、不发私信、不写飞书；只读同步不受 16:00 门 |
+| 本地网页操作台 | 只读日常更新；另提供固定 0/1/2/3 网页入口并复用 `operator_launch` | 不接受任意命令/参数；2/3 仍须网页明确输入 `y`，3 在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛 | `--with-detail --require-detail` | 不能把仅列表结果当正式名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -103,6 +103,10 @@
 | `--write-feishu` | 筛查脚本不能单独用来「只筛查但写表」。物流无匹配行不新建 |
 | `--force` | 只绕过 16:00 |
 | `--observe-approve-network` | 仅单条 execute 被动观察；不重放、不登记未确认 endpoint |
+
+网页 0/1/2/3 不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking` 四个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排，不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
+
+网页“运行前准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。
 
 批准：先同意成功再写飞书；去重或货号无法映射 → 不批不写。红人ID=`creator_name`。  
 第 9 步发 **TikTok 物流单号**（有承运商则 `{承运商}, {单号}`），不是订单 ID。已有不同单号默认不覆盖（须 `--overwrite`）。

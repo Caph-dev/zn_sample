@@ -151,6 +151,7 @@ def probe_store_page(
     *,
     retries: int = DEFAULT_EXEC_RETRIES,
     retry_base_sec: float = DEFAULT_EXEC_RETRY_BASE_SEC,
+    timeout: int = 60,
 ) -> dict[str, Any]:
     """轻量探活：确认 execute_script 通道可用（比 doctor 更接近真实批准）。"""
     script = (
@@ -164,7 +165,7 @@ def probe_store_page(
     result = zclaw_exec(
         store_id,
         script,
-        timeout=60,
+        timeout=timeout,
         retries=retries,
         retry_base_sec=retry_base_sec,
     )

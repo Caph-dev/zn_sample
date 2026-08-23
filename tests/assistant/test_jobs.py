@@ -30,6 +30,7 @@ from assistant.jobs.locks import (
     request_cancellation,
 )
 from assistant.jobs.progress import append_event, list_events
+from assistant.jobs.handlers.operator import run_operator_job
 from assistant.jobs.worker import (
     _heartbeat_loop,
     _run_worker_loop,
@@ -299,6 +300,43 @@ class JobWorkerTests(JobTestCase):
         probe.assert_called_once_with("store-custom")
         open_store.assert_not_called()
 
+    def test_operator_handler_reuses_fixed_tracking_orchestrator(self) -> None:
+        job_id = self.add_job(job_type="operator_tracking")
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            job.result_summary = json.dumps({"force": True})
+            session.commit()
+
+        with (
+            patch(
+                "assistant.jobs.handlers.operator.ensure_user_dirs",
+                return_value=self.root,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator.run_operator_mode",
+                return_value=0,
+            ) as run_operator_mode,
+            patch(
+                "assistant.jobs.handlers.operator._resolve_report_name",
+                return_value="sample_shipped.csv",
+            ),
+        ):
+            result = json.loads(run_operator_job(job_id, self.session_factory))
+
+        self.assertEqual(result["mode"], "tracking")
+        self.assertTrue(result["force_used"])
+        self.assertEqual(result["report_name"], "sample_shipped.csv")
+        operator_call = run_operator_mode.call_args
+        self.assertEqual(operator_call.args, ("tracking",))
+        self.assertEqual(operator_call.kwargs["python"], sys.executable)
+        self.assertTrue(operator_call.kwargs["confirm_fn"](None))
+        self.assertTrue(operator_call.kwargs["force_fn"]())
+
+    def test_operator_handler_rejects_unregistered_job_type(self) -> None:
+        job_id = self.add_job(job_type="operator_unknown")
+        with self.assertRaisesRegex(Exception, "没有登记"):
+            run_operator_job(job_id, self.session_factory)
+
     def test_daily_refresh_runs_logistics_then_followups(self) -> None:
         job_id = self.add_job(job_type="daily_refresh")
         store = {"storeId": "store-custom", "storeName": "Custom"}
@@ -427,9 +465,10 @@ class JobApiTests(JobTestCase):
         self.client.close()
         super().tearDown()
 
-    def post(self, path: str):
+    def post(self, path: str, *, data: dict | None = None):
         return self.client.post(
             path,
+            data=data,
             headers={"Origin": "http://127.0.0.1:8765"},
         )
 
@@ -446,6 +485,65 @@ class JobApiTests(JobTestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["job_id"], second.json()["job_id"])
         self.assertTrue(second.json()["deduplicated"])
+
+    def test_read_only_operator_routes_create_fixed_job_types(self) -> None:
+        expected_job_types = {
+            "/api/jobs/operator/prepare": "operator_prepare",
+            "/api/jobs/operator/screen": "operator_screen",
+        }
+        for path, expected_job_type in expected_job_types.items():
+            with self.subTest(path=path):
+                response = self.post(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    self.get_job(response.json()["job_id"]).job_type,
+                    expected_job_type,
+                )
+
+    def test_pipeline_requires_typed_confirmation(self) -> None:
+        rejected_response = self.post("/api/jobs/operator/pipeline")
+        self.assertEqual(rejected_response.status_code, 400)
+
+        accepted_response = self.post(
+            "/api/jobs/operator/pipeline",
+            data={"confirmation": "y"},
+        )
+        self.assertEqual(accepted_response.status_code, 200)
+        self.assertEqual(
+            self.get_job(accepted_response.json()["job_id"]).job_type,
+            "operator_pipeline",
+        )
+
+    def test_tracking_requires_force_before_four_pm_beijing(self) -> None:
+        with (
+            patch("lib.operator_launch.before_four_pm_beijing", return_value=True),
+            patch("lib.operator_launch.beijing_clock", return_value="15:30"),
+        ):
+            rejected_response = self.post(
+                "/api/jobs/operator/tracking",
+                data={"confirmation": "y"},
+            )
+            accepted_response = self.post(
+                "/api/jobs/operator/tracking",
+                data={"confirmation": "y", "force_confirmation": "FORCE"},
+            )
+
+        self.assertEqual(rejected_response.status_code, 409)
+        self.assertEqual(rejected_response.json()["detail"]["code"], "force-required")
+        self.assertEqual(accepted_response.status_code, 200)
+        tracking_job = self.get_job(accepted_response.json()["job_id"])
+        self.assertEqual(tracking_job.job_type, "operator_tracking")
+        self.assertTrue(json.loads(tracking_job.result_summary)["force"])
+
+    def test_tracking_after_four_never_needs_force_override(self) -> None:
+        with patch("lib.operator_launch.before_four_pm_beijing", return_value=False):
+            response = self.post(
+                "/api/jobs/operator/tracking",
+                data={"confirmation": "yes"},
+            )
+        self.assertEqual(response.status_code, 200)
+        tracking_job = self.get_job(response.json()["job_id"])
+        self.assertFalse(json.loads(tracking_job.result_summary)["force"])
 
     def test_post_without_origin_is_rejected(self) -> None:
         response = self.client.post("/api/jobs/environment-check")
@@ -471,6 +569,17 @@ class JobApiTests(JobTestCase):
             self.assertTrue(is_cancellation_requested(job_id))
         finally:
             clear_cancellation(job_id)
+
+    def test_running_operator_job_cannot_be_cancelled(self) -> None:
+        job_id = self.add_job(job_type="operator_pipeline", status="running")
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "operator-job-not-cancellable")
+        self.assertFalse(is_cancellation_requested(job_id))
+
+        detail_response = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertNotIn("取消这项任务", detail_response.text)
 
     def test_pending_cancel_cannot_overwrite_worker_claim(self) -> None:
         job_id = self.add_job()
@@ -605,11 +714,22 @@ class JobApiTests(JobTestCase):
                 )
             )
             session.commit()
-        with patch("lib.zclaw.list_running_stores") as list_running_stores:
-            response = self.client.get("/api/stores")
-        self.assertEqual(response.json()["error"], "ziniao-busy")
-        self.assertEqual(response.json()["stores"][0]["storeId"], "store-cached")
+        with (
+            patch("lib.zclaw.list_running_stores") as list_running_stores,
+            patch("lib.zclaw.probe_store_page") as probe_store_page,
+        ):
+            responses = [
+                self.client.get("/api/stores"),
+                self.client.get("/api/stores/preparation-status"),
+            ]
+        for response in responses:
+            self.assertEqual(response.json()["error"], "ziniao-busy")
+            self.assertEqual(
+                response.json()["stores"][0]["storeId"],
+                "store-cached",
+            )
         list_running_stores.assert_not_called()
+        probe_store_page.assert_not_called()
 
     def test_diagnostics_use_cache_while_ziniao_job_is_running(self) -> None:
         self._add_cached_store_and_running_job()
