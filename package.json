@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "build:theme": "mkdir -p build/theme && astryx theme build src/themes/geist/geistTheme.ts -o build/theme/geist-theme.css && cp build/theme/geist-theme.css assistant/web/static/geist-theme.css",
+    "check:theme": "astryx theme build src/themes/geist/geistTheme.ts -o build/theme/geist-theme.css -c",
+    "build:fonts": "mkdir -p assistant/web/static/fonts && cp node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2 assistant/web/static/fonts/Geist.woff2 && cp node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2 assistant/web/static/fonts/GeistMono.woff2"
+  },
+  "dependencies": {
+    "@astryxdesign/cli": "^0.4.6",
+    "@astryxdesign/core": "^0.4.6",
+    "@astryxdesign/theme-neutral": "^0.4.6",
+    "@stylexjs/stylex": "^0.19.0",
+    "geist": "^1.7.2"
+  }
+}

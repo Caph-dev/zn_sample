@@ -103,11 +103,15 @@ def parse_pending_list_payload(
 
         apply_id = str(apply_info.get("apply_id") or "").strip()
         creator_name = str(creator.get("name") or "").strip()
+        # 部分申请行的 creator_info 只有 nick_name 无 name（该行申请人未填全），
+        # 用 nick_name 兜底；仍为空则仅跳过该行，不让个别坏行丢弃整批列表。
+        if not creator_name:
+            creator_name = str(creator.get("nick_name") or "").strip()
         product_id = str(apply_info.get("product_id") or "").strip()
+        if not creator_name:
+            continue
         if not apply_id:
             raise PageApiSchemaError(f"agg_info[{row_index}] 主申请缺少 apply_id")
-        if not creator_name:
-            raise PageApiSchemaError(f"agg_info[{row_index}] 达人缺少 name")
         if not product_id:
             raise PageApiSchemaError(f"agg_info[{row_index}] 主申请缺少 product_id")
 

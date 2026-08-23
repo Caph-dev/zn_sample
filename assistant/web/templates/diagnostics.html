@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>本机诊断</h1>
-<dl>
+<dl class="metadata">
   <dt>Python</dt><dd>{{ python_version }}</dd>
   <dt>紫鸟 CLI</dt><dd>{{ cli_state }}</dd>
   <dt>Bridge</dt><dd>{{ bridge_state }}</dd>
@@ -9,5 +9,13 @@
   <dt>飞书</dt><dd>{{ "已配置" if feishu_configured else "未配置" }}</dd>
 </dl>
 <h2>运行店铺</h2>
-{% if store_summary.stores %}<ul>{% for store in store_summary.stores %}<li>{{ store.storeName }}（{{ store.storeId }}）</li>{% endfor %}</ul>{% else %}<p>未检测到运行店铺</p>{% endif %}
+{% if store_summary.stores %}
+<ul class="list">
+  {% for store in store_summary.stores %}
+  <li><span class="list-primary">{{ store.storeName }}</span><span class="text-secondary">{{ store.storeId }}</span></li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>未检测到运行店铺</p>
+{% endif %}
 {% endblock %}

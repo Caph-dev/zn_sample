@@ -31,6 +31,22 @@ TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
 
 
+def _latest_active_job(request: Request):
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        return None
+    try:
+        with session_factory() as session:
+            return session.scalar(
+                select(Job)
+                .where(Job.status.in_(("pending", "running")))
+                .order_by(Job.created_at.desc())
+                .limit(1)
+            )
+    except Exception:
+        return None
+
+
 def _base_context(request: Request) -> dict:
     from assistant.app import application_version
 
@@ -38,7 +54,7 @@ def _base_context(request: Request) -> dict:
         "request": request,
         "app_name": "ZnSampleAssistant",
         "version": application_version(),
-        "csrf_token": request.state.session["csrf"],
+        "active_job": _latest_active_job(request),
     }
 
 
@@ -49,20 +65,71 @@ def _request_store_summary(request: Request) -> dict:
     return request_safe_store_summary(session_factory)
 
 
+def _debug_home_jobs(session_factory) -> None:
+    from lib.debug_log import debug_log
+
+    try:
+        with session_factory() as session:
+            active_jobs = session.scalars(
+                select(Job)
+                .where(Job.status.in_({"pending", "running"}))
+                .order_by(Job.created_at.desc())
+                .limit(5)
+            ).all()
+            latest_sync = session.scalar(
+                select(Job)
+                .where(Job.job_type == "shipment_sync")
+                .order_by(Job.created_at.desc())
+                .limit(1)
+            )
+        debug_log(
+            "home-render",
+            location="assistant/web/routes.py:home",
+            active_jobs=[
+                {
+                    "id": job.id,
+                    "type": job.job_type,
+                    "status": job.status,
+                    "progress": f"{job.progress_current}/{job.progress_total}",
+                }
+                for job in active_jobs
+            ],
+            latest_shipment_sync=(
+                {
+                    "id": latest_sync.id,
+                    "status": latest_sync.status,
+                    "finished_at": latest_sync.finished_at.isoformat()
+                    if latest_sync.finished_at
+                    else None,
+                }
+                if latest_sync
+                else None
+            ),
+        )
+    except Exception as exc:  # instrumentation must never break pages
+        debug_log(
+            "home-render-error",
+            location="assistant/web/routes.py:home",
+            error=str(exc),
+        )
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     context = _base_context(request)
+    session_factory = getattr(request.app.state, "session_factory", None)
     context.update(
         {
             "data_directory": redact_text(user_data_dir()),
             "database_ready": database_path().is_file(),
             "store_summary": _request_store_summary(request),
             "dashboard": (
-                dashboard_summary(request.app.state.session_factory)
-                if getattr(request.app.state, "session_factory", None) else {}
+                dashboard_summary(session_factory) if session_factory else {}
             ),
         }
     )
+    if session_factory is not None:
+        _debug_home_jobs(session_factory)
     return templates.TemplateResponse(request, "home.html", context)
 
 
@@ -129,13 +196,33 @@ def job_detail_page(job_id: str, request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "job_detail.html", context)
 
 
+@router.get("/jobs/{job_id}/status", response_class=HTMLResponse)
+def job_status_partial(job_id: str, request: Request) -> HTMLResponse:
+    """HTML partial for the htmx status poll on the job detail page."""
+    context = _base_context(request)
+    session_factory = getattr(request.app.state, "session_factory", None)
+    job = None
+    if session_factory is not None:
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+    if job is None:
+        return HTMLResponse("任务不存在", status_code=404)
+    context["job"] = job
+    return templates.TemplateResponse(request, "_job_status.html", context)
+
+
 @router.get("/shipments", response_class=HTMLResponse)
-def shipments_page(request: Request) -> HTMLResponse:
+def shipments_page(request: Request, status: str = "") -> HTMLResponse:
     context = _base_context(request)
     with request.app.state.session_factory() as session:
-        context["rows"] = session.execute(
-            select(Shipment, SampleCase).join(SampleCase, Shipment.sample_case_id == SampleCase.id)
-        ).all()
+        query = select(Shipment, SampleCase).join(
+            SampleCase,
+            Shipment.sample_case_id == SampleCase.id,
+        )
+        if status:
+            query = query.where(Shipment.status_category == status)
+        context["rows"] = session.execute(query).all()
+    context["shipment_filter"] = status
     return templates.TemplateResponse(request, "shipments.html", context)
 
 

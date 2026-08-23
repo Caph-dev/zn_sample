@@ -22,12 +22,14 @@ from scripts.lib.filters import ACTIVE_HERO_PRODUCT_ID
 
 
 class FollowupService:
-    def __init__(self, session_factory, *, warning=None) -> None:
+    def __init__(self, session_factory, *, warning=None, cancel_check=None) -> None:
         self.session_factory = session_factory
         self.warning = warning or (lambda message: None)
+        self.cancel_check = cancel_check or (lambda: None)
 
     def generate(self, now: datetime | None = None) -> dict:
         self._hydrate_from_latest_export()
+        self.cancel_check()
         effective_now = beijing_now(now)
         created = 0
         with self.session_factory() as session:
@@ -35,6 +37,7 @@ class FollowupService:
             for sample_case in cases:
                 if sample_case.product_id != ACTIVE_HERO_PRODUCT_ID:
                     continue
+                self.cancel_check()
                 shipment = session.scalar(
                     select(Shipment).where(Shipment.sample_case_id == sample_case.id)
                 )

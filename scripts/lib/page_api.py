@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .console import verbose_print
-from .zclaw import DEFAULT_EXEC_RETRIES, zclaw_exec
+from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, zclaw_exec
 
 AFFILIATE_HOST = "affiliate.tiktokshopglobalselling.com"
 SAMPLE_LIST_ENDPOINT = "/api/v1/affiliate/sample/group/list"
@@ -65,7 +65,8 @@ def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
     result = zclaw_exec(
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
-        retries=DEFAULT_EXEC_RETRIES,
+        timeout=HREF_PROBE_TIMEOUT_SECONDS,
+        retries=0,
     )
     if not isinstance(result, dict):
         raise PageApiError(f"无法读取当前页面 URL: {result!r}"[:300])
@@ -169,7 +170,8 @@ def get_seller_page_context(
     result = zclaw_exec(
         store_id,
         _SELLER_CONTEXT_JS,
-        retries=DEFAULT_EXEC_RETRIES,
+        timeout=HREF_PROBE_TIMEOUT_SECONDS,
+        retries=0,
     )
     if not isinstance(result, dict):
         raise PageApiError(f"无法读取当前商家页面 URL: {result!r}"[:300])

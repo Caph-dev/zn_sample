@@ -29,7 +29,7 @@ def dashboard_summary(session_factory) -> dict:
             return int(session.scalar(query) or 0)
 
         latest_jobs = {}
-        for job_type in ("shipment_sync", "followup_generate"):
+        for job_type in ("daily_refresh", "shipment_sync", "followup_generate"):
             job = session.scalar(
                 select(Job)
                 .where(Job.job_type == job_type)

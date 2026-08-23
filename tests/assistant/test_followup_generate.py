@@ -157,13 +157,10 @@ class FollowupGenerateTests(unittest.TestCase):
             session.add(FollowupTask(sample_case_id=shipped_case.id, stage="day_3", scheduled_for=datetime(2026, 8, 12).date(), status="pending", language="es"))
             session.commit()
             task_id = session.scalar(select(FollowupTask.id).where(FollowupTask.sample_case_id == processing_case.id))
-        app = create_app(runtime_directory=Path(self.temporary_directory.name) / "runtime", port=8765)
+        app = create_app(port=8765)
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-            token = app.state.session_manager.issue_bootstrap_token()
-            client.get(f"/bootstrap?token={token}", follow_redirects=False)
-            session_data = app.state.session_manager.read_session(client.cookies.get("zn_assistant_session"))
-            headers = {"Origin": "http://127.0.0.1:8765", "X-CSRF-Token": session_data["csrf"]}
+            headers = {"Origin": "http://127.0.0.1:8765"}
             filtered = client.get("/followups?stage=arrival&status=needs_review&language=en&curr_status=40")
             self.assertIn("visible_creator", filtered.text)
             self.assertNotIn("hidden_creator", filtered.text)

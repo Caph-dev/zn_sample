@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # 长跑后 execute_script 偶发 network 假阳性（doctor 仍绿）；批准前会探活+重试
 DEFAULT_EXEC_RETRIES = 4
 DEFAULT_EXEC_RETRY_BASE_SEC = 1.5
+# 跨域卸页时 execute_script 会卡住。href 探测必须短超时，且不得把这次
+# 超时算进外层等待预算，否则几次探测就会把 20–30s 窗口吃光。
+HREF_PROBE_TIMEOUT_SECONDS = 2
 
 
 def _parse_cli_json_blob(text: str) -> dict | None:

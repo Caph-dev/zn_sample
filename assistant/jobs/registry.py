@@ -6,9 +6,17 @@ from typing import Any
 
 
 JobHandler = Callable[[str, Any], str]
-ZINIAO_JOB_TYPES = frozenset({"environment_check", "shipment_sync"})
+ZINIAO_JOB_TYPES = frozenset(
+    {"environment_check", "shipment_sync", "daily_refresh"}
+)
 REGISTERED_JOB_TYPES = frozenset(
-    {"environment_check", "shipment_sync", "followup_generate", "report_export"}
+    {
+        "environment_check",
+        "shipment_sync",
+        "followup_generate",
+        "report_export",
+        "daily_refresh",
+    }
 )
 
 
@@ -39,4 +47,7 @@ def get_handler(job_type: str) -> JobHandler | None:
     if job_type == "report_export":
         from assistant.jobs.handlers.report_export import run_report_export
         return run_report_export
+    if job_type == "daily_refresh":
+        from assistant.jobs.handlers.daily_refresh import run_daily_refresh
+        return run_daily_refresh
     return None

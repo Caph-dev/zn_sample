@@ -12,6 +12,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .debug_log import debug_log
 from .sample_dom import click_next
 from .sample_navigation import ensure_sample_request_context
 from .zclaw import zclaw_exec
@@ -45,7 +46,12 @@ ENSURE_SHIPPED_TAB_JS = r"""
   }
   const tab = titles.find(e => /已发货|Shipped/i.test((e.innerText || '').trim()));
   if (!tab) {
-    return JSON.stringify({ok: false, reason: 'no-shipped-tab', href: location.href});
+    return JSON.stringify({
+      ok: false,
+      reason: 'no-shipped-tab',
+      href: location.href,
+      titles: titles.map(e => ((e.innerText || '').trim().replace(/\s+/g, ' ')).slice(0, 40)),
+    });
   }
   tab.click();
   return JSON.stringify({
@@ -153,20 +159,60 @@ def ensure_sample_page_loaded(store_id: str, *, page_wait: float = 2.0) -> dict[
     }
 
 
-def ensure_on_sample_page(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
-    """若已在样品申请域则只切 tab；否则跳到样品申请并等到 shop_id。"""
+def ensure_on_sample_page(
+    store_id: str,
+    *,
+    page_wait: float = 2.0,
+    retries: int = 4,
+) -> dict[str, Any]:
+    """若已在样品申请域则只切 tab；否则跳到样品申请并等到 shop_id。
+
+    样品申请页先渲染外层「免费样品 / 买返样品」，内层「已发货」稍后才挂上。
+    因此对 ``no-shipped-tab`` 按待审核 tab 同样的方式重试，而不是一次失败就退出。
+    """
     ensure_sample_request_context(
         store_id,
         force_reload=False,
         navigation_timeout=max(20.0, page_wait + 15.0),
         poll_interval=max(0.5, min(2.0, page_wait)),
     )
-    tab = zclaw_exec(store_id, ENSURE_SHIPPED_TAB_JS)
-    if not isinstance(tab, dict) or not tab.get("ok"):
-        raise RuntimeError(f"无法切到「已发货」tab: {tab}")
-    if tab.get("clicked"):
-        time.sleep(page_wait)
-    return tab
+    attempts = max(1, int(retries) + 1)
+    tab: dict | Any = {}
+    for attempt in range(attempts):
+        tab = zclaw_exec(store_id, ENSURE_SHIPPED_TAB_JS)
+        # region agent log
+        debug_log(
+            "ensure-shipped-tab",
+            location="scripts/lib/shipped_dom.py:ensure_on_sample_page",
+            hypothesisId="H1",
+            attempt=attempt + 1,
+            attempts=attempts,
+            ok=bool(isinstance(tab, dict) and tab.get("ok")),
+            reason=str((tab or {}).get("reason") or "") if isinstance(tab, dict) else type(tab).__name__,
+            titles=(tab or {}).get("titles") if isinstance(tab, dict) else None,
+            href=str((tab or {}).get("href") or "")[:180] if isinstance(tab, dict) else "",
+        )
+        # endregion
+        if isinstance(tab, dict) and tab.get("ok"):
+            if tab.get("clicked"):
+                time.sleep(page_wait)
+            return tab
+
+        page_is_still_loading = bool(
+            isinstance(tab, dict)
+            and tab.get("reason") == "no-shipped-tab"
+            and "sample-request" in str(tab.get("href") or "")
+        )
+        if page_is_still_loading and attempt + 1 < attempts:
+            logger.info(
+                "[已发货] 内层 tab 尚未渲染，等待后重试 "
+                f"({attempt + 1}/{attempts}) href={str(tab.get('href') or '')[:90]}"
+            )
+            time.sleep(max(1.0, page_wait))
+            continue
+        break
+
+    raise RuntimeError(f"无法切到「已发货」tab: {tab}")
 
 
 def scrape_shipped_list(

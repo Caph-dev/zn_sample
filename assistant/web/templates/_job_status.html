@@ -1,0 +1,10 @@
+{% import "_ui.html" as ui %}
+{% set job_tones = {"pending": "warning", "running": "info", "succeeded": "success", "failed": "error", "cancelled": "neutral", "interrupted": "neutral"} %}
+{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出"} %}
+{% set status_labels = {"pending": "等待执行", "running": "正在执行", "succeeded": "已完成", "failed": "执行失败", "cancelled": "已取消", "interrupted": "已中断"} %}
+<dl class="metadata">
+  <dt>任务</dt><dd>{{ job_labels.get(job.job_type, job.job_type) }}</dd>
+  <dt>状态</dt><dd>{{ ui.status_token(status_labels.get(job.status, job.status), job_tones.get(job.status, 'neutral')) }}</dd>
+  <dt>进度</dt><dd>{% if job.progress_total %}{{ job.progress_current }}/{{ job.progress_total }}{% else %}等待任务开始{% endif %}</dd>
+  <dt>当前步骤</dt><dd>{{ job.progress_message or "等待任务开始" }}</dd>
+</dl>

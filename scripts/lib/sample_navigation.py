@@ -9,8 +9,9 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
+from .debug_log import debug_log
 from .sample_dom import assert_on_pending_list
-from .zclaw import zclaw_exec
+from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, zclaw_exec
 
 SAMPLE_REQUEST_URL = (
     "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
@@ -125,12 +126,12 @@ def current_page_href(
     store_id: str,
     *,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
-    timeout: float = 5.0,
+    timeout: float = HREF_PROBE_TIMEOUT_SECONDS,
 ) -> str:
     result = execute_script_fn(
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
-        timeout=max(3, int(timeout)),
+        timeout=max(1, int(timeout)),
         retries=0,
     )
     if isinstance(result, dict):
@@ -185,24 +186,68 @@ def navigate_to_url(
     except Exception:
         current_href = ""
     if href_matches(current_href):
+        # region agent log
+        debug_log(
+            "navigate-already",
+            location="scripts/lib/sample_navigation.py:navigate_to_url",
+            hypothesisId="H-nav",
+            from_href=current_href[:180],
+            target_url=url[:180],
+        )
+        # endregion
         return {"ok": True, "href": current_href, "already": True, "target_url": url}
 
     navigator = navigate_page_fn or schedule_page_navigation
+    # region agent log
+    debug_log(
+        "navigate-start",
+        location="scripts/lib/sample_navigation.py:navigate_to_url",
+        hypothesisId="H-nav",
+        from_href=current_href[:180],
+        target_url=url[:180],
+        timeout=timeout,
+    )
+    # endregion
     navigator(
         store_id,
         url,
         execute_script_fn=execute_script_fn,
     )
     # 跨域跳转会卸页；立刻 execute_script 常卡死并把整段等待吃掉。
-    if timeout >= 5:
-        time.sleep(max(0.8, min(2.0, poll_interval * 2)))
-    arrived_href = wait_for_page_href(
-        store_id,
-        href_matches,
-        timeout=timeout,
-        poll_interval=poll_interval,
-        execute_script_fn=execute_script_fn,
+    # 样品申请 → seller.us 实测约 2.5s 后 href 才变成订单页，先硬等再轮询。
+    settle_seconds = max(2.0, min(3.5, poll_interval * 4)) if timeout >= 5 else max(0.2, poll_interval)
+    time.sleep(settle_seconds)
+    try:
+        arrived_href = wait_for_page_href(
+            store_id,
+            href_matches,
+            timeout=max(1.0, timeout - settle_seconds),
+            poll_interval=poll_interval,
+            execute_script_fn=execute_script_fn,
+        )
+    except Exception as error:
+        # region agent log
+        debug_log(
+            "navigate-fail",
+            location="scripts/lib/sample_navigation.py:navigate_to_url",
+            hypothesisId="H-nav",
+            from_href=current_href[:180],
+            target_url=url[:180],
+            error_type=type(error).__name__,
+            error=str(error)[:400],
+        )
+        # endregion
+        raise
+    # region agent log
+    debug_log(
+        "navigate-ok",
+        location="scripts/lib/sample_navigation.py:navigate_to_url",
+        hypothesisId="H-nav",
+        from_href=current_href[:180],
+        arrived_href=arrived_href[:180],
+        target_url=url[:180],
     )
+    # endregion
     return {
         "ok": True,
         "href": arrived_href,
@@ -219,11 +264,16 @@ def wait_for_page_href(
     poll_interval: float = 0.5,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
 ) -> str:
-    """短轮询当前 href，直到命中目标页。不使用阻塞 visit_page。"""
-    deadline = time.monotonic() + max(1.0, timeout)
+    """短轮询当前 href，直到命中目标页。不使用阻塞 visit_page。
+
+    跨域卸页时 execute_script 常超时。探测超时不计入等待预算，
+    否则几次 2s 超时就会把 30s 窗口吃光，而页面其实已经到了。
+    """
+    remaining = max(1.0, float(timeout))
     last_href = ""
     last_error = ""
-    while time.monotonic() < deadline:
+    while remaining > 0:
+        started_at = time.monotonic()
         try:
             last_href = current_page_href(
                 store_id,
@@ -231,8 +281,12 @@ def wait_for_page_href(
             )
         except Exception as error:
             last_error = str(error)
+            last_href = ""
             time.sleep(max(0.2, poll_interval))
             continue
+        remaining -= time.monotonic() - started_at
+        if remaining <= 0:
+            break
         if is_ziniao_navigation_error_href(last_href):
             raise RuntimeError(
                 "订单页跳转被紫鸟拦截，停在 error.html；"
@@ -319,7 +373,7 @@ def _wait_for_sample_request_destination(
             candidate_state = execute_script_fn(
                 store_id,
                 INSPECT_NAVIGATION_PAGE_JS,
-                timeout=15,
+                timeout=HREF_PROBE_TIMEOUT_SECONDS,
                 retries=0,
             )
         except Exception as error:
@@ -435,7 +489,7 @@ def navigate_from_seller_home_to_pending(
             candidate_readiness = execute_script_fn(
                 store_id,
                 INSPECT_PENDING_LIST_READINESS_JS,
-                timeout=15,
+                timeout=HREF_PROBE_TIMEOUT_SECONDS,
                 retries=0,
             )
         except Exception:

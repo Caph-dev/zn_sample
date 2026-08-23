@@ -1,26 +1,78 @@
 {% extends "base.html" %}
+{% import "_ui.html" as ui %}
 {% block content %}
-<h1>样品跟进操作台</h1>
-<dl>
+<header class="page-header">
+  <section>
+    <p class="eyebrow">今日工作台</p>
+    <h1>样品跟进操作台</h1>
+    <p class="workflow-description">先更新物流和到货状态，再生成今天要处理的跟进待办。</p>
+  </section>
+</header>
+<dl class="metadata">
   <dt>数据目录</dt><dd>{{ data_directory }}</dd>
   <dt>数据库</dt><dd>{{ "已打开" if database_ready else "待初始化" }}</dd>
   <dt>运行店铺</dt>
   <dd>{% if store_summary.ok %}{{ store_summary.store.storeName }}（{{ store_summary.store.storeId }}）{% else %}{{ store_summary.error }}{% endif %}</dd>
 </dl>
-<nav><a href="/shipments">物流</a> · <a href="/followups">跟进待办</a> · <a href="/reports">CSV 报表</a> · <a href="/jobs">任务</a></nav>
+<section class="workflow-panel">
+  <p class="eyebrow">推荐操作</p>
+  <h2>开始今日更新</h2>
+  <p class="workflow-description">系统会先读取物流并判断实际到货日，再按 SOP2 生成 D0、D+3、D+7、D+10 和 D+15 的本地待办。</p>
+  <form method="post" action="/api/jobs/daily-refresh" data-job-form data-job-label="今日更新">
+    <button type="submit" class="button--primary">开始今日更新</button>
+  </form>
+  {% call ui.banner('info') %}这是只读更新：不会批准申请、不会写飞书、不会发送私信。{% endcall %}
+</section>
 <section>
-  <h2>只读同步与预览</h2>
-  <form method="post" action="/api/jobs/shipment-sync"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>同步物流（只读）</button></form>
-  <form method="post" action="/api/jobs/followup-generate"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>生成待办预览</button></form>
-  <p>飞书合作状态：未同步；不会发送私信。</p>
+  <h2>单独操作</h2>
+  <ul class="action-list">
+    <li>
+      <form method="post" action="/api/jobs/shipment-sync" data-job-form data-job-label="物流同步">
+        <button type="submit" class="button--secondary">只同步物流</button>
+      </form>
+      <p>只更新物流和到货状态，不生成新的跟进待办。</p>
+    </li>
+    <li>
+      <form method="post" action="/api/jobs/followup-generate" data-job-form data-job-label="跟进待办生成">
+        <button type="submit" class="button--secondary">只生成跟进待办</button>
+      </form>
+      <p>使用本地已有物流数据，重新整理今天的待办和话术预览。</p>
+    </li>
+    <li>
+      <a class="button-link button-link--secondary" href="/reports">导出报表</a>
+      <p>导出今日待办、D+10 名单、物流异常或人工确认清单。</p>
+    </li>
+  </ul>
 </section>
 {% if dashboard %}
-<section><h2>概览</h2><ul>
-  <li>等待送达：{{ dashboard.waiting_delivery }}</li><li>D0：{{ dashboard.arrival }}</li>
-  <li>D+3：{{ dashboard.day_3 }}</li><li>D+7：{{ dashboard.day_7 }}</li>
-  <li>D+10 名单：{{ dashboard.day_10_list }}</li><li>D+15 未发布：{{ dashboard.unfulfilled }}</li>
-  <li>物流异常：{{ dashboard.logistics_exceptions }}</li><li>需要人工确认：{{ dashboard.needs_review }}</li><li>失败任务：{{ dashboard.failed_jobs }}</li>
-</ul></section>
-<section><h2>最近任务</h2><ul>{% for job_type, job in dashboard.latest_jobs.items() %}<li>{{ job_type }}：{% if job %}{{ job.status }}（{{ job.finished_at or job.created_at }}）{% else %}尚未运行{% endif %}</li>{% endfor %}</ul></section>
+{% set job_tones = {"pending": "warning", "running": "info", "succeeded": "success", "failed": "error", "cancelled": "neutral", "interrupted": "neutral"} %}
+{% set job_status_labels = {"pending": "等待执行", "running": "正在执行", "succeeded": "已完成", "failed": "执行失败", "cancelled": "已取消", "interrupted": "已中断"} %}
+{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出"} %}
+<section>
+  <h2>今日待处理</h2>
+  <ul class="queue-list">
+    <li><a href="/shipments"><span>等待确认送达或仍在运输</span><span class="queue-count">{{ dashboard.waiting_delivery }}</span></a></li>
+    <li><a href="/followups?stage=arrival"><span>今日到货提醒</span><span class="queue-count">{{ dashboard.arrival }}</span></a></li>
+    <li><a href="/followups?stage=day_3"><span>D+3 跟进</span><span class="queue-count">{{ dashboard.day_3 }}</span></a></li>
+    <li><a href="/followups?stage=day_7"><span>D+7 跟进</span><span class="queue-count">{{ dashboard.day_7 }}</span></a></li>
+    <li><a href="/followups?stage=day_10_list"><span>D+10 只出名单</span><span class="queue-count">{{ dashboard.day_10_list }}</span></a></li>
+    <li><a href="/followups?stage=unfulfilled"><span>D+15 未发布</span><span class="queue-count">{{ dashboard.unfulfilled }}</span></a></li>
+    <li><a href="/followups?status=needs_review"><span>需要人工确认</span>{{ ui.status_token(dashboard.needs_review, 'warning' if dashboard.needs_review else 'neutral') }}</a></li>
+    <li><a href="/shipments"><span>物流异常</span>{{ ui.status_token(dashboard.logistics_exceptions, 'error' if dashboard.logistics_exceptions else 'neutral') }}</a></li>
+    <li><a href="/jobs"><span>失败任务</span>{{ ui.status_token(dashboard.failed_jobs, 'error' if dashboard.failed_jobs else 'neutral') }}</a></li>
+  </ul>
+</section>
+<section>
+  <h2>最近任务</h2>
+  {% if dashboard.latest_jobs %}
+  <ul class="list">
+    {% for job_type, job in dashboard.latest_jobs.items() %}
+    <li><span class="list-primary">{{ job_labels.get(job_type, job_type) }}</span>{% if job %}{{ ui.status_token(job_status_labels.get(job.status, job.status), job_tones.get(job.status, 'neutral')) }}<span class="text-secondary">{{ job.finished_at or job.created_at }}</span>{% else %}<span class="text-secondary">尚未运行</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  {{ ui.empty_state('尚未运行任何任务') }}
+  {% endif %}
+</section>
 {% endif %}
 {% endblock %}

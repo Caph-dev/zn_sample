@@ -6,7 +6,6 @@ import os
 
 APP_NAME = "ZnSampleAssistant"
 BIND_HOST = "127.0.0.1"
-SESSION_COOKIE = "zn_assistant_session"
 DEFAULT_PORT = 8765
 
 

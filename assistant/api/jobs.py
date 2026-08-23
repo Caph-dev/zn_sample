@@ -57,6 +57,18 @@ def create_environment_check(request: Request, store_id: str | None = None) -> d
     return {"job_id": job_id, "deduplicated": deduplicated}
 
 
+@router.post("/api/jobs/daily-refresh")
+def create_daily_refresh(request: Request) -> dict:
+    """Create the salesperson-facing read-only daily update job."""
+    session_factory = _session_factory(request)
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type="daily_refresh",
+        store_id=None,
+    )
+    return {"job_id": job_id, "deduplicated": deduplicated}
+
+
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, request: Request) -> dict:
     session_factory = _session_factory(request)
@@ -101,6 +113,9 @@ def stream_job(job_id: str, request: Request, after: int = 0) -> StreamingRespon
     with session_factory() as session:
         if session.get(Job, job_id) is None:
             raise HTTPException(status_code=404, detail="job-not-found")
+    last_event_id = request.headers.get("last-event-id", "").strip()
+    if last_event_id.isdigit():
+        after = max(after, int(last_event_id))
 
     def event_stream():
         latest_sequence = max(0, after)
@@ -111,8 +126,11 @@ def stream_job(job_id: str, request: Request, after: int = 0) -> StreamingRespon
                 safe_data = {
                     "sequence": latest_sequence,
                     "level": event["level"],
+                    "event_type": event["event_type"],
                     "message": event["message"],
+                    "created_at": event["created_at"],
                 }
+                yield f"id: {latest_sequence}\n"
                 yield (
                     f"event: {event['event_type']}\n"
                     f"data: {json.dumps(safe_data, ensure_ascii=False)}\n\n"
@@ -126,4 +144,11 @@ def stream_job(job_id: str, request: Request, after: int = 0) -> StreamingRespon
                 yield ": keepalive\n\n"
             time.sleep(0.2)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

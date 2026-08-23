@@ -25,17 +25,12 @@ class ApplicationSkeletonTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
-        self.app = create_app(runtime_directory=self.root / "runtime", port=8765)
+        self.app = create_app(port=8765)
         self.client = TestClient(self.app, base_url="http://127.0.0.1:8765")
 
     def tearDown(self) -> None:
         self.client.close()
         self.temporary_directory.cleanup()
-
-    def authenticate(self) -> None:
-        token = self.app.state.session_manager.issue_bootstrap_token()
-        response = self.client.get(f"/bootstrap?token={token}", follow_redirects=False)
-        self.assertEqual(response.status_code, 302)
 
     def test_health_is_public_and_contains_no_secret(self) -> None:
         response = self.client.get("/api/health")
@@ -43,16 +38,17 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertTrue(response.json()["ok"])
         self.assertNotIn("secret", response.text.lower())
 
-    def test_home_requires_session_then_renders_after_bootstrap(self) -> None:
-        self.assertEqual(self.client.get("/").status_code, 401)
-        self.authenticate()
+    def test_home_renders_without_bootstrap(self) -> None:
         with patch("lib.zclaw.list_running_stores", return_value=[]):
             response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("ZnSampleAssistant", response.text)
+        self.assertIn('action="/api/jobs/daily-refresh"', response.text)
+        self.assertIn("开始今日更新", response.text)
+        self.assertIn("/static/app.js", response.text)
+        self.assertIn('data-theme="light"', response.text)
 
     def test_stores_never_choose_a_default(self) -> None:
-        self.authenticate()
         with patch(
             "lib.zclaw.list_running_stores",
             return_value=[
@@ -74,7 +70,6 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertNotEqual(response.json()["store"]["storeId"], "27506607043054")
 
     def test_diagnostics_never_render_configuration_values(self) -> None:
-        self.authenticate()
         with (
             patch("lib.zclaw.list_running_stores", return_value=[]) as list_stores,
             patch("lib.zclaw_cli.resolve_ziniao_cli_command", return_value=["node", "run.js"]),
@@ -92,7 +87,6 @@ class ApplicationSkeletonTests(unittest.TestCase):
         list_stores.assert_called_once_with()
 
     def test_diagnostics_reports_bridge_unavailable_without_retrying(self) -> None:
-        self.authenticate()
         with (
             patch(
                 "lib.zclaw.list_running_stores",
@@ -227,8 +221,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertFalse((self.root / "runtime" / "state.json").exists())
 
     def test_lifecycle_releases_created_resources_when_worker_start_fails(self) -> None:
-        session_manager = MagicMock()
-        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        application = MagicMock()
         database_engine = MagicMock()
         session_factory = object()
         with (
@@ -248,42 +241,11 @@ class ApplicationSkeletonTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "worker-start-failed"):
                 run_assistant(uvicorn_runner=MagicMock())
         database_engine.dispose.assert_called_once_with()
-        session_manager.cleanup.assert_called_once_with()
-        self.assertFalse((self.root / "runtime" / "instance.lock").exists())
-        self.assertFalse((self.root / "runtime" / "state.json").exists())
-
-    def test_lifecycle_releases_resources_when_token_issue_fails(self) -> None:
-        session_manager = MagicMock()
-        session_manager.issue_bootstrap_token.side_effect = RuntimeError(
-            "token-issue-failed"
-        )
-        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
-        database_engine = MagicMock()
-        worker_controller = MagicMock()
-        session_factory = object()
-        with (
-            patch("assistant.lifecycle.sys.platform", "win32"),
-            patch("assistant.lifecycle.ensure_user_dirs", return_value=self.root),
-            patch("assistant.lifecycle.choose_available_port", return_value=8765),
-            patch("assistant.lifecycle.create_app", return_value=application),
-            patch("assistant.lifecycle.create_database_engine", return_value=database_engine),
-            patch("assistant.lifecycle.Base.metadata.create_all"),
-            patch("assistant.lifecycle.sessionmaker", return_value=session_factory),
-            patch("assistant.lifecycle.install_ziniao_busy_guard"),
-            patch("assistant.lifecycle.start_worker", return_value=worker_controller),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "token-issue-failed"):
-                run_assistant(uvicorn_runner=MagicMock())
-        worker_controller.stop.assert_called_once_with(timeout=5.0)
-        database_engine.dispose.assert_called_once_with()
-        session_manager.cleanup.assert_called_once_with()
         self.assertFalse((self.root / "runtime" / "instance.lock").exists())
         self.assertFalse((self.root / "runtime" / "state.json").exists())
 
     def test_lifecycle_releases_resources_when_state_write_fails(self) -> None:
-        session_manager = MagicMock()
-        session_manager.issue_bootstrap_token.return_value = "test-token"
-        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        application = MagicMock()
         database_engine = MagicMock()
         worker_controller = MagicMock()
         session_factory = object()
@@ -303,7 +265,6 @@ class ApplicationSkeletonTests(unittest.TestCase):
                 run_assistant(uvicorn_runner=MagicMock())
         worker_controller.stop.assert_called_once_with(timeout=5.0)
         database_engine.dispose.assert_called_once_with()
-        session_manager.cleanup.assert_called_once_with()
         self.assertFalse((self.root / "runtime" / "instance.lock").exists())
         self.assertFalse((self.root / "runtime" / "state.json").exists())
 
@@ -323,13 +284,11 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertFalse((self.root / "runtime" / "state.json").exists())
 
     def test_cleanup_failure_does_not_prevent_later_cleanup_steps(self) -> None:
-        session_manager = MagicMock()
-        application = MagicMock(state=SimpleNamespace(session_manager=session_manager))
+        application = MagicMock()
         database_engine = MagicMock()
         worker_controller = MagicMock()
         worker_controller.stop.side_effect = RuntimeError("worker-stop-failed")
         database_engine.dispose.side_effect = RuntimeError("engine-dispose-failed")
-        session_manager.cleanup.side_effect = RuntimeError("session-cleanup-failed")
         session_factory = object()
         with (
             patch("assistant.lifecycle.sys.platform", "win32"),
@@ -347,7 +306,6 @@ class ApplicationSkeletonTests(unittest.TestCase):
             self.assertEqual(run_assistant(uvicorn_runner=MagicMock()), 0)
         worker_controller.stop.assert_called_once_with(timeout=5.0)
         database_engine.dispose.assert_called_once_with()
-        session_manager.cleanup.assert_called_once_with()
         self.assertFalse((self.root / "runtime" / "instance.lock").exists())
         self.assertFalse((self.root / "runtime" / "state.json").exists())
 

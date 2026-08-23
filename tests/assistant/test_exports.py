@@ -116,19 +116,16 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(exported_row["curr_status"], "40")
             engine.dispose()
 
-    def test_json_and_form_job_creation_and_csrf_contract(self) -> None:
+    def test_json_and_form_job_creation_and_origin_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             engine = create_database_engine(root / "test.sqlite3")
             Base.metadata.create_all(engine)
             factory = sessionmaker(bind=engine, expire_on_commit=False)
-            app = create_app(runtime_directory=root / "runtime", port=8765)
+            app = create_app(port=8765)
             app.state.session_factory = factory
             with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-                token = app.state.session_manager.issue_bootstrap_token()
-                client.get(f"/bootstrap?token={token}", follow_redirects=False)
-                session_data = app.state.session_manager.read_session(client.cookies.get("zn_assistant_session"))
-                headers = {"Origin": "http://127.0.0.1:8765", "X-CSRF-Token": session_data["csrf"]}
+                headers = {"Origin": "http://127.0.0.1:8765"}
                 self.assertEqual(client.post("/api/jobs/report-export", json={"kind": "today"}).status_code, 403)
                 json_response = client.post("/api/jobs/report-export", json={"kind": "today"}, headers=headers)
                 form_response = client.post("/api/jobs/report-export", data={"kind": "needs_review"}, headers=headers)
@@ -168,18 +165,10 @@ class ExportTests(unittest.TestCase):
                     claimed_result_summaries.append(claimed_job.result_summary)
                 return job_id, deduplicated
 
-            app = create_app(runtime_directory=root / "runtime", port=8765)
+            app = create_app(port=8765)
             app.state.session_factory = factory
             with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-                token = app.state.session_manager.issue_bootstrap_token()
-                client.get(f"/bootstrap?token={token}", follow_redirects=False)
-                session_data = app.state.session_manager.read_session(
-                    client.cookies.get("zn_assistant_session")
-                )
-                headers = {
-                    "Origin": "http://127.0.0.1:8765",
-                    "X-CSRF-Token": session_data["csrf"],
-                }
+                headers = {"Origin": "http://127.0.0.1:8765"}
                 with patch.object(
                     exports_api,
                     "create_or_get_pending_job",
@@ -246,10 +235,8 @@ class ExportTests(unittest.TestCase):
             external.write_text("private", encoding="utf-8")
             escaping_symlink = canonical_directory / "escaping.csv"
             escaping_symlink.symlink_to(external)
-            app = create_app(runtime_directory=root / "runtime", port=8765)
+            app = create_app(port=8765)
             with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-                token = app.state.session_manager.issue_bootstrap_token()
-                client.get(f"/bootstrap?token={token}", follow_redirects=False)
                 with patch("assistant.paths.user_data_dir", return_value=root / "user"):
                     self.assertEqual(client.get("/api/exports/download", params={"filename": "allowed.csv"}).status_code, 200)
                     self.assertEqual(client.get("/api/exports/download", params={"path": str(external)}).status_code, 404)

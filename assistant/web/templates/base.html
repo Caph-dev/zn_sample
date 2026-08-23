@@ -1,15 +1,52 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-astryx-theme="geist" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ app_name }}</title>
+  <link rel="preload" href="/static/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/geist-theme.css">
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <header><strong>{{ app_name }}</strong> <small>{{ version }}</small></header>
-  <nav><a href="/">首页</a> <a href="/diagnostics">诊断</a></nav>
-  <main>{% block content %}{% endblock %}</main>
+  <header class="topnav">
+    <div class="topnav-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">Z</span>
+        <strong>{{ app_name }}</strong>
+        <small>{{ version }}</small>
+      </a>
+      <nav class="nav-links" aria-label="主导航">
+        <a href="/" {% if request.url.path == "/" %}class="is-active"{% endif %}>工作台</a>
+        <a href="/shipments" {% if request.url.path.startswith("/shipments") %}class="is-active"{% endif %}>物流</a>
+        <a href="/followups" {% if request.url.path.startswith("/followups") %}class="is-active"{% endif %}>跟进</a>
+        <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="is-active"{% endif %}>任务</a>
+        <a href="/reports" {% if request.url.path.startswith("/reports") %}class="is-active"{% endif %}>报表</a>
+        <a href="/diagnostics" {% if request.url.path.startswith("/diagnostics") %}class="is-active"{% endif %}>诊断</a>
+      </nav>
+    </div>
+  </header>
+  <main class="content">
+    <section class="task-panel" data-task-panel data-task-restore-job="{% if active_job %}{{ active_job.id }}{% endif %}" hidden aria-live="polite">
+      <header class="task-panel-header">
+        <p class="eyebrow">正在处理</p>
+        <h2 data-task-title>后台任务</h2>
+        <span data-task-status class="token token--neutral">
+          <span class="status-dot status-dot--neutral"></span>等待执行
+        </span>
+        <form method="post" action="/api/jobs/placeholder/cancel" data-job-cancel data-job-id="">
+          <button type="submit" class="button--destructive" hidden>取消</button>
+        </form>
+      </header>
+      <p class="task-progress-message" data-task-progress-message>任务即将开始</p>
+      <progress class="task-progress-bar" data-task-progress max="1" value="0" hidden></progress>
+      <p class="task-progress-text" data-task-progress-text>等待任务开始</p>
+      <ol class="task-events" data-task-events aria-label="任务执行过程"></ol>
+      <section class="task-result" data-task-result aria-live="polite"></section>
+    </section>
+    {% block content %}{% endblock %}
+  </main>
 </body>
 </html>

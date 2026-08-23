@@ -11,6 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from lib.sample_navigation import (  # noqa: E402
     INSPECT_NAVIGATION_PAGE_JS,
     SAMPLE_REQUEST_URL,
+    current_page_href,
     ensure_sample_request_context,
     is_sample_request_href,
     is_seller_order_href,
@@ -149,6 +150,34 @@ class SampleNavigationValidationTests(unittest.TestCase):
 
 
 class SampleNavigationFlowTests(unittest.TestCase):
+    def test_href_probes_use_short_timeout_constant(self) -> None:
+        from inspect import signature
+
+        from lib.page_api import get_affiliate_page_context, get_seller_page_context
+        from lib.zclaw import HREF_PROBE_TIMEOUT_SECONDS
+
+        self.assertEqual(HREF_PROBE_TIMEOUT_SECONDS, 2)
+        self.assertEqual(
+            signature(current_page_href).parameters["timeout"].default,
+            HREF_PROBE_TIMEOUT_SECONDS,
+        )
+        self.assertIn(
+            "HREF_PROBE_TIMEOUT_SECONDS",
+            get_affiliate_page_context.__code__.co_names,
+        )
+        self.assertIn(
+            "HREF_PROBE_TIMEOUT_SECONDS",
+            get_seller_page_context.__code__.co_names,
+        )
+        navigation_source = Path(
+            PROJECT_ROOT / "scripts/lib/sample_navigation.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("timeout=15", navigation_source)
+        self.assertGreaterEqual(
+            navigation_source.count("timeout=HREF_PROBE_TIMEOUT_SECONDS"),
+            2,
+        )
+
     def test_scheduled_navigation_returns_before_location_change(self) -> None:
         execute_script = Mock(return_value={"ok": True, "scheduled": True})
 
@@ -369,6 +398,48 @@ class SampleNavigationFlowTests(unittest.TestCase):
         )
         self.assertEqual(arrived, order_href)
         self.assertEqual(execute.call_count, 2)
+
+    def test_wait_for_page_href_does_not_treat_stale_href_after_timeout(self) -> None:
+        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+        execute = Mock(
+            side_effect=[
+                {"href": SAMPLE_HREF},
+                RuntimeError("timed out after 2 seconds"),
+                {"href": order_href},
+            ]
+        )
+        arrived = wait_for_page_href(
+            "store-two",
+            is_seller_order_href,
+            timeout=1,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+        self.assertEqual(arrived, order_href)
+        self.assertEqual(execute.call_count, 3)
+
+    @patch("lib.sample_navigation.time.sleep")
+    def test_wait_for_page_href_does_not_spend_budget_on_probe_timeouts(
+        self,
+        _sleep,
+    ) -> None:
+        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+        execute = Mock(
+            side_effect=[
+                RuntimeError("timed out after 2 seconds"),
+                RuntimeError("timed out after 2 seconds"),
+                {"href": order_href},
+            ]
+        )
+        arrived = wait_for_page_href(
+            "store-two",
+            is_seller_order_href,
+            timeout=0.5,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+        self.assertEqual(arrived, order_href)
+        self.assertEqual(execute.call_count, 3)
 
     def test_already_on_sample_page_skips_navigation(self) -> None:
         current_href = (

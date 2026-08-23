@@ -1,0 +1,20 @@
+{#
+Astryx 组件模式的 Jinja 复刻（配合 stone-theme.css 的 token 使用）：
+- Token + Status Dot：状态值带色点
+- Banner：页面级提示条
+- Empty State：空列表占位
+#}
+
+{% macro status_token(value, tone='neutral') -%}
+<span class="token token--{{ tone }}"><span class="status-dot status-dot--{{ tone }}"></span>{{ value }}</span>
+{%- endmacro %}
+
+{% macro banner(kind) -%}
+<div class="banner banner--{{ kind }}">{{ caller() }}</div>
+{%- endmacro %}
+
+{% macro empty_state(text) -%}
+<div class="empty-state">
+  <p>{{ text }}</p>
+</div>
+{%- endmacro %}

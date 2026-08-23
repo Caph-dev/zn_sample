@@ -1,12 +1,7 @@
-"""CSRF and local-origin validation helpers."""
+"""Loopback host and local-origin validation helpers."""
 from __future__ import annotations
 
-import secrets
 from urllib.parse import urlsplit
-
-
-def generate_csrf_token() -> str:
-    return secrets.token_urlsafe(32)
 
 
 def is_local_host(host: str) -> bool:

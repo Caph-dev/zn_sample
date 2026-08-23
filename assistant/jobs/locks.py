@@ -10,7 +10,6 @@ from sqlalchemy import select
 
 from assistant.database.models import Job, Store
 from assistant.security.csrf import is_local_host
-from assistant.settings import SESSION_COOKIE
 from assistant.jobs.registry import ZINIAO_JOB_TYPES
 
 
@@ -107,11 +106,6 @@ def install_ziniao_busy_guard(application, session_factory) -> None:
     async def guard_stores_during_ziniao_jobs(request: Request, call_next):
         is_stores_get = request.method == "GET" and request.url.path == "/api/stores"
         if not is_stores_get or not is_local_host(request.headers.get("host", "")):
-            return await call_next(request)
-        session = application.state.session_manager.read_session(
-            request.cookies.get(SESSION_COOKIE)
-        )
-        if session is None:
             return await call_next(request)
         if has_running_ziniao_job(session_factory):
             return JSONResponse(cached_store_busy_response(session_factory))

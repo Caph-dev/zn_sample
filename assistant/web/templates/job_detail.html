@@ -1,14 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>任务详情</h1>
-<section id="job-status" hx-get="/api/jobs/{{ job.id }}" hx-trigger="every 2s" hx-swap="innerHTML">
-  <p>类型：{{ job.job_type }}</p>
-  <p>状态：{{ job.status }}</p>
-  <p>进度：{{ job.progress_current }}/{{ job.progress_total }}</p>
-  <p>{{ job.progress_message }}</p>
+<section id="job-status" data-job-monitor data-job-id="{{ job.id }}" data-global-task-panel="false">
+  {% include "_job_status.html" %}
 </section>
-<form method="post" action="/api/jobs/{{ job.id }}/cancel">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <button type="submit">取消任务</button>
+<section>
+  <h2>执行过程</h2>
+  <ol class="task-events" data-job-events aria-label="任务执行过程"></ol>
+</section>
+<section class="task-result" data-job-result aria-live="polite"></section>
+{% if job.status in ["pending", "running"] %}
+<form method="post" action="/api/jobs/{{ job.id }}/cancel" data-job-cancel data-job-id="{{ job.id }}">
+  <button type="submit" class="button--destructive">取消这项任务</button>
 </form>
+{% endif %}
 {% endblock %}

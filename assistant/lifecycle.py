@@ -205,7 +205,7 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
     worker_controller = None
     try:
         port = choose_available_port(preferred_port())
-        application = create_app(runtime_directory=runtime_directory, port=port)
+        application = create_app(port=port)
         database_engine = create_database_engine(
             application_directory / "assistant.sqlite3"
         )
@@ -217,7 +217,6 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
         application.state.session_factory = session_factory
         install_ziniao_busy_guard(application, session_factory)
         worker_controller = start_worker(session_factory)
-        token = application.state.session_manager.issue_bootstrap_token()
         state_path.write_text(
             json.dumps(
                 {
@@ -228,9 +227,7 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
             ),
             encoding="utf-8",
         )
-        webbrowser.open(f"http://{BIND_HOST}:{port}/bootstrap?token={token}")
-        # The bootstrap credential travels in the first URL query, so access
-        # logging stays disabled to keep that one-time value out of logs.
+        webbrowser.open(f"http://{BIND_HOST}:{port}/")
         uvicorn_runner(
             application,
             host=BIND_HOST,
@@ -249,11 +246,6 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
                 database_engine.dispose()
             except Exception:
                 logger.exception("failed to dispose assistant database engine")
-        if application is not None:
-            try:
-                application.state.session_manager.cleanup()
-            except Exception:
-                logger.exception("failed to clean up assistant session manager")
         try:
             state_path.unlink(missing_ok=True)
         except Exception:

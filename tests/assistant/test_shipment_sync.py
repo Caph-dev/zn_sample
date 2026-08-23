@@ -66,6 +66,10 @@ class ShipmentSyncTests(unittest.TestCase):
         row = {"apply_id": "apply", "creator_id": "creator", "creator_name": "name", "product_id": "1732414717062320994", "main_order_id": "123456789012345", "fulfill_unit_ids": []}
         details = {"tracking_no": "track", "tracking_raw": "track", "carrier": "carrier", "status_label": "Delivered", "status_category": "delivered", "estimated_delivery_at": None, "delivered_at": None, "last_event_at": None, "last_event_text": "Delivered", "package_count": 1, "needs_delivery_time_confirmation": True, "raw_payload_hash": "hash", "via": "api"}
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[row]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[row]),
             patch("lib.order_api.fetch_tiktok_logistics_details_api", return_value=details),
@@ -102,6 +106,10 @@ class ShipmentSyncTests(unittest.TestCase):
         )
         warnings = []
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[first_row, second_row]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[]),
             patch(
@@ -181,6 +189,10 @@ class ShipmentSyncTests(unittest.TestCase):
 
         warnings = []
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[row]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[]),
             patch(
@@ -213,6 +225,10 @@ class ShipmentSyncTests(unittest.TestCase):
             order_id="not-an-order-id",
         )
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[row]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[]),
             patch("lib.order_api.fetch_tiktok_logistics_details_api") as fetch_details,
@@ -244,6 +260,10 @@ class ShipmentSyncTests(unittest.TestCase):
         )
         warnings = []
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[first_row, second_row]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[]),
             patch(
@@ -274,6 +294,10 @@ class ShipmentSyncTests(unittest.TestCase):
     def test_processing_schema_failure_never_uses_shipped_dom_fallback(self) -> None:
         warnings = []
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[]),
             patch("lib.sample_api.scrape_processing_list_api", side_effect=PageApiSchemaError("bad processing")),
             patch("lib.shipped_dom.scrape_shipped_list") as shipped_dom,
@@ -296,6 +320,10 @@ class ShipmentSyncTests(unittest.TestCase):
 
     def test_sync_service_has_no_clock_gate(self) -> None:
         with (
+            patch(
+                "lib.shipped_dom.ensure_sample_page_loaded",
+                return_value={"ok": True, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop&shop_region=US"},
+            ),
             patch("lib.sample_api.scrape_shipped_list_api", return_value=[]),
             patch("lib.sample_api.scrape_processing_list_api", return_value=[]),
         ):
@@ -312,11 +340,9 @@ class ShipmentSyncTests(unittest.TestCase):
             session.add(sample_case); session.flush()
             session.add(Shipment(sample_case_id=sample_case.id, tracking_display="tracking-visible", status_category="in_transit", needs_delivery_time_confirmation=False))
             session.commit()
-        app = create_app(runtime_directory=Path(self.temporary_directory.name) / "runtime", port=8765)
+        app = create_app(port=8765)
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-            token = app.state.session_manager.issue_bootstrap_token()
-            client.get(f"/bootstrap?token={token}", follow_redirects=False)
             response = client.get("/shipments")
         self.assertIn("未送达", response.text)
         self.assertNotIn("待确认送达日", response.text)

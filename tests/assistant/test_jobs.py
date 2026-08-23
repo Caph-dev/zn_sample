@@ -299,6 +299,43 @@ class JobWorkerTests(JobTestCase):
         probe.assert_called_once_with("store-custom")
         open_store.assert_not_called()
 
+    def test_daily_refresh_runs_logistics_then_followups(self) -> None:
+        job_id = self.add_job(job_type="daily_refresh")
+        store = {"storeId": "store-custom", "storeName": "Custom"}
+        with (
+            patch(
+                "assistant.jobs.handlers.daily_refresh.StoreService.resolve_unique_running_store",
+                return_value={"ok": True, "store": store},
+            ),
+            patch(
+                "assistant.jobs.handlers.daily_refresh.ShipmentService.synchronize_shipments",
+                return_value={"synchronized": 4, "changed": 2, "processing": 3},
+            ) as synchronize_shipments,
+            patch(
+                "assistant.jobs.handlers.daily_refresh.FollowupService.generate",
+                return_value={"created": 2},
+            ) as generate_followups,
+        ):
+            self.assertEqual(worker_loop_once(self.session_factory), job_id)
+
+        job = self.get_job(job_id)
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(
+            json.loads(job.result_summary),
+            {
+                "shipment": {"synchronized": 4, "changed": 2, "processing": 3},
+                "followup": {"created": 2},
+            },
+        )
+        synchronize_shipments.assert_called_once()
+        generate_followups.assert_called_once_with()
+        messages = [
+            event["message"]
+            for event in list_events(self.session_factory, job_id)
+        ]
+        self.assertIn("物流和到货状态已更新", messages)
+        self.assertIn("今日更新完成", messages)
+
     def test_cli_missing_fails_job(self) -> None:
         job_id = self.add_job()
         with patch(
@@ -314,6 +351,38 @@ class JobWorkerTests(JobTestCase):
         cancelled_job_id = self.add_job(status="cancelled")
         self.assertIsNone(worker_loop_once(self.session_factory))
         self.assertEqual(self.get_job(cancelled_job_id).status, "cancelled")
+
+    def test_shipment_sync_honours_running_cancellation_checkpoint(self) -> None:
+        job_id = self.add_job(job_type="shipment_sync")
+        request_cancellation(job_id)
+        try:
+            with (
+                patch("assistant.services.store_service.StoreService.resolve_unique_running_store",
+                      return_value={"ok": True, "store": {"storeId": "cancelled-store", "storeName": "C"}}),
+                patch("assistant.services.shipment_service.ShipmentService.synchronize_shipments") as sync,
+            ):
+                worker_loop_once(self.session_factory)
+            sync.assert_not_called()
+        finally:
+            clear_cancellation(job_id)
+        job = self.get_job(job_id)
+        self.assertEqual(job.status, "cancelled")
+
+    def test_daily_refresh_honours_running_cancellation_checkpoint(self) -> None:
+        job_id = self.add_job(job_type="daily_refresh")
+        request_cancellation(job_id)
+        try:
+            with (
+                patch("assistant.services.store_service.StoreService.resolve_unique_running_store",
+                      return_value={"ok": True, "store": {"storeId": "cancelled-store", "storeName": "C"}}),
+                patch("assistant.services.shipment_service.ShipmentService.synchronize_shipments") as sync,
+            ):
+                worker_loop_once(self.session_factory)
+            sync.assert_not_called()
+        finally:
+            clear_cancellation(job_id)
+        job = self.get_job(job_id)
+        self.assertEqual(job.status, "cancelled")
 
 
 class JobProgressTests(JobTestCase):
@@ -349,20 +418,10 @@ class JobProgressTests(JobTestCase):
 class JobApiTests(JobTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.app = create_app(runtime_directory=self.root / "runtime", port=8765)
+        self.app = create_app(port=8765)
         self.app.state.session_factory = self.session_factory
         install_ziniao_busy_guard(self.app, self.session_factory)
         self.client = TestClient(self.app, base_url="http://127.0.0.1:8765")
-        token = self.app.state.session_manager.issue_bootstrap_token()
-        response = self.client.get(
-            f"/bootstrap?token={token}",
-            follow_redirects=False,
-        )
-        self.assertEqual(response.status_code, 302)
-        session = self.app.state.session_manager.read_session(
-            self.client.cookies.get("zn_assistant_session")
-        )
-        self.csrf_token = session["csrf"]
 
     def tearDown(self) -> None:
         self.client.close()
@@ -371,10 +430,7 @@ class JobApiTests(JobTestCase):
     def post(self, path: str):
         return self.client.post(
             path,
-            headers={
-                "Origin": "http://127.0.0.1:8765",
-                "X-CSRF-Token": self.csrf_token,
-            },
+            headers={"Origin": "http://127.0.0.1:8765"},
         )
 
     def test_duplicate_environment_check_returns_same_job(self) -> None:
@@ -384,11 +440,15 @@ class JobApiTests(JobTestCase):
         self.assertEqual(first.json()["job_id"], second.json()["job_id"])
         self.assertTrue(second.json()["deduplicated"])
 
-    def test_post_without_csrf_is_rejected(self) -> None:
-        response = self.client.post(
-            "/api/jobs/environment-check",
-            headers={"Origin": "http://127.0.0.1:8765"},
-        )
+    def test_duplicate_daily_refresh_returns_same_job(self) -> None:
+        first = self.post("/api/jobs/daily-refresh")
+        second = self.post("/api/jobs/daily-refresh")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["job_id"], second.json()["job_id"])
+        self.assertTrue(second.json()["deduplicated"])
+
+    def test_post_without_origin_is_rejected(self) -> None:
+        response = self.client.post("/api/jobs/environment-check")
         self.assertEqual(response.status_code, 403)
 
     def test_cancel_pending_prevents_worker_execution(self) -> None:
@@ -589,7 +649,7 @@ class JobApiTests(JobTestCase):
             )
             session.commit()
 
-    def test_sse_is_session_protected_and_hides_payload_summary(self) -> None:
+    def test_sse_stream_hides_payload_summary(self) -> None:
         job_id = self.add_job(status="succeeded")
         append_event(
             self.session_factory,
@@ -612,9 +672,10 @@ class JobApiTests(JobTestCase):
             base_url="http://127.0.0.1:8765",
         ) as anonymous_client:
             self.assertEqual(
-                anonymous_client.get(f"/api/jobs/{job_id}/stream").status_code,
-                401,
+                anonymous_client.get(f"/api/jobs/{job_id}/stream?after=0").status_code,
+                200,
             )
+            self.assertNotIn("must-not-stream", anonymous_client.get(f"/api/jobs/{job_id}/stream?after=0").text)
 
         response = self.client.get(f"/api/jobs/{job_id}/stream?after=0")
         self.assertEqual(response.status_code, 200)

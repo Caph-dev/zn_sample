@@ -19,12 +19,11 @@ from assistant.security.secret_redaction import redact_text
 class LocalSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
-        self.runtime_directory = Path(self.temporary_directory.name) / "runtime"
-        self.app = create_app(runtime_directory=self.runtime_directory, port=8765)
+        self.app = create_app(port=8765)
 
         @self.app.post("/test-post")
         def protected_post(request: Request) -> dict:
-            return {"ok": True, "csrf": request.state.session["csrf"]}
+            return {"ok": True}
 
         self.client = TestClient(self.app, base_url="http://127.0.0.1:8765")
 
@@ -32,64 +31,34 @@ class LocalSecurityTests(unittest.TestCase):
         self.client.close()
         self.temporary_directory.cleanup()
 
-    def bootstrap_session(self) -> str:
-        token = self.app.state.session_manager.issue_bootstrap_token()
-        response = self.client.get(f"/bootstrap?token={token}", follow_redirects=False)
-        self.assertEqual(response.status_code, 302)
-        session = self.app.state.session_manager.read_session(
-            self.client.cookies.get("zn_assistant_session")
-        )
-        return session["csrf"]
-
-    def test_wrong_and_reused_bootstrap_tokens_fail(self) -> None:
-        token = self.app.state.session_manager.issue_bootstrap_token()
-        self.assertEqual(self.client.get("/bootstrap?token=wrong").status_code, 401)
-        self.assertEqual(
-            self.client.get(f"/bootstrap?token={token}", follow_redirects=False).status_code,
-            302,
-        )
-        self.assertEqual(self.client.get(f"/bootstrap?token={token}").status_code, 401)
-        self.assertFalse(self.app.state.session_manager.bootstrap_path.exists())
-
     def test_non_local_host_is_rejected(self) -> None:
         response = self.client.get("/api/health", headers={"Host": "evil.example"})
         self.assertEqual(response.status_code, 400)
 
-    def test_post_requires_csrf_and_local_origin(self) -> None:
-        csrf_token = self.bootstrap_session()
+    def test_home_renders_without_session(self) -> None:
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+
+    def test_post_requires_local_origin(self) -> None:
+        self.assertEqual(self.client.post("/test-post").status_code, 403)
         self.assertEqual(
             self.client.post(
-                "/test-post", headers={"Origin": "http://127.0.0.1:8765"}
+                "/test-post", headers={"Origin": "http://evil.example"}
             ).status_code,
             403,
         )
         self.assertEqual(
             self.client.post(
                 "/test-post",
-                headers={
-                    "Origin": "http://evil.example",
-                    "X-CSRF-Token": csrf_token,
-                },
+                headers={"Origin": "http://localhost:not-a-port"},
             ).status_code,
             403,
         )
         self.assertEqual(
             self.client.post(
                 "/test-post",
-                headers={
-                    "Origin": "http://localhost:not-a-port",
-                    "X-CSRF-Token": csrf_token,
-                },
-            ).status_code,
-            403,
-        )
-        self.assertEqual(
-            self.client.post(
-                "/test-post",
-                headers={
-                    "Origin": "http://localhost:8765",
-                    "X-CSRF-Token": csrf_token,
-                },
+                headers={"Origin": "http://localhost:8765"},
             ).status_code,
             200,
         )
