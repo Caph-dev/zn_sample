@@ -17,6 +17,14 @@ exports/
 .DS_Store
 *.log
 
+# Code review 归档（本地整理，不提交）
+codereview/
+
+# 本地计划与顾问归档（不提交）
+/plan/
+/plans/
+/advisor-plans/
+
 # 其他
 .vscode/
 .agents/

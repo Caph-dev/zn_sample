@@ -45,7 +45,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import is_verbose, set_verbose  # noqa: E402
-from lib.export_util import resolve_from_export_arg, write_reports  # noqa: E402
+from lib.export_util import (  # noqa: E402
+    RECONCILIATION_STAGE_APPROVE,
+    RECONCILIATION_STAGE_CONFIRM,
+    RECONCILIATION_STAGE_SCREEN,
+    ReconciliationManifestError,
+    resolve_from_export_arg,
+    resolve_reconciliation_export_arg,
+    validate_reconciliation_export_input,
+    write_reconciliation_manifest,
+    write_reports,
+)
 from lib.run_summary import format_job_summary  # noqa: E402
 from lib.feishu_bitable import (  # noqa: E402
     DEFAULT_APP_TOKEN,
@@ -54,11 +64,11 @@ from lib.feishu_bitable import (  # noqa: E402
     FeishuBitableError,
     build_product_id_to_sku_map,
     create_creator_relation_record,
-    find_duplicate_record,
     format_followers_raw,
     format_fulfillment_raw,
     get_bitable_access_token,
     list_sample_product_options,
+    resolve_duplicate_record,
     resolve_sample_product_for_row,
     update_record_order_no,
 )
@@ -106,6 +116,36 @@ DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
 DEFAULT_EXECUTE_LIMIT = 1
 PLATFORM_STATUS_LAG_MINUTES = 10
 ALREADY_EXECUTED_APPROVE_STATUSES = {"approved", "unknown"}
+
+# These fields are additive reconciliation checkpoints.  The older export
+# fields remain populated for compatibility with existing reports and scripts.
+PLATFORM_CONFIRMATION_FIELD = "platform_confirmation_status"
+FEISHU_RELATION_FIELD = "feishu_relation_status"
+ORDER_BACKFILL_FIELD = "order_backfill_status"
+ORDER_BACKFILL_TERMINAL_STATUSES = {
+    "written",
+    "unchanged",
+    "skipped-existing-different",
+    "write-uncertain",
+    "skipped-invalid-order-no",
+    "skipped-not-ready-to-ship",
+    "skipped-not-found-in-pending",
+    "skipped-identity-mismatch",
+}
+FEISHU_RELATION_BLOCKED_STATUSES = {
+    "blocked-not-hero",
+    "blocked-product-unresolved",
+    "ambiguous-match",
+    "ambiguous",
+    "invalid-match",
+    "write-uncertain",
+}
+FEISHU_RELATION_RECORD_STATUSES = {
+    "created",
+    "linked-existing",
+    "duplicate-existing",
+    "duplicate",
+}
 
 
 def _load_export_rows(path: Path) -> list[dict[str, Any]]:
@@ -176,6 +216,90 @@ def _looks_like_already_approved_skip(row: dict[str, Any]) -> bool:
     return "not-found-in-pending" in approve_error
 
 
+def _reconciliation_status(
+    row: dict[str, Any],
+    *,
+    checkpoint_field: str,
+    legacy_field: str,
+) -> str:
+    """Read a new checkpoint first, falling back to historical exports."""
+    checkpoint = str(row.get(checkpoint_field) or "").strip()
+    if checkpoint:
+        return checkpoint
+    return str(row.get(legacy_field) or "").strip()
+
+
+def _platform_confirmation_status(row: dict[str, Any]) -> str:
+    return _reconciliation_status(
+        row,
+        checkpoint_field=PLATFORM_CONFIRMATION_FIELD,
+        legacy_field="approve_confirmation",
+    )
+
+
+def _feishu_relation_status(row: dict[str, Any]) -> str:
+    return _reconciliation_status(
+        row,
+        checkpoint_field=FEISHU_RELATION_FIELD,
+        legacy_field="feishu_status",
+    )
+
+
+def _order_backfill_status(row: dict[str, Any]) -> str:
+    return _reconciliation_status(
+        row,
+        checkpoint_field=ORDER_BACKFILL_FIELD,
+        legacy_field="feishu_order_status",
+    )
+
+
+def _platform_confirmation_is_complete(row: dict[str, Any]) -> bool:
+    return _platform_confirmation_status(row) == "confirmed"
+
+
+def _has_linked_feishu_record(row: dict[str, Any]) -> bool:
+    """A record ID is reusable unless an earlier lookup explicitly found ambiguity."""
+    record_id = str(row.get("feishu_record_id") or "").strip()
+    return bool(record_id) and (
+        _feishu_relation_status(row) not in FEISHU_RELATION_BLOCKED_STATUSES
+    )
+
+
+def _set_platform_confirmation_status(
+    row: dict[str, Any],
+    status: str,
+) -> None:
+    """Persist the new checkpoint while retaining the historical export field."""
+    row[PLATFORM_CONFIRMATION_FIELD] = status
+    row["approve_confirmation"] = status
+
+
+def _set_feishu_relation_status(
+    row: dict[str, Any],
+    status: str,
+    *,
+    legacy_status: str | None = None,
+    error: str | None = None,
+) -> None:
+    row[FEISHU_RELATION_FIELD] = status
+    if legacy_status is not None:
+        row["feishu_status"] = legacy_status
+    if error is not None:
+        row["feishu_error"] = error
+
+
+def _set_order_backfill_status(
+    row: dict[str, Any],
+    status: str,
+    *,
+    error: str | None = None,
+) -> None:
+    row[ORDER_BACKFILL_FIELD] = status
+    row["feishu_order_status"] = status
+    if error is not None:
+        row["feishu_order_error"] = error
+
+
 def _select_confirm_candidates_from_export(
     rows: list[dict[str, Any]],
     *,
@@ -190,12 +314,10 @@ def _select_confirm_candidates_from_export(
         if not apply_id:
             continue
         approve_status = str(row.get("approve_status") or "").strip()
-        confirmation = str(row.get("approve_confirmation") or "").strip()
+        confirmation = _platform_confirmation_status(row)
         if approve_status not in {"approved", "unknown"} and not _looks_like_already_approved_skip(row):
             continue
         if confirmation == "confirmed":
-            continue
-        if str(row.get("feishu_status") or "").strip() in {"created", "duplicate"}:
             continue
         approved_at = _parse_approved_at(row.get("approved_at"))
         if (
@@ -204,7 +326,25 @@ def _select_confirm_candidates_from_export(
             and (current_time - approved_at).total_seconds()
             < PLATFORM_STATUS_LAG_MINUTES * 60
         ):
-            row["approve_confirmation"] = "waiting-platform-lag"
+            _set_platform_confirmation_status(row, "waiting-platform-lag")
+            continue
+        candidates.append(row)
+    return candidates
+
+
+def _select_feishu_reconcile_rows_from_export(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Choose confirmed rows that can safely resume a missing Feishu relation row."""
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not str(row.get("apply_id") or "").strip():
+            continue
+        if not _platform_confirmation_is_complete(row):
+            continue
+        if _has_linked_feishu_record(row):
+            continue
+        if _feishu_relation_status(row) in FEISHU_RELATION_BLOCKED_STATUSES:
             continue
         candidates.append(row)
     return candidates
@@ -227,32 +367,20 @@ def _select_order_backfill_rows_from_export(
     now: datetime | None = None,
     force: bool = False,
 ) -> list[dict[str, Any]]:
-    """挑已批且飞书已建行的行，等满平台刷新窗口后回填「订单号」。"""
-    current_time = now or datetime.now()
+    """Choose confirmed rows with a linked Feishu record and pending order backfill."""
+    # Keep the historical signature so older callers can still provide these
+    # values.  Once platform confirmation exists, its observed state is a safer
+    # gate than inferring readiness from an approval timestamp.
+    _ = now, force
     backfill_rows: list[dict[str, Any]] = []
     for row in rows:
         if not str(row.get("apply_id") or "").strip():
             continue
-        if str(row.get("approve_status") or "").strip() not in {"approved", "unknown"}:
+        if not _platform_confirmation_is_complete(row):
             continue
-        if not str(row.get("feishu_record_id") or "").strip():
+        if not _has_linked_feishu_record(row):
             continue
-        if str(row.get("approve_confirmation") or "").strip() == "confirmed":
-            continue
-        if str(row.get("feishu_order_status") or "").strip() in {
-            "written",
-            "unchanged",
-            "skipped-existing-different",
-        }:
-            continue
-        approved_at = _parse_approved_at(row.get("approved_at"))
-        if (
-            not force
-            and approved_at is not None
-            and (current_time - approved_at).total_seconds()
-            < PLATFORM_STATUS_LAG_MINUTES * 60
-        ):
-            row["feishu_order_status"] = "waiting-platform-lag"
+        if _order_backfill_status(row) in ORDER_BACKFILL_TERMINAL_STATUSES:
             continue
         backfill_rows.append(row)
     return backfill_rows
@@ -280,21 +408,89 @@ def _backfill_feishu_order_no(
             table_id=table_id,
         )
     except FeishuBitableError as error:
-        row["feishu_order_status"] = "error"
-        row["feishu_order_error"] = str(error)
+        _set_order_backfill_status(row, "error", error=str(error))
         logger.info(f"    飞书订单号回填失败: {error}")
         return
     status = str(result.get("status") or "unknown")
-    row["feishu_order_status"] = status
-    row["feishu_order_error"] = ""
+    _set_order_backfill_status(row, status, error="")
     if status == "written":
         logger.info(f"    飞书订单号已回填: {order_no}")
     elif status == "unchanged":
         logger.info(f"    飞书订单号已有且一致: {order_no}")
+    elif status == "write-uncertain":
+        current_order = str(result.get("current_order") or "")
+        verification_error = str(result.get("verification_error") or "写后核验失败")
+        _set_order_backfill_status(
+            row,
+            status,
+            error=(
+                f"写后核验不确定（当前订单号 {current_order or '空'}）："
+                f"{verification_error}"
+            ),
+        )
+        logger.info("    飞书订单号写后核验不确定，禁止视为已完成")
     else:
         current_order = str(result.get("current_order") or "")
-        row["feishu_order_error"] = f"已有订单号 {current_order}，不覆盖"
+        _set_order_backfill_status(
+            row,
+            status,
+            error=f"已有订单号 {current_order}，不覆盖",
+        )
         logger.info(f"    飞书已有不同订单号，不覆盖: {current_order}")
+
+
+def _summarize_reconciliation(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Count independent platform, Feishu, and order outcomes for operators."""
+    summary = {
+        "platform_confirmed": 0,
+        "platform_still_pending": 0,
+        "platform_needs_review": 0,
+        "feishu_created": 0,
+        "feishu_linked": 0,
+        "feishu_ambiguous": 0,
+        "feishu_errors": 0,
+        "feishu_blocked": 0,
+        "feishu_pending": 0,
+        "order_written": 0,
+        "order_conflicts": 0,
+        "order_invalid": 0,
+        "order_pending": 0,
+    }
+    for row in rows:
+        platform_status = _platform_confirmation_status(row)
+        relation_status = _feishu_relation_status(row)
+        order_status = _order_backfill_status(row)
+        has_record = _has_linked_feishu_record(row)
+
+        if platform_status == "confirmed":
+            summary["platform_confirmed"] += 1
+        elif platform_status == "still-pending":
+            summary["platform_still_pending"] += 1
+        elif platform_status in {"identity-mismatch", "unknown", "error"}:
+            summary["platform_needs_review"] += 1
+
+        if relation_status == "created":
+            summary["feishu_created"] += 1
+        elif relation_status in {"linked-existing", "duplicate-existing", "duplicate"}:
+            summary["feishu_linked"] += 1
+        elif relation_status == "ambiguous-match":
+            summary["feishu_ambiguous"] += 1
+        elif relation_status in {"error", "invalid-match", "write-uncertain"}:
+            summary["feishu_errors"] += 1
+        elif relation_status in {"blocked-not-hero", "blocked-product-unresolved"}:
+            summary["feishu_blocked"] += 1
+        elif platform_status == "confirmed" and not has_record:
+            summary["feishu_pending"] += 1
+
+        if order_status in {"written", "unchanged"}:
+            summary["order_written"] += 1
+        elif order_status in {"skipped-existing-different", "write-uncertain"}:
+            summary["order_conflicts"] += 1
+        elif order_status == "skipped-invalid-order-no":
+            summary["order_invalid"] += 1
+        elif platform_status == "confirmed" and has_record:
+            summary["order_pending"] += 1
+    return summary
 
 
 def decide_api_approval_outcome(
@@ -499,7 +695,7 @@ def _run_execute_pipeline(
         # 去重（仅写飞书时强制；不写时也可选查重——默认不查以免无 token）
         if write_feishu and bitable_token:
             try:
-                dup = find_duplicate_record(
+                duplicate_resolution = resolve_duplicate_record(
                     bitable_token,
                     creator_handle=creator_name,
                     sample_product=str(product_resolve.get("option")),
@@ -513,15 +709,63 @@ def _run_execute_pipeline(
                 row["action"] = "skipped-dedupe-error"
                 logger.info(f"  [跳过] 查重失败 {creator_name}: {error}")
                 continue
-            if dup:
+            duplicate_status = str(duplicate_resolution.get("status") or "")
+            duplicate_record_ids = list(duplicate_resolution.get("record_ids") or [])
+            if duplicate_status == "ambiguous-match":
                 row["approve_status"] = "skipped"
-                row["feishu_status"] = "duplicate"
-                row["feishu_record_id"] = dup.get("record_id")
+                row["approve_error"] = "飞书同一红人ID+寄样产品存在多条记录"
+                row["feishu_duplicate_record_ids"] = duplicate_record_ids
+                _set_feishu_relation_status(
+                    row,
+                    "ambiguous-match",
+                    legacy_status="ambiguous",
+                    error=row["approve_error"],
+                )
+                row["action"] = "skipped-duplicate-ambiguous"
+                logger.info(
+                    f"  [跳过-去重] {creator_name} × {product_resolve.get('option')} "
+                    f"命中多条 record={','.join(duplicate_record_ids) or '-'}")
+                continue
+            if duplicate_status == "invalid-match":
+                row["approve_status"] = "skipped"
+                row["approve_error"] = "飞书查重命中记录缺少 record_id"
+                _set_feishu_relation_status(
+                    row,
+                    "invalid-match",
+                    legacy_status="error",
+                    error=row["approve_error"],
+                )
+                row["action"] = "skipped-dedupe-invalid"
+                logger.info(f"  [跳过-去重] {creator_name} 命中无效飞书记录")
+                continue
+            if duplicate_status == "unique-match":
+                duplicate_record = duplicate_resolution.get("record") or {}
+                record_id = str(duplicate_record.get("record_id") or "").strip()
+                row["approve_status"] = "skipped"
+                _set_feishu_relation_status(
+                    row,
+                    "duplicate-existing",
+                    legacy_status="duplicate",
+                    error="",
+                )
+                row["feishu_record_id"] = record_id
                 row["approve_error"] = "飞书已存在 红人ID+寄样产品"
                 row["action"] = "skipped-duplicate"
                 logger.info(
                     f"  [跳过-去重] {creator_name} × {product_resolve.get('option')} "
-                    f"record={dup.get('record_id')}")
+                    f"record={record_id}")
+                continue
+            if duplicate_status != "no-match":
+                row["approve_status"] = "skipped"
+                row["approve_error"] = f"飞书查重返回未知状态: {duplicate_status or '空'}"
+                _set_feishu_relation_status(
+                    row,
+                    "error",
+                    legacy_status="error",
+                    error=row["approve_error"],
+                )
+                row["action"] = "skipped-dedupe-unknown"
+                logger.info(f"  [跳过-去重] {creator_name}: {row['approve_error']}")
                 continue
 
         try:
@@ -682,7 +926,7 @@ def _run_execute_pipeline(
             "state": "skipped" if write_accepted else "verification-error",
             "error": pending_recheck_error,
         }
-        row["approve_confirmation"] = outcome["approve_confirmation"]
+        _set_platform_confirmation_status(row, outcome["approve_confirmation"])
         if write_source == "api":
             row["approve_detail"] = {
                 "write_source": "api",
@@ -736,7 +980,12 @@ def _run_execute_pipeline(
         processed += 1
 
         if not write_feishu or not bitable_token:
-            row["feishu_status"] = "skipped-no-write"
+            _set_feishu_relation_status(
+                row,
+                "not-requested",
+                legacy_status="skipped-no-write",
+                error="",
+            )
             if execute_delay:
                 time.sleep(execute_delay)
             continue
@@ -751,19 +1000,39 @@ def _run_execute_pipeline(
                 app_token=app_token,
                 table_id=table_id,
             )
-            record_id = created.get("record_id")
-            row["feishu_status"] = "created"
+            record_id = str(created.get("record_id") or "").strip()
+            if not record_id:
+                _set_feishu_relation_status(
+                    row,
+                    "write-uncertain",
+                    legacy_status="error",
+                    error="飞书新建响应缺少 record_id；请人工核对后再处理",
+                )
+                row["action"] = "approved+feishu-uncertain"
+                logger.info("    飞书新建响应缺少 record_id，禁止自动重试")
+                if execute_delay:
+                    time.sleep(execute_delay)
+                continue
+            _set_feishu_relation_status(
+                row,
+                "created",
+                legacy_status="created",
+                error="",
+            )
             row["feishu_record_id"] = record_id
             row["action"] = "approved+feishu"
-            if record_id:
-                feishu_created_ids.append(str(record_id))
+            feishu_created_ids.append(record_id)
             logger.info(f"    飞书写入成功 record_id={record_id}")
         except FeishuBitableError as error:
-            row["feishu_status"] = "error"
-            row["feishu_error"] = str(error)
-            row["action"] = "approved+feishu-failed"
+            _set_feishu_relation_status(
+                row,
+                "write-uncertain",
+                legacy_status="error",
+                error=f"飞书新建结果不确定：{error}",
+            )
+            row["action"] = "approved+feishu-uncertain"
             logger.info(
-                f"    飞书写入失败（批准已成功，需人工补录）: {error}")
+                f"    飞书新建结果不确定（批准已成功，禁止自动重试）: {error}")
 
         if execute_delay:
             time.sleep(execute_delay)
@@ -784,6 +1053,7 @@ def _run_confirm_pipeline(
     execute_limit: int,
     config_path: str | None,
     order_backfill_rows: list[dict[str, Any]] | None = None,
+    reconciliation_rows: list[dict[str, Any]] | None = None,
     allowed_product_ids: set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """延后确认平台列表是否已转入待发货；可选补写飞书并回填订单号。
@@ -822,11 +1092,301 @@ def _run_confirm_pipeline(
             logger.error(f"[飞书] 初始化失败，将只确认不写表: {error}")
             write_feishu = False
 
+    def ensure_feishu_relation(row: dict[str, Any]) -> str:
+        """Link or create exactly one Feishu relation record for a confirmed row."""
+        existing_relation_status = _feishu_relation_status(row)
+        if existing_relation_status in FEISHU_RELATION_BLOCKED_STATUSES:
+            logger.info(
+                f"    飞书关系状态={existing_relation_status}，"
+                "保留人工核对结论，不自动重试")
+            return ""
+        existing_record_id = str(row.get("feishu_record_id") or "").strip()
+        if (
+            existing_relation_status in FEISHU_RELATION_RECORD_STATUSES
+            and not existing_record_id
+        ):
+            _set_feishu_relation_status(
+                row,
+                "write-uncertain",
+                legacy_status="error",
+                error="飞书关系状态显示已建/已链接，但缺少 record_id；请人工核对",
+            )
+            logger.info("    飞书关系行缺少 record_id，禁止自动补建")
+            return ""
+        if _has_linked_feishu_record(row):
+            if not row.get(FEISHU_RELATION_FIELD):
+                legacy_status = str(row.get("feishu_status") or "").strip()
+                _set_feishu_relation_status(
+                    row,
+                    "linked-existing",
+                    legacy_status=legacy_status or "duplicate",
+                )
+            return existing_record_id
+
+        creator_name = str(row.get("creator_name") or "").strip()
+        not_hero = _reject_if_not_exact_hero(
+            row,
+            hero_data,
+            allowed_product_ids=allowed_product_ids,
+        )
+        if not_hero:
+            _set_feishu_relation_status(
+                row,
+                "blocked-not-hero",
+                legacy_status="skipped",
+                error=not_hero,
+            )
+            logger.info(f"    飞书补写跳过: {not_hero}")
+            return ""
+
+        frozen_sku = str(row.get("resolved_sku") or "").strip()
+        frozen_option = str(row.get("sample_product_option") or "").strip()
+        has_valid_frozen_product = bool(frozen_sku and frozen_option) and (
+            not sample_options or frozen_option in sample_options
+        )
+        if has_valid_frozen_product:
+            # A manifest-backed approval already verified this exact mapping.
+            # Reuse it during recovery rather than silently remapping an old
+            # approval after the hero sheet changes.
+            product_resolution = {
+                "ok": True,
+                "sku": frozen_sku,
+                "option": frozen_option,
+                "reason": "frozen-export-product",
+            }
+        else:
+            product_resolution = resolve_sample_product_for_row(
+                row,
+                product_id_to_sku=product_id_to_sku,
+                sample_product_options=sample_options
+                or list(product_id_to_sku.values()),
+            )
+        row["resolved_sku"] = product_resolution.get("sku")
+        row["sample_product_option"] = product_resolution.get("option")
+        if not product_resolution.get("ok"):
+            reason = str(product_resolution.get("reason") or "无法解析寄样产品")
+            _set_feishu_relation_status(
+                row,
+                "blocked-product-unresolved",
+                legacy_status="skipped",
+                error=reason,
+            )
+            logger.info(f"    飞书补写跳过: {reason}")
+            return ""
+
+        try:
+            duplicate_resolution = resolve_duplicate_record(
+                bitable_token,
+                creator_handle=creator_name,
+                sample_product=str(product_resolution.get("option")),
+                app_token=app_token,
+                table_id=table_id,
+            )
+        except FeishuBitableError as error:
+            message = f"查重失败: {error}"
+            _set_feishu_relation_status(
+                row,
+                "error",
+                legacy_status="error",
+                error=message,
+            )
+            logger.info(f"    飞书补写查重失败: {error}")
+            return ""
+
+        duplicate_status = str(duplicate_resolution.get("status") or "")
+        duplicate_record_ids = list(duplicate_resolution.get("record_ids") or [])
+        if duplicate_status == "ambiguous-match":
+            _set_feishu_relation_status(
+                row,
+                "ambiguous-match",
+                legacy_status="ambiguous",
+                error="飞书同一红人ID+寄样产品存在多条记录",
+            )
+            row["feishu_duplicate_record_ids"] = duplicate_record_ids
+            logger.info(
+                "    飞书查重命中多条记录，禁止补建或回填: "
+                f"{','.join(duplicate_record_ids) or '-'}")
+            return ""
+        if duplicate_status == "invalid-match":
+            _set_feishu_relation_status(
+                row,
+                "invalid-match",
+                legacy_status="error",
+                error="飞书查重命中记录缺少 record_id",
+            )
+            logger.info("    飞书查重命中无效记录，禁止补建或回填")
+            return ""
+        if duplicate_status == "unique-match":
+            duplicate_record = duplicate_resolution.get("record") or {}
+            record_id = str(duplicate_record.get("record_id") or "").strip()
+            row["feishu_record_id"] = record_id
+            _set_feishu_relation_status(
+                row,
+                "linked-existing",
+                legacy_status="duplicate",
+                error="",
+            )
+            logger.info(f"    飞书已存在 record={record_id}")
+            return record_id
+        if duplicate_status != "no-match":
+            _set_feishu_relation_status(
+                row,
+                "error",
+                legacy_status="error",
+                error=f"飞书查重返回未知状态: {duplicate_status or '空'}",
+            )
+            logger.info("    飞书查重返回未知状态，禁止补建或回填")
+            return ""
+
+        try:
+            created = create_creator_relation_record(
+                bitable_token,
+                creator_handle=creator_name,
+                followers_raw=format_followers_raw(row),
+                fulfillment_raw=format_fulfillment_raw(row),
+                sample_product=str(product_resolution.get("option")),
+                app_token=app_token,
+                table_id=table_id,
+            )
+        except FeishuBitableError as error:
+            _set_feishu_relation_status(
+                row,
+                "write-uncertain",
+                legacy_status="error",
+                error=f"飞书新建结果不确定：{error}",
+            )
+            logger.error(f"    飞书补写结果不确定，禁止自动重试: {error}")
+            return ""
+
+        record_id = str(created.get("record_id") or "").strip()
+        if not record_id:
+            _set_feishu_relation_status(
+                row,
+                "write-uncertain",
+                legacy_status="error",
+                error="飞书新建响应缺少 record_id；请人工核对后再处理",
+            )
+            logger.error("    飞书补写响应缺少 record_id，禁止自动重试或订单号回填")
+            return ""
+
+        row["feishu_record_id"] = record_id
+        row["action"] = "confirmed+feishu"
+        _set_feishu_relation_status(
+            row,
+            "created",
+            legacy_status="created",
+            error="",
+        )
+        logger.info(f"    飞书补写成功 record_id={record_id}")
+        return record_id
+
+    def backfill_confirmed_order(
+        row: dict[str, Any],
+        *,
+        record_id: str,
+        order_no: str,
+    ) -> None:
+        if _order_backfill_status(row) in ORDER_BACKFILL_TERMINAL_STATUSES:
+            return
+        if not order_no:
+            _set_order_backfill_status(row, "skipped-invalid-order-no", error="")
+            logger.info("    待发货无有效订单号，留给物流步骤")
+            return
+        _backfill_feishu_order_no(
+            bitable_token=bitable_token,
+            row=row,
+            order_no=order_no,
+            record_id=record_id,
+            app_token=app_token,
+            table_id=table_id,
+        )
+
+    def load_confirmed_order(row: dict[str, Any]) -> str | None:
+        """Re-read tab 20 before recovery writes to retain identity protection."""
+        apply_id = str(row.get("apply_id") or "").strip()
+        creator_name = str(row.get("creator_name") or "").strip()
+        logger.info(f"  [订单号回填] {creator_name} apply={apply_id}")
+        try:
+            ready_to_ship = check_application_in_tab_api(
+                store_id,
+                apply_id,
+                tab=READY_TO_SHIP_TAB,
+                expected_creator_id=str(row.get("creator_id") or ""),
+                expected_product_id=str(row.get("product_id") or ""),
+                max_pages=50,
+            )
+        except Exception as error:
+            _set_order_backfill_status(row, "error", error=str(error))
+            logger.info(f"    待发货查询失败: {error}")
+            return None
+
+        row["order_no_postcheck"] = ready_to_ship
+        state = str(ready_to_ship.get("state") or "unknown")
+        if state in {"not-found-in-pending", "identity-mismatch"}:
+            _set_order_backfill_status(row, f"skipped-{state}", error="")
+            logger.info(f"    待发货未找到该申请 state={state}，留给物流步骤")
+            return None
+        try:
+            current_status = int(ready_to_ship.get("curr_status") or 0)
+        except (TypeError, ValueError):
+            current_status = 0
+        if current_status != READY_TO_SHIP_TAB:
+            _set_order_backfill_status(
+                row,
+                "skipped-not-ready-to-ship",
+                error=f"待发货列表返回 curr_status={ready_to_ship.get('curr_status')!r}",
+            )
+            logger.info("    待发货状态未确认，不回填订单号")
+            return None
+        _set_platform_confirmation_status(row, "confirmed")
+        order_no = _looks_like_tiktok_order_no(ready_to_ship.get("main_order_id"))
+        row["order_no"] = order_no
+        return order_no
+
+    def reconcile_confirmed_row(
+        row: dict[str, Any],
+        *,
+        known_order_no: str | None = None,
+    ) -> None:
+        if not write_feishu or not bitable_token:
+            return
+        record_id = ensure_feishu_relation(row)
+        if not record_id:
+            return
+        if _order_backfill_status(row) in ORDER_BACKFILL_TERMINAL_STATUSES:
+            return
+        order_no = known_order_no
+        if order_no is None:
+            order_no = load_confirmed_order(row)
+            if order_no is None:
+                return
+        backfill_confirmed_order(
+            row,
+            record_id=record_id,
+            order_no=order_no,
+        )
+
+    def mark_reconciliation_limit(row: dict[str, Any]) -> None:
+        if not _platform_confirmation_is_complete(row):
+            _set_platform_confirmation_status(row, "skipped-limit")
+        elif not _has_linked_feishu_record(row):
+            _set_feishu_relation_status(
+                row,
+                "skipped-limit",
+                legacy_status="skipped-limit",
+            )
+        elif _order_backfill_status(row) not in ORDER_BACKFILL_TERMINAL_STATUSES:
+            _set_order_backfill_status(row, "skipped-limit", error="")
+
     limit = execute_limit if execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
     processed = 0
+    platform_candidate_ids = {id(row) for row in candidates}
+
+    # First, confirm every pending platform transition.  This intentionally
+    # does not depend on whether a Feishu row already exists.
     for row in candidates:
         if processed >= limit:
-            row["approve_confirmation"] = "skipped-limit"
+            mark_reconciliation_limit(row)
             continue
 
         apply_id = str(row.get("apply_id") or "").strip()
@@ -841,189 +1401,75 @@ def _run_confirm_pipeline(
                 max_attempts=1,
             )
         except Exception as error:
-            row["approve_confirmation"] = "error"
+            _set_platform_confirmation_status(row, "error")
             row["approve_postcheck"] = {"ok": False, "error": str(error)}
             logger.info(f"    列表确认失败: {error}")
             continue
 
         row["approve_postcheck"] = confirmation
-        if confirmation.get("state") == "approved":
+        confirmation_state = str(confirmation.get("state") or "unknown")
+        processed += 1
+        if confirmation_state == "approved":
             row["approve_status"] = "approved"
-            row["approve_confirmation"] = "confirmed"
+            _set_platform_confirmation_status(row, "confirmed")
             row["approve_error"] = ""
             logger.info("    平台列表已转入待发货")
             order_no = _looks_like_tiktok_order_no(
                 (confirmation.get("ready_to_ship") or {}).get("main_order_id")
             )
             row["order_no"] = order_no
-            processed += 1
-        elif confirmation.get("state") == "still-pending":
-            row["approve_confirmation"] = "still-pending"
+            reconcile_confirmed_row(row, known_order_no=order_no)
+            continue
+        if confirmation_state == "still-pending":
+            _set_platform_confirmation_status(row, "still-pending")
             logger.info("    仍在待审核；请人工核对，不自动重批")
-            processed += 1
-            continue
-        else:
-            row["approve_confirmation"] = str(confirmation.get("state") or "unknown")
-            logger.info(
-                f"    列表仍未确认 state={row['approve_confirmation']}；"
-                "不改写批准结论，也不自动重批")
-            processed += 1
             continue
 
-        already_written = row.get("feishu_status") in {"created", "approved+feishu"}
-        if not write_feishu or not bitable_token:
-            continue
+        _set_platform_confirmation_status(row, confirmation_state)
+        logger.info(
+            f"    列表仍未确认 state={confirmation_state}；"
+            "不改写批准结论，也不自动重批")
 
-        if already_written:
-            # 只回填「订单号」；不补建行，也不碰寄样/合作状态
-            record_id = str(row.get("feishu_record_id") or "").strip()
-            if record_id and order_no:
-                _backfill_feishu_order_no(
-                    bitable_token=bitable_token,
-                    row=row,
-                    order_no=order_no,
-                    record_id=record_id,
-                    app_token=app_token,
-                    table_id=table_id,
-                )
-            elif not order_no:
-                row["feishu_order_status"] = "skipped-invalid-order-no"
-            continue
+    # Then resume rows that were already platform-confirmed in an earlier run.
+    # This is the recovery path after a no-write confirmation or a Feishu outage.
+    rows_to_reconcile: list[dict[str, Any]] = []
+    seen_row_ids: set[int] = set()
+    for row_group in (reconciliation_rows or [], order_backfill_rows or [], candidates):
+        for row in row_group:
+            row_id = id(row)
+            if row_id in seen_row_ids:
+                continue
+            seen_row_ids.add(row_id)
+            rows_to_reconcile.append(row)
 
-        not_hero = _reject_if_not_exact_hero(
-            row, hero_data, allowed_product_ids=allowed_product_ids
+    for row in rows_to_reconcile:
+        if id(row) in platform_candidate_ids:
+            continue
+        if not _platform_confirmation_is_complete(row):
+            continue
+        _set_platform_confirmation_status(row, "confirmed")
+        needs_relation = (
+            write_feishu
+            and not _has_linked_feishu_record(row)
+            and _feishu_relation_status(row) not in FEISHU_RELATION_BLOCKED_STATUSES
         )
-        if not_hero:
-            row["feishu_status"] = "skipped"
-            row["feishu_error"] = not_hero
-            logger.info(f"    飞书补写跳过: {not_hero}")
-            continue
-
-        product_resolve = resolve_sample_product_for_row(
-            row,
-            product_id_to_sku=product_id_to_sku,
-            sample_product_options=sample_options
-            or list(product_id_to_sku.values()),
+        needs_order_backfill = (
+            write_feishu
+            and _has_linked_feishu_record(row)
+            and _order_backfill_status(row) not in ORDER_BACKFILL_TERMINAL_STATUSES
         )
-        if sample_options:
-            product_resolve = resolve_sample_product_for_row(
-                row,
-                product_id_to_sku=product_id_to_sku,
-                sample_product_options=sample_options,
-            )
-        if not product_resolve.get("ok"):
-            row["feishu_status"] = "skipped"
-            row["feishu_error"] = product_resolve.get("reason")
-            logger.info(f"    飞书补写跳过: {product_resolve.get('reason')}")
+        if not needs_relation and not needs_order_backfill:
             continue
-        try:
-            dup = find_duplicate_record(
-                bitable_token,
-                creator_handle=creator_name,
-                sample_product=str(product_resolve.get("option")),
-                app_token=app_token,
-                table_id=table_id,
-            )
-        except FeishuBitableError as error:
-            row["feishu_status"] = "error"
-            row["feishu_error"] = f"查重失败: {error}"
-            logger.info(f"    飞书补写查重失败: {error}")
-            continue
-        if dup:
-            row["feishu_status"] = "duplicate"
-            row["feishu_record_id"] = dup.get("record_id")
-            logger.info(f"    飞书已存在 record={dup.get('record_id')}")
-            record_id = str(dup.get("record_id") or "").strip()
-            if record_id and order_no:
-                _backfill_feishu_order_no(
-                    bitable_token=bitable_token,
-                    row=row,
-                    order_no=order_no,
-                    record_id=record_id,
-                    app_token=app_token,
-                    table_id=table_id,
-                )
-            elif not order_no:
-                row["feishu_order_status"] = "skipped-invalid-order-no"
-            continue
-        try:
-            created = create_creator_relation_record(
-                bitable_token,
-                creator_handle=creator_name,
-                followers_raw=format_followers_raw(row),
-                fulfillment_raw=format_fulfillment_raw(row),
-                sample_product=str(product_resolve.get("option")),
-                app_token=app_token,
-                table_id=table_id,
-            )
-            row["feishu_status"] = "created"
-            row["feishu_record_id"] = created.get("record_id")
-            row["action"] = "approved+feishu"
-            logger.info(f"    飞书补写成功 record_id={created.get('record_id')}")
-            record_id = str(created.get("record_id") or "").strip()
-            if record_id and order_no:
-                _backfill_feishu_order_no(
-                    bitable_token=bitable_token,
-                    row=row,
-                    order_no=order_no,
-                    record_id=record_id,
-                    app_token=app_token,
-                    table_id=table_id,
-                )
-            elif not order_no:
-                row["feishu_order_status"] = "skipped-invalid-order-no"
-        except FeishuBitableError as error:
-            row["feishu_status"] = "error"
-            row["feishu_error"] = str(error)
-            logger.error(f"    飞书补写失败: {error}")
-
-    # 第 2 遍：对已批且飞书已建行的行回填「订单号」（共享本轮 limit）
-    for row in order_backfill_rows or []:
         if processed >= limit:
-            row["feishu_order_status"] = "skipped-limit"
+            mark_reconciliation_limit(row)
             continue
-        apply_id = str(row.get("apply_id") or "").strip()
-        creator_name = str(row.get("creator_name") or "").strip()
-        record_id = str(row.get("feishu_record_id") or "").strip()
-        if not write_feishu or not bitable_token or not record_id:
-            row["feishu_order_status"] = "skipped-no-write"
-            continue
-        logger.info(f"  [订单号回填] {creator_name} apply={apply_id}")
-        try:
-            ready = check_application_in_tab_api(
-                store_id,
-                apply_id,
-                tab=READY_TO_SHIP_TAB,
-                expected_creator_id=str(row.get("creator_id") or ""),
-                expected_product_id=str(row.get("product_id") or ""),
-                max_pages=50,
-            )
-        except Exception as error:
-            row["feishu_order_status"] = "error"
-            row["feishu_order_error"] = str(error)
-            logger.info(f"    待发货查询失败: {error}")
-            continue
-        row["order_no_postcheck"] = ready
+
         processed += 1
-        if ready.get("state") in {"not-found-in-pending", "identity-mismatch"}:
-            row["feishu_order_status"] = f"skipped-{ready.get('state')}"
-            logger.info(
-                f"    待发货未找到该申请 state={ready.get('state')}，留给物流步骤")
-            continue
-        order_no = _looks_like_tiktok_order_no(ready.get("main_order_id"))
-        row["order_no"] = order_no
-        if not order_no:
-            row["feishu_order_status"] = "skipped-invalid-order-no"
-            logger.info("    待发货无有效订单号，留给物流步骤")
-            continue
-        _backfill_feishu_order_no(
-            bitable_token=bitable_token,
-            row=row,
-            order_no=order_no,
-            record_id=record_id,
-            app_token=app_token,
-            table_id=table_id,
-        )
+        creator_name = str(row.get("creator_name") or "").strip()
+        apply_id = str(row.get("apply_id") or "").strip()
+        logger.info(f"  [补写恢复] {creator_name} apply={apply_id}")
+        reconcile_confirmed_row(row)
+
     return candidates
 
 
@@ -1118,7 +1564,7 @@ def main() -> int:
         nargs="?",
         const="latest",
         default=None,
-        help="用已有筛查导出 json 直接批准；不写路径则用 exports/ 最新一份",
+        help="用已有 JSON 恢复；不写路径时按批准/补写阶段选择已验证产物",
     )
     ap.add_argument(
         "--confirm-export",
@@ -1189,8 +1635,22 @@ def main() -> int:
     configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
     try:
-        args.from_export = resolve_from_export_arg(args.from_export)
-    except FileNotFoundError as error:
+        if args.confirm_export:
+            args.from_export = resolve_reconciliation_export_arg(
+                args.from_export,
+                allowed_stages={
+                    RECONCILIATION_STAGE_APPROVE,
+                    RECONCILIATION_STAGE_CONFIRM,
+                },
+            )
+        elif args.execute:
+            args.from_export = resolve_reconciliation_export_arg(
+                args.from_export,
+                allowed_stages={RECONCILIATION_STAGE_SCREEN},
+            )
+        else:
+            args.from_export = resolve_from_export_arg(args.from_export)
+    except (FileNotFoundError, ReconciliationManifestError) as error:
         logger.error(str(error))
         return 2
 
@@ -1289,6 +1749,28 @@ def main() -> int:
 
     if store_id == DEFAULT_TEST_STORE_ID:
         logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
+
+    if args.from_export and (args.execute or args.confirm_export):
+        allowed_source_stages = (
+            {RECONCILIATION_STAGE_APPROVE, RECONCILIATION_STAGE_CONFIRM}
+            if args.confirm_export
+            else {RECONCILIATION_STAGE_SCREEN}
+        )
+        try:
+            source_manifest = validate_reconciliation_export_input(
+                args.from_export,
+                allowed_stages=allowed_source_stages,
+                store_id=store_id,
+            )
+        except ReconciliationManifestError as error:
+            logger.error(f"reconcile 输入校验失败: {error}")
+            return 2
+        if source_manifest is None:
+            logger.info("[输入] 历史导出无 reconcile manifest；仅本次兼容使用")
+        else:
+            logger.info(
+                f"[输入] reconcile run={source_manifest.get('run_id')} "
+                f"stage={source_manifest.get('stage')} 已校验")
 
     allowed_product_ids: frozenset[str] = (
         frozenset()
@@ -1633,6 +2115,7 @@ def main() -> int:
             pre,
             force=bool(args.force_confirm),
         )
+        feishu_reconcile_rows = _select_feishu_reconcile_rows_from_export(pre)
         order_backfill_rows = _select_order_backfill_rows_from_export(
             pre,
             force=bool(args.force_confirm),
@@ -1642,6 +2125,8 @@ def main() -> int:
             f"（limit={args.execute_limit or DEFAULT_EXECUTE_LIMIT}）---")
         logger.info(
             f"--- 订单号回填 {len(order_backfill_rows)}（共享同一 limit）---")
+        logger.info(
+            f"--- 飞书恢复补写 {len(feishu_reconcile_rows)}（共享同一 limit）---")
         _run_confirm_pipeline(
             store_id=store_id,
             candidates=candidates,
@@ -1650,6 +2135,7 @@ def main() -> int:
             execute_limit=args.execute_limit,
             config_path=args.config,
             order_backfill_rows=order_backfill_rows,
+            reconciliation_rows=pre,
             allowed_product_ids=allowed_product_ids,
         )
     elif args.execute:
@@ -1711,31 +2197,54 @@ def main() -> int:
         [row for row in pre if row.get("eligible")] if args.eligible_only else pre
     )
     paths = write_reports(export_rows, out_prefix)
+    reconciliation_stage = (
+        RECONCILIATION_STAGE_CONFIRM
+        if args.confirm_export
+        else RECONCILIATION_STAGE_APPROVE
+        if args.execute
+        else RECONCILIATION_STAGE_SCREEN
+    )
+    try:
+        paths["reconcile_manifest"] = write_reconciliation_manifest(
+            export_rows,
+            out_prefix=out_prefix,
+            stage=reconciliation_stage,
+            store_id=store_id,
+            source_export=args.from_export,
+        )
+    except ReconciliationManifestError as error:
+        logger.error(
+            "JSON/CSV 已导出，但 reconcile manifest 写入失败；"
+            f"请保留当前导出并按明确路径恢复: {error}"
+        )
+        return 1
     logger.info("--- 导出 ---")
     for key, path in paths.items():
         logger.info(f"  {key}: {path}")
     passed_count = sum(1 for row in pre if row.get("eligible"))
     if args.confirm_export:
-        confirmed_count = sum(
-            1 for row in pre if row.get("approve_confirmation") == "confirmed"
-        )
-        order_written_count = sum(
-            1
-            for row in pre
-            if row.get("feishu_order_status") in {"written", "unchanged"}
-        )
+        reconciliation_summary = _summarize_reconciliation(pre)
         logger.info(
-            f"完成。模式=CONFIRM 列表已确认={confirmed_count} "
-            f"订单号已回填={order_written_count} "
+            "完成。模式=CONFIRM "
+            f"平台已确认={reconciliation_summary['platform_confirmed']} "
+            f"飞书新建/链接="
+            f"{reconciliation_summary['feishu_created']}/"
+            f"{reconciliation_summary['feishu_linked']} "
+            f"订单号已回填={reconciliation_summary['order_written']} "
             f"写飞书={'开' if args.write_feishu else '关'}。")
         summary_title = "「核对补写回填」完成"
         summary_stats = [
-            f"列表已确认 : {confirmed_count}",
-            f"订单号回填 : {order_written_count}",
-            f"已查看     : {len(pre)}",
-            f"写飞书     : {'开' if args.write_feishu else '关'}",
+            f"平台已确认       : {reconciliation_summary['platform_confirmed']}",
+            f"仍在待审核       : {reconciliation_summary['platform_still_pending']}",
+            f"飞书新建 / 已链接 : {reconciliation_summary['feishu_created']} / {reconciliation_summary['feishu_linked']}",
+            f"飞书歧义 / 错误  : {reconciliation_summary['feishu_ambiguous']} / {reconciliation_summary['feishu_errors']}",
+            f"飞书映射拦截      : {reconciliation_summary['feishu_blocked']}",
+            f"订单写入 / 冲突  : {reconciliation_summary['order_written']} / {reconciliation_summary['order_conflicts']}",
+            f"订单待出 / 待回填 : {reconciliation_summary['order_invalid']} / {reconciliation_summary['order_pending']}",
+            f"已查看           : {len(pre)}",
+            f"写飞书           : {'开' if args.write_feishu else '关'}",
         ]
-        summary_hint = "日常请双击「2-筛查批准写飞书发私信」，不要拆开补写。"
+        summary_hint = "请查看本次 confirm CSV 的「对账下一步」列；不要自动重批或覆盖冲突订单号。"
     elif args.execute:
         approved_count = sum(1 for row in pre if row.get("approve_status") == "approved")
         logger.info(

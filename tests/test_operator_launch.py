@@ -500,6 +500,7 @@ class RunOperatorModeTests(unittest.TestCase):
     def test_pipeline_runs_four_steps_and_waits(self) -> None:
         waited = {"n": 0}
         ran: list[list[str]] = []
+        opened: list[Path] = []
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "pipe"
@@ -508,6 +509,7 @@ class RunOperatorModeTests(unittest.TestCase):
                 ran.append(list(argv))
                 out = Path(argv[argv.index("--out") + 1])
                 out.parent.mkdir(parents=True, exist_ok=True)
+                out.with_suffix(".csv").write_text("ok", encoding="utf-8")
                 if "--execute" in argv and "--confirm-export" not in argv and Path(argv[1]) == SCREEN_SCRIPT:
                     out.with_suffix(".json").write_text(
                         json.dumps([{"approve_status": "approved", "eligible": True}]),
@@ -528,7 +530,7 @@ class RunOperatorModeTests(unittest.TestCase):
                 confirm_fn=lambda _mode: True,
                 run_job_fn=run_job,
                 wait_fn=lambda: waited.__setitem__("n", waited["n"] + 1),
-                open_report_fn=lambda _path: None,
+                open_report_fn=opened.append,
                 printer=lambda _line: None,
                 alert_fn=lambda _t, _m: None,
             )
@@ -544,6 +546,7 @@ class RunOperatorModeTests(unittest.TestCase):
         self.assertEqual(Path(ran[3][1]), INTRO_SCRIPT)
         self.assertIn("--execute", ran[3])
         self.assertIn("--write-feishu", ran[3])
+        self.assertEqual(opened, [base.parent / f"{base.name}_confirm.csv"])
 
     def test_pipeline_skips_wait_when_nothing_approved(self) -> None:
         waited = Mock(side_effect=AssertionError)

@@ -176,6 +176,108 @@ def match_sample_product_option(sku: str, options: list[str]) -> str | None:
     return candidates[0]
 
 
+def find_duplicate_records(
+    access_token: str,
+    *,
+    creator_handle: str,
+    sample_product: str,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> list[dict[str, Any]]:
+    """Return every exact 红人ID + 寄样产品 duplicate, across result pages.
+
+    A duplicate is a data-integrity condition, not a signal to pick an
+    arbitrary first record.  Callers that intend to write must use
+    :func:`resolve_duplicate_record` and require a unique match.
+    """
+    records: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        body: dict[str, Any] = {
+            "page_size": 100,
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": "红人ID",
+                        "operator": "is",
+                        "value": [creator_handle],
+                    },
+                    {
+                        "field_name": "寄样产品",
+                        "operator": "is",
+                        "value": [sample_product],
+                    },
+                ],
+            },
+        }
+        if page_token:
+            body["page_token"] = page_token
+        payload = _http_json(
+            "POST",
+            f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=body,
+        )
+        data = payload.get("data") or {}
+        records.extend(
+            record
+            for record in (data.get("items") or [])
+            if isinstance(record, dict)
+        )
+        if not data.get("has_more"):
+            return records
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            raise FeishuBitableError("飞书查重分页返回 has_more 但缺少 page_token")
+
+
+def resolve_duplicate_record(
+    access_token: str,
+    *,
+    creator_handle: str,
+    sample_product: str,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+) -> dict[str, Any]:
+    """Resolve a duplicate lookup without choosing between multiple records.
+
+    ``status`` is one of ``no-match``, ``unique-match``, ``ambiguous-match``,
+    or ``invalid-match``.  The structured result is safe to include in a
+    local report and gives callers enough information to stop before writing.
+    """
+    records = find_duplicate_records(
+        access_token,
+        creator_handle=creator_handle,
+        sample_product=sample_product,
+        app_token=app_token,
+        table_id=table_id,
+    )
+    record_ids = [
+        str(record.get("record_id") or "").strip()
+        for record in records
+    ]
+    if not records:
+        return {"status": "no-match", "record": None, "record_ids": []}
+    if len(records) > 1:
+        return {
+            "status": "ambiguous-match",
+            "record": None,
+            "record_ids": record_ids,
+        }
+    if not record_ids[0]:
+        return {
+            "status": "invalid-match",
+            "record": None,
+            "record_ids": record_ids,
+        }
+    return {
+        "status": "unique-match",
+        "record": records[0],
+        "record_ids": record_ids,
+    }
+
+
 def find_duplicate_record(
     access_token: str,
     *,
@@ -184,35 +286,20 @@ def find_duplicate_record(
     app_token: str = DEFAULT_APP_TOKEN,
     table_id: str = DEFAULT_TABLE_ID,
 ) -> dict[str, Any] | None:
-    """按 红人ID + 寄样产品 查重；命中返回首条记录，否则 None。"""
-    body = {
-        "page_size": 5,
-        "filter": {
-            "conjunction": "and",
-            "conditions": [
-                {
-                    "field_name": "红人ID",
-                    "operator": "is",
-                    "value": [creator_handle],
-                },
-                {
-                    "field_name": "寄样产品",
-                    "operator": "is",
-                    "value": [sample_product],
-                },
-            ],
-        },
-    }
-    payload = _http_json(
-        "POST",
-        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
-        headers={"Authorization": f"Bearer {access_token}"},
-        body=body,
+    """Backward-compatible read-only helper that returns only a unique record.
+
+    Existing read-only consumers must not accidentally choose among ambiguous
+    rows.  Write paths use ``resolve_duplicate_record`` for explicit outcomes.
+    """
+    result = resolve_duplicate_record(
+        access_token,
+        creator_handle=creator_handle,
+        sample_product=sample_product,
+        app_token=app_token,
+        table_id=table_id,
     )
-    items = ((payload.get("data") or {}).get("items") or [])
-    if not items:
-        return None
-    return items[0]
+    record = result.get("record")
+    return record if result.get("status") == "unique-match" and isinstance(record, dict) else None
 
 
 def create_creator_relation_record(
@@ -501,7 +588,12 @@ def update_record_order_no(
     """仅回填「订单号」列；不联动「是否已寄样」/「合作状态」。
 
     已有不同订单号时不覆盖（物流步骤可用 --overwrite 覆盖）。
-    返回 status: written | unchanged | skipped-existing-different。
+    写后会重新读取目标行。飞书当前接口没有条件更新版本号，因此无法消除
+    GET/PUT 之间的并发窗口；写后读到意外值时明确返回 ``write-uncertain``，
+    由调用方停止自动处理并要求人工核对。
+
+    返回 status: written | unchanged | skipped-existing-different |
+    write-uncertain。
     """
     current_fields = get_record_fields(
         access_token,
@@ -529,6 +621,30 @@ def update_record_order_no(
         app_token=app_token,
         table_id=table_id,
     )
+    try:
+        verified_fields = get_record_fields(
+            access_token,
+            record_id,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    except FeishuBitableError as error:
+        return {
+            "status": "write-uncertain",
+            "record_id": record_id,
+            "current_order": "",
+            "verification_error": str(error),
+            "raw": updated.get("raw"),
+        }
+    verified_order = _field_plain(verified_fields.get("订单号")).strip()
+    if verified_order != order_no:
+        return {
+            "status": "write-uncertain",
+            "record_id": record_id,
+            "current_order": verified_order,
+            "verification_error": "写后读取的订单号与请求值不一致",
+            "raw": updated.get("raw"),
+        }
     return {
         "status": "written",
         "record_id": record_id,

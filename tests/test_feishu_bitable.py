@@ -10,14 +10,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.feishu_bitable import (  # noqa: E402
+    FeishuBitableError,
     describe_cooperation_transition,
     feishu_shipping_already_current,
     DEFAULT_RECORD_OWNER,
     build_product_id_to_sku_map,
     build_shipping_fields,
     create_creator_relation_record,
+    find_duplicate_record,
+    find_duplicate_records,
     index_pending_ship_records,
     pending_ship_lookup_key,
+    resolve_duplicate_record,
     resolve_sample_product_for_row,
     search_pending_ship_records,
     update_record_order_no,
@@ -144,6 +148,92 @@ class CreateCreatorRelationRecordTests(unittest.TestCase):
         self.assertEqual(fields["合作状态"], ["待发货"])
         self.assertFalse(fields["是否已寄样"])
         self.assertEqual(result["record_id"], "record-test")
+
+
+class DuplicateRecordResolutionTests(unittest.TestCase):
+    def test_unique_match_returns_the_only_record(self) -> None:
+        response = {
+            "code": 0,
+            "data": {
+                "items": [{"record_id": "rec-unique", "fields": {}}],
+                "has_more": False,
+            },
+        }
+
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            result = resolve_duplicate_record(
+                "token-test",
+                creator_handle="alice",
+                sample_product="328",
+            )
+
+        self.assertEqual(result["status"], "unique-match")
+        self.assertEqual(result["record"]["record_id"], "rec-unique")
+
+    def test_multiple_matches_are_ambiguous_across_pages(self) -> None:
+        responses = [
+            {
+                "code": 0,
+                "data": {
+                    "items": [{"record_id": "rec-one", "fields": {}}],
+                    "has_more": True,
+                    "page_token": "next-page",
+                },
+            },
+            {
+                "code": 0,
+                "data": {
+                    "items": [{"record_id": "rec-two", "fields": {}}],
+                    "has_more": False,
+                },
+            },
+        ]
+
+        with patch("lib.feishu_bitable._http_json", side_effect=responses) as request:
+            result = resolve_duplicate_record(
+                "token-test",
+                creator_handle="alice",
+                sample_product="328",
+            )
+
+        self.assertEqual(result["status"], "ambiguous-match")
+        self.assertEqual(result["record_ids"], ["rec-one", "rec-two"])
+        self.assertEqual(request.call_args_list[1].kwargs["body"]["page_token"], "next-page")
+
+    def test_legacy_duplicate_helper_does_not_choose_ambiguous_record(self) -> None:
+        response = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {"record_id": "rec-one", "fields": {}},
+                    {"record_id": "rec-two", "fields": {}},
+                ],
+                "has_more": False,
+            },
+        }
+
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            record = find_duplicate_record(
+                "token-test",
+                creator_handle="alice",
+                sample_product="328",
+            )
+
+        self.assertIsNone(record)
+
+    def test_duplicate_search_requires_page_token_when_more_pages_exist(self) -> None:
+        response = {
+            "code": 0,
+            "data": {"items": [], "has_more": True, "page_token": ""},
+        }
+
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            with self.assertRaisesRegex(FeishuBitableError, "page_token"):
+                find_duplicate_records(
+                    "token-test",
+                    creator_handle="alice",
+                    sample_product="328",
+                )
 
 
 class BuildShippingFieldsTests(unittest.TestCase):
@@ -279,6 +369,15 @@ class UpdateRecordOrderNoTests(unittest.TestCase):
                     "data": {"record": {"record_id": "rec-1", "fields": {}}},
                 },
                 {"code": 0, "data": {"record": {"record_id": "rec-1"}}},
+                {
+                    "code": 0,
+                    "data": {
+                        "record": {
+                            "record_id": "rec-1",
+                            "fields": {"订单号": "577532709908747188"},
+                        }
+                    },
+                },
             ]
             result = update_record_order_no(
                 "token-test",
@@ -293,6 +392,7 @@ class UpdateRecordOrderNoTests(unittest.TestCase):
             put_call.kwargs["body"]["fields"],
             {"订单号": "577532709908747188"},
         )
+        self.assertEqual(request.call_count, 3)
 
     def test_unchanged_when_current_is_same(self) -> None:
         with patch("lib.feishu_bitable._http_json") as request:
@@ -333,6 +433,33 @@ class UpdateRecordOrderNoTests(unittest.TestCase):
 
         request.assert_called_once()
         self.assertEqual(result["status"], "skipped-existing-different")
+        self.assertEqual(result["current_order"], "577599999999999999")
+
+    def test_reports_write_uncertain_when_post_write_value_differs(self) -> None:
+        with patch("lib.feishu_bitable._http_json") as request:
+            request.side_effect = [
+                {
+                    "code": 0,
+                    "data": {"record": {"record_id": "rec-1", "fields": {}}},
+                },
+                {"code": 0, "data": {"record": {"record_id": "rec-1"}}},
+                {
+                    "code": 0,
+                    "data": {
+                        "record": {
+                            "record_id": "rec-1",
+                            "fields": {"订单号": "577599999999999999"},
+                        }
+                    },
+                },
+            ]
+            result = update_record_order_no(
+                "token-test",
+                "rec-1",
+                "577532709908747188",
+            )
+
+        self.assertEqual(result["status"], "write-uncertain")
         self.assertEqual(result["current_order"], "577599999999999999")
 
 

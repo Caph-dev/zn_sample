@@ -17,6 +17,7 @@ from screen_sample_requests import (  # noqa: E402
     _run_execute_pipeline,
     _select_confirm_candidates_from_export,
     _select_execute_candidates_from_export,
+    _select_feishu_reconcile_rows_from_export,
     _select_order_backfill_rows_from_export,
     decide_api_approval_outcome,
 )
@@ -383,7 +384,42 @@ class ExecuteSafetyTests(unittest.TestCase):
             },
         ]
         candidates = _select_confirm_candidates_from_export(rows, force=True)
-        self.assertEqual([row["apply_id"] for row in candidates], ["varela-skip"])
+        self.assertEqual(
+            [row["apply_id"] for row in candidates],
+            ["varela-skip", "already-written"],
+        )
+
+    def test_confirmed_row_without_feishu_record_is_recovery_candidate(self) -> None:
+        rows = [
+            {
+                "apply_id": "recover-feishu",
+                "approve_status": "approved",
+                "approve_confirmation": "confirmed",
+            },
+            {
+                "apply_id": "already-linked",
+                "approve_status": "approved",
+                "approve_confirmation": "confirmed",
+                "feishu_record_id": "rec-linked",
+                "feishu_status": "created",
+            },
+            {
+                "apply_id": "blocked",
+                "approve_status": "approved",
+                "approve_confirmation": "confirmed",
+                "feishu_relation_status": "blocked-product-unresolved",
+            },
+            {
+                "apply_id": "uncertain-write",
+                "approve_status": "approved",
+                "approve_confirmation": "confirmed",
+                "feishu_relation_status": "write-uncertain",
+            },
+        ]
+
+        candidates = _select_feishu_reconcile_rows_from_export(rows)
+
+        self.assertEqual([row["apply_id"] for row in candidates], ["recover-feishu"])
 
     def test_order_no_validation_accepts_only_real_order_ids(self) -> None:
         self.assertEqual(
@@ -400,44 +436,64 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(_looks_like_tiktok_order_no("12345"), "")
         self.assertEqual(_looks_like_tiktok_order_no("577532709908747188abc"), "")
 
-    def test_order_backfill_selection_requires_record_and_lag(self) -> None:
+    def test_order_backfill_selection_requires_confirmed_linked_record(self) -> None:
         now = datetime(2026, 8, 15, 10, 20, 0)
         rows = [
             {
                 "apply_id": "ready",
                 "approve_status": "approved",
                 "feishu_record_id": "rec-ready",
+                "approve_confirmation": "confirmed",
                 "approved_at": "2026-08-15T10:05:00",
             },
             {
-                "apply_id": "too-soon",
+                "apply_id": "not-confirmed",
                 "approve_status": "approved",
-                "feishu_record_id": "rec-soon",
+                "feishu_record_id": "rec-not-confirmed",
                 "approved_at": "2026-08-15T10:15:00",
             },
             {
                 "apply_id": "no-record",
                 "approve_status": "approved",
                 "feishu_record_id": "",
-                "approved_at": "2026-08-15T10:00:00",
-            },
-            {
-                "apply_id": "confirmed",
-                "approve_status": "approved",
-                "feishu_record_id": "rec-confirmed",
                 "approve_confirmation": "confirmed",
                 "approved_at": "2026-08-15T10:00:00",
             },
             {
-                "apply_id": "not-approved",
-                "approve_status": "skipped",
-                "feishu_record_id": "rec-skipped",
+                "apply_id": "already-written",
+                "approve_status": "approved",
+                "feishu_record_id": "rec-written",
+                "approve_confirmation": "confirmed",
+                "feishu_order_status": "written",
+                "approved_at": "2026-08-15T10:00:00",
+            },
+            {
+                "apply_id": "write-uncertain",
+                "approve_status": "approved",
+                "feishu_record_id": "rec-uncertain",
+                "approve_confirmation": "confirmed",
+                "feishu_order_status": "write-uncertain",
+                "approved_at": "2026-08-15T10:00:00",
+            },
+            {
+                "apply_id": "invalid-order",
+                "approve_status": "approved",
+                "feishu_record_id": "rec-invalid-order",
+                "approve_confirmation": "confirmed",
+                "feishu_order_status": "skipped-invalid-order-no",
+                "approved_at": "2026-08-15T10:00:00",
+            },
+            {
+                "apply_id": "ambiguous-record",
+                "approve_status": "approved",
+                "feishu_record_id": "rec-ambiguous",
+                "approve_confirmation": "confirmed",
+                "feishu_relation_status": "ambiguous-match",
                 "approved_at": "2026-08-15T10:00:00",
             },
         ]
         selected = _select_order_backfill_rows_from_export(rows, now=now)
         self.assertEqual([row["apply_id"] for row in selected], ["ready"])
-        self.assertEqual(rows[1]["feishu_order_status"], "waiting-platform-lag")
 
     @patch("screen_sample_requests.update_record_order_no")
     def test_backfill_helper_records_existing_different_order(self, update_order) -> None:
@@ -456,6 +512,27 @@ class ExecuteSafetyTests(unittest.TestCase):
         )
         self.assertEqual(row["feishu_order_status"], "skipped-existing-different")
         self.assertIn("不覆盖", row["feishu_order_error"])
+
+    @patch("screen_sample_requests.update_record_order_no")
+    def test_backfill_helper_records_post_write_uncertainty(self, update_order) -> None:
+        update_order.return_value = {
+            "status": "write-uncertain",
+            "current_order": "577599999999999999",
+            "verification_error": "写后读取的订单号与请求值不一致",
+        }
+        row: dict = {}
+
+        _backfill_feishu_order_no(
+            bitable_token="token-test",
+            row=row,
+            order_no="577532709908747188",
+            record_id="rec-1",
+            app_token="app-test",
+            table_id="tbl-test",
+        )
+
+        self.assertEqual(row["feishu_order_status"], "write-uncertain")
+        self.assertIn("写后核验不确定", row["feishu_order_error"])
 
     @patch("screen_sample_requests.update_record_order_no")
     @patch("screen_sample_requests.check_application_in_tab_api")
@@ -489,6 +566,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             "creator_name": "alice",
             "product_id": "product-1",
             "approve_status": "approved",
+            "approve_confirmation": "confirmed",
             "feishu_record_id": "rec-1",
             "approved_at": "2026-08-15T10:00:00",
         }
@@ -538,6 +616,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             "creator_name": "alice",
             "product_id": "product-1",
             "approve_status": "approved",
+            "approve_confirmation": "confirmed",
             "feishu_record_id": "rec-1",
             "approved_at": "2026-08-15T10:00:00",
         }
@@ -557,7 +636,7 @@ class ExecuteSafetyTests(unittest.TestCase):
 
     @patch("screen_sample_requests.update_record_order_no")
     @patch("screen_sample_requests.create_creator_relation_record")
-    @patch("screen_sample_requests.find_duplicate_record")
+    @patch("screen_sample_requests.resolve_duplicate_record")
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.confirm_application_approved_api")
     @patch("screen_sample_requests.list_sample_product_options")
@@ -570,7 +649,7 @@ class ExecuteSafetyTests(unittest.TestCase):
         list_options,
         confirm_approved,
         resolve_product,
-        find_dup,
+        resolve_duplicate,
         create_record,
         update_order,
     ) -> None:
@@ -587,7 +666,11 @@ class ExecuteSafetyTests(unittest.TestCase):
             },
         }
         resolve_product.return_value = {"ok": True, "sku": "328", "option": "328"}
-        find_dup.return_value = None
+        resolve_duplicate.return_value = {
+            "status": "no-match",
+            "record": None,
+            "record_ids": [],
+        }
         create_record.return_value = {
             "record_id": "rec-new",
             "fields": {},
@@ -621,6 +704,377 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(update_order.call_args.args[2], "577532709908747188")
         self.assertEqual(update_order.call_args.args[1], "rec-new")
         self.assertEqual(row["approve_confirmation"], "confirmed")
+        self.assertEqual(row["feishu_order_status"], "written")
+
+    @patch("screen_sample_requests.update_record_order_no")
+    @patch("screen_sample_requests.create_creator_relation_record")
+    @patch("screen_sample_requests.resolve_duplicate_record")
+    @patch("screen_sample_requests.resolve_sample_product_for_row")
+    @patch("screen_sample_requests.confirm_application_approved_api")
+    @patch("screen_sample_requests.list_sample_product_options")
+    @patch("screen_sample_requests.get_bitable_access_token")
+    @patch("lib.app_config.load_bitable_settings")
+    def test_confirm_ambiguous_feishu_match_never_creates_or_backfills(
+        self,
+        load_settings,
+        get_token,
+        list_options,
+        confirm_approved,
+        resolve_product,
+        resolve_duplicate,
+        create_record,
+        update_order,
+    ) -> None:
+        load_settings.return_value = {"app_token": "app-test", "table_id": "tbl-test"}
+        get_token.return_value = "token-test"
+        list_options.return_value = ["328"]
+        confirm_approved.return_value = {
+            "ok": True,
+            "state": "approved",
+            "ready_to_ship": {
+                "curr_status": 20,
+                "main_order_id": "577532709908747188",
+            },
+        }
+        resolve_product.return_value = {"ok": True, "sku": "328", "option": "328"}
+        resolve_duplicate.return_value = {
+            "status": "ambiguous-match",
+            "record": None,
+            "record_ids": ["rec-one", "rec-two"],
+        }
+        row = {
+            "apply_id": "apply-ambiguous",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "approved_at": "2026-08-15T10:00:00",
+        }
+
+        _run_confirm_pipeline(
+            store_id="store-test",
+            candidates=[row],
+            hero_data={"rows": []},
+            write_feishu=True,
+            execute_limit=1,
+            config_path=None,
+        )
+
+        create_record.assert_not_called()
+        update_order.assert_not_called()
+        self.assertEqual(row["approve_confirmation"], "confirmed")
+        self.assertEqual(row["feishu_relation_status"], "ambiguous-match")
+        self.assertEqual(row["feishu_duplicate_record_ids"], ["rec-one", "rec-two"])
+
+    @patch("screen_sample_requests.update_record_order_no")
+    @patch("screen_sample_requests.create_creator_relation_record")
+    @patch("screen_sample_requests.resolve_duplicate_record")
+    @patch("screen_sample_requests.resolve_sample_product_for_row")
+    @patch("screen_sample_requests.confirm_application_approved_api")
+    @patch("screen_sample_requests.list_sample_product_options")
+    @patch("screen_sample_requests.get_bitable_access_token")
+    @patch("lib.app_config.load_bitable_settings")
+    def test_confirm_missing_created_record_id_is_not_retried_automatically(
+        self,
+        load_settings,
+        get_token,
+        list_options,
+        confirm_approved,
+        resolve_product,
+        resolve_duplicate,
+        create_record,
+        update_order,
+    ) -> None:
+        load_settings.return_value = {"app_token": "app-test", "table_id": "tbl-test"}
+        get_token.return_value = "token-test"
+        list_options.return_value = ["328"]
+        confirm_approved.return_value = {
+            "ok": True,
+            "state": "approved",
+            "ready_to_ship": {
+                "curr_status": 20,
+                "main_order_id": "577532709908747188",
+            },
+        }
+        resolve_product.return_value = {"ok": True, "sku": "328", "option": "328"}
+        resolve_duplicate.return_value = {
+            "status": "no-match",
+            "record": None,
+            "record_ids": [],
+        }
+        create_record.return_value = {}
+        row = {
+            "apply_id": "apply-missing-record-id",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "approved_at": "2026-08-15T10:00:00",
+        }
+
+        _run_confirm_pipeline(
+            store_id="store-test",
+            candidates=[row],
+            hero_data={"rows": []},
+            write_feishu=True,
+            execute_limit=1,
+            config_path=None,
+        )
+
+        create_record.assert_called_once()
+        update_order.assert_not_called()
+        self.assertEqual(row["approve_confirmation"], "confirmed")
+        self.assertEqual(row["feishu_relation_status"], "write-uncertain")
+        self.assertNotIn("feishu_record_id", row)
+
+    @patch("screen_sample_requests.create_creator_relation_record")
+    @patch("screen_sample_requests.resolve_duplicate_record")
+    @patch("screen_sample_requests.confirm_application_approved_api")
+    @patch("screen_sample_requests.list_sample_product_options")
+    @patch("screen_sample_requests.get_bitable_access_token")
+    @patch("lib.app_config.load_bitable_settings")
+    def test_legacy_created_status_without_record_id_is_not_recreated(
+        self,
+        load_settings,
+        get_token,
+        list_options,
+        confirm_approved,
+        resolve_duplicate,
+        create_record,
+    ) -> None:
+        load_settings.return_value = {"app_token": "app-test", "table_id": "tbl-test"}
+        get_token.return_value = "token-test"
+        list_options.return_value = ["328"]
+        confirm_approved.return_value = {
+            "ok": True,
+            "state": "approved",
+            "ready_to_ship": {
+                "curr_status": 20,
+                "main_order_id": "577532709908747188",
+            },
+        }
+        row = {
+            "apply_id": "apply-legacy-created",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "feishu_status": "created",
+        }
+
+        _run_confirm_pipeline(
+            store_id="store-test",
+            candidates=[row],
+            hero_data={"rows": []},
+            write_feishu=True,
+            execute_limit=1,
+            config_path=None,
+        )
+
+        resolve_duplicate.assert_not_called()
+        create_record.assert_not_called()
+        self.assertEqual(row["feishu_relation_status"], "write-uncertain")
+
+    @patch("screen_sample_requests.update_record_order_no")
+    @patch("screen_sample_requests.check_application_in_tab_api")
+    @patch("screen_sample_requests.create_creator_relation_record")
+    @patch("screen_sample_requests.resolve_duplicate_record")
+    @patch("screen_sample_requests.resolve_sample_product_for_row")
+    @patch("screen_sample_requests.list_sample_product_options")
+    @patch("screen_sample_requests.get_bitable_access_token")
+    @patch("lib.app_config.load_bitable_settings")
+    def test_confirmed_read_only_row_recovers_feishu_and_order_backfill(
+        self,
+        load_settings,
+        get_token,
+        list_options,
+        resolve_product,
+        resolve_duplicate,
+        create_record,
+        check_tab,
+        update_order,
+    ) -> None:
+        load_settings.return_value = {"app_token": "app-test", "table_id": "tbl-test"}
+        get_token.return_value = "token-test"
+        list_options.return_value = ["328"]
+        resolve_product.return_value = {"ok": True, "sku": "328", "option": "328"}
+        resolve_duplicate.return_value = {
+            "status": "no-match",
+            "record": None,
+            "record_ids": [],
+        }
+        create_record.return_value = {"record_id": "rec-recovered"}
+        check_tab.return_value = {
+            "ok": True,
+            "state": "pending-not-approvable",
+            "curr_status": 20,
+            "main_order_id": "577532709908747188",
+        }
+        update_order.return_value = {"status": "written", "record_id": "rec-recovered"}
+        row = {
+            "apply_id": "apply-read-only",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "approve_confirmation": "confirmed",
+        }
+
+        _run_confirm_pipeline(
+            store_id="store-test",
+            candidates=[],
+            hero_data={"rows": []},
+            write_feishu=True,
+            execute_limit=1,
+            config_path=None,
+            reconciliation_rows=[row],
+        )
+
+        create_record.assert_called_once()
+        check_tab.assert_called_once()
+        update_order.assert_called_once()
+        self.assertEqual(row["platform_confirmation_status"], "confirmed")
+        self.assertEqual(row["feishu_relation_status"], "created")
+        self.assertEqual(row["feishu_order_status"], "written")
+
+    @patch("screen_sample_requests.update_record_order_no")
+    @patch("screen_sample_requests.confirm_application_approved_api")
+    @patch("screen_sample_requests.list_sample_product_options")
+    @patch("screen_sample_requests.get_bitable_access_token")
+    @patch("lib.app_config.load_bitable_settings")
+    def test_existing_feishu_record_still_receives_platform_confirmation(
+        self,
+        load_settings,
+        get_token,
+        list_options,
+        confirm_approved,
+        update_order,
+    ) -> None:
+        load_settings.return_value = {"app_token": "app-test", "table_id": "tbl-test"}
+        get_token.return_value = "token-test"
+        list_options.return_value = ["328"]
+        confirm_approved.return_value = {
+            "ok": True,
+            "state": "approved",
+            "ready_to_ship": {
+                "curr_status": 20,
+                "main_order_id": "577532709908747188",
+            },
+        }
+        update_order.return_value = {"status": "written", "record_id": "rec-existing"}
+        row = {
+            "apply_id": "apply-existing",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "approved_at": "2026-08-15T10:00:00",
+            "feishu_status": "created",
+            "feishu_record_id": "rec-existing",
+        }
+
+        _run_confirm_pipeline(
+            store_id="store-test",
+            candidates=[row],
+            hero_data={"rows": []},
+            write_feishu=True,
+            execute_limit=1,
+            config_path=None,
+        )
+
+        confirm_approved.assert_called_once()
+        update_order.assert_called_once()
+        self.assertEqual(row["approve_confirmation"], "confirmed")
+        self.assertEqual(row["feishu_record_id"], "rec-existing")
+
+    def test_feishu_initialization_failure_can_recover_after_confirmation(self) -> None:
+        row = {
+            "apply_id": "apply-retry-feishu",
+            "creator_id": "creator-1",
+            "creator_name": "alice",
+            "product_id": "product-1",
+            "approve_status": "approved",
+            "approved_at": "2026-08-15T10:00:00",
+        }
+        with (
+            patch("lib.app_config.load_bitable_settings", return_value={}),
+            patch(
+                "screen_sample_requests.get_bitable_access_token",
+                side_effect=RuntimeError("temporary Feishu outage"),
+            ),
+            patch(
+                "screen_sample_requests.confirm_application_approved_api",
+                return_value={
+                    "ok": True,
+                    "state": "approved",
+                    "ready_to_ship": {
+                        "curr_status": 20,
+                        "main_order_id": "577532709908747188",
+                    },
+                },
+            ),
+        ):
+            _run_confirm_pipeline(
+                store_id="store-test",
+                candidates=[row],
+                hero_data={"rows": []},
+                write_feishu=True,
+                execute_limit=1,
+                config_path=None,
+            )
+
+        self.assertEqual(row["approve_confirmation"], "confirmed")
+        self.assertNotIn("feishu_record_id", row)
+
+        with (
+            patch(
+                "lib.app_config.load_bitable_settings",
+                return_value={"app_token": "app-test", "table_id": "tbl-test"},
+            ),
+            patch("screen_sample_requests.get_bitable_access_token", return_value="token-test"),
+            patch("screen_sample_requests.list_sample_product_options", return_value=["328"]),
+            patch(
+                "screen_sample_requests.resolve_sample_product_for_row",
+                return_value={"ok": True, "sku": "328", "option": "328"},
+            ),
+            patch(
+                "screen_sample_requests.resolve_duplicate_record",
+                return_value={
+                    "status": "no-match",
+                    "record": None,
+                    "record_ids": [],
+                },
+            ),
+            patch(
+                "screen_sample_requests.create_creator_relation_record",
+                return_value={"record_id": "rec-recovered"},
+            ) as create_record,
+            patch(
+                "screen_sample_requests.check_application_in_tab_api",
+                return_value={
+                    "ok": True,
+                    "state": "pending-not-approvable",
+                    "curr_status": 20,
+                    "main_order_id": "577532709908747188",
+                },
+            ),
+            patch(
+                "screen_sample_requests.update_record_order_no",
+                return_value={"status": "written", "record_id": "rec-recovered"},
+            ),
+        ):
+            _run_confirm_pipeline(
+                store_id="store-test",
+                candidates=[],
+                hero_data={"rows": []},
+                write_feishu=True,
+                execute_limit=1,
+                config_path=None,
+                reconciliation_rows=[row],
+            )
+
+        create_record.assert_called_once()
+        self.assertEqual(row["feishu_record_id"], "rec-recovered")
         self.assertEqual(row["feishu_order_status"], "written")
 
     @patch("screen_sample_requests.update_record_order_no")
@@ -664,6 +1118,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             "creator_name": "bob",
             "product_id": "product-1",
             "approve_status": "approved",
+            "approve_confirmation": "confirmed",
             "feishu_record_id": "rec-1",
             "approved_at": "2026-08-15T10:00:00",
         }

@@ -786,7 +786,16 @@ def _run_pipeline(
     )
     if intro_code != 0:
         return _job_failed(emit, notify, intro_code)
-    _open_or_hint_report(prefixes["screen"], emit=emit, open_report_fn=open_report_fn)
+    # The confirm report contains the final platform/Feishu/order outcome;
+    # the initial screen report is only the first pipeline checkpoint.
+    final_report_prefix = prefixes["confirm"]
+    if choose_report(final_report_prefix) is None:
+        final_report_prefix = prefixes["approve"]
+    _open_or_hint_report(
+        final_report_prefix,
+        emit=emit,
+        open_report_fn=open_report_fn,
+    )
     return 0
 
 
