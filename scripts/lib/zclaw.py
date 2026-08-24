@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 
 import json
+import subprocess
 import time
 from typing import Any
 
+from .time_budget import remaining_seconds
 from .zclaw_cli import run_ziniao_cli
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,16 @@ DEFAULT_EXEC_RETRY_BASE_SEC = 1.5
 # 跨域卸页时 execute_script 会卡住。href 探测必须短超时，且不得把这次
 # 超时算进外层等待预算，否则几次探测就会把 20–30s 窗口吃光。
 HREF_PROBE_TIMEOUT_SECONDS = 2
+
+
+def is_timeout_expired_error(error: BaseException) -> bool:
+    """是否为 subprocess TimeoutExpired（或同义超时异常）。"""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return True
+    error_type_name = type(error).__name__
+    return error_type_name == "TimeoutExpired" or error_type_name.startswith(
+        "TimeoutExpired"
+    )
 
 
 def _parse_cli_json_blob(text: str) -> dict | None:
@@ -91,30 +103,54 @@ def zclaw_exec(
     *,
     retries: int = 0,
     retry_base_sec: float = DEFAULT_EXEC_RETRY_BASE_SEC,
+    retry_timeout_expired: bool = False,
+    deadline: float | None = None,
+    operation: str = "execute_script",
 ) -> Any:
     """执行页面脚本。
 
     retries>0 时，对 Bridge network 类失败做有限次退避重试
     （长跑详情后批准首包偶发；doctor 绿也不代表 execute 通道稳）。
+
+    ``retry_timeout_expired=True`` 才允许对 TimeoutExpired 重试：
+    只读探测 / 物流 GET 等幂等读取可显式开启；批准、发信等写路径
+    默认关闭，避免不确定状态下重复执行副作用动作。
+
+    所有重试服从真实墙钟 deadline；剩余时间不足时不再重试。
     """
     attempts = max(1, int(retries) + 1)
     last_error: BaseException | None = None
+    started_at = time.monotonic()
     for attempt in range(attempts):
+        if deadline is not None:
+            remaining = remaining_seconds(deadline)
+            if remaining <= 0:
+                last_error = subprocess.TimeoutExpired(
+                    f"{operation} (deadline)", remaining
+                )
+                break
+            if remaining < 0.5:
+                # 剩余时间不足以完成最小 subprocess 调用。
+                break
+            effective_timeout = max(1, int(min(timeout, remaining)))
+        else:
+            effective_timeout = int(timeout)
         try:
             outer = zclaw_invoke(
                 "execute_script",
                 {"storeId": store_id, "script": script},
-                timeout=timeout,
+                timeout=effective_timeout,
             )
             if not outer.get("ok"):
                 err = RuntimeError(f"zclaw failed: {outer}")
                 if attempt + 1 < attempts and is_bridge_network_error(outer):
                     last_error = err
                     sleep_sec = retry_base_sec * (attempt + 1)
-                    logger.info(
-                        f"  [zclaw] execute_script network 抖动 "
-                        f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后重试…")
-                    time.sleep(sleep_sec)
+                    if not _retry_backoff(
+                        deadline, sleep_sec, operation, attempt, attempts, timeout,
+                        "BridgeNetworkError", started_at,
+                    ):
+                        break
                     continue
                 raise err
             result = outer["data"]["data"]["result"]
@@ -134,16 +170,51 @@ def zclaw_exec(
             raise RuntimeError(f"unhandled execute_script result: {str(result)[:400]}")
         except Exception as error:
             last_error = error
-            if attempt + 1 < attempts and is_bridge_network_error(error):
+            retryable = is_bridge_network_error(error) or (
+                retry_timeout_expired and is_timeout_expired_error(error)
+            )
+            if attempt + 1 < attempts and retryable:
                 sleep_sec = retry_base_sec * (attempt + 1)
-                logger.info(
-                    f"  [zclaw] execute_script 异常重试 "
-                    f"({attempt + 1}/{attempts - 1})，{sleep_sec:.1f}s 后… {error}")
-                time.sleep(sleep_sec)
+                if not _retry_backoff(
+                    deadline, sleep_sec, operation, attempt, attempts, timeout,
+                    type(error).__name__, started_at,
+                ):
+                    break
                 continue
             raise
     assert last_error is not None
     raise last_error
+
+
+def _retry_backoff(
+    deadline: float | None,
+    sleep_sec: float,
+    operation: str,
+    attempt: int,
+    attempts: int,
+    timeout_seconds: int,
+    error_type: str,
+    started_at: float,
+) -> bool:
+    """记录结构化重试事件并按需退避；deadline 不足时返回 False。"""
+    if deadline is not None:
+        remaining = remaining_seconds(deadline)
+        if remaining <= sleep_sec:
+            return False
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "event=zclaw_execute_retry operation=%s attempt=%d max_attempts=%d "
+        "timeout_seconds=%d backoff_seconds=%.2f error_type=%s elapsed_ms=%d",
+        operation,
+        attempt + 1,
+        attempts,
+        timeout_seconds,
+        sleep_sec,
+        error_type,
+        elapsed_ms,
+    )
+    time.sleep(sleep_sec)
+    return True
 
 
 def probe_store_page(

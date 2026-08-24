@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .console import verbose_print
+from .sync_errors import LogisticsRequestTimeout
+from .time_budget import (
+    deadline_from_timeout,
+    remaining_seconds,
+    sleep_until_next_probe,
+)
 from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, zclaw_exec
 
 AFFILIATE_HOST = "affiliate.tiktokshopglobalselling.com"
@@ -66,7 +72,10 @@ def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
         timeout=HREF_PROBE_TIMEOUT_SECONDS,
-        retries=0,
+        retries=2,
+        retry_base_sec=0.5,
+        retry_timeout_expired=True,
+        operation="affiliate_context_read",
     )
     if not isinstance(result, dict):
         raise PageApiError(f"无法读取当前页面 URL: {result!r}"[:300])
@@ -171,7 +180,10 @@ def get_seller_page_context(
         store_id,
         _SELLER_CONTEXT_JS,
         timeout=HREF_PROBE_TIMEOUT_SECONDS,
-        retries=0,
+        retries=2,
+        retry_base_sec=0.5,
+        retry_timeout_expired=True,
+        operation="seller_context_read",
     )
     if not isinstance(result, dict):
         raise PageApiError(f"无法读取当前商家页面 URL: {result!r}"[:300])
@@ -279,8 +291,15 @@ def _post_page_json(
     poll_exec_retries: int = 1,
     http_method: str = "POST",
     request_query: dict[str, Any] | None = None,
+    deadline: float | None = None,
+    retry_timeout_expired: bool = False,
 ) -> dict[str, Any]:
-    """在页面上下文执行一个已登记的异步 POST。"""
+    """在页面上下文执行一个已登记的异步 POST。
+
+    ``deadline`` 存在时，poll subprocess 超时、轮询 sleep 和 retry backoff
+    都裁剪到剩余预算内；浏览器端 AbortController 保留，但 Python 外层
+    不得超过总 deadline。
+    """
     request_url = _build_request_url(
         endpoint,
         context=context,
@@ -288,6 +307,16 @@ def _post_page_json(
         extra_query=request_query,
     )
     attempts = max(1, int(retries) + 1)
+    resolved_deadline = (
+        deadline
+        if deadline is not None
+        else deadline_from_timeout(
+            request_timeout_seconds * attempts
+            + max(0.1, poll_interval_seconds) * 20 * attempts
+            + 0.8 * attempts * (attempts + 1)
+            + 10.0
+        )
+    )
     last_error: PageApiError | None = None
     for attempt in range(attempts):
         request_id = uuid.uuid4().hex
@@ -370,6 +399,10 @@ def _post_page_json(
                 start_script,
                 timeout=30,
                 retries=start_exec_retries,
+                retry_base_sec=0.8,
+                retry_timeout_expired=retry_timeout_expired,
+                deadline=resolved_deadline,
+                operation=f"page_api_start_{http_method.lower()}",
             )
             if not isinstance(start_result, dict) or not start_result.get("started"):
                 raise PageApiError(
@@ -389,15 +422,29 @@ def _post_page_json(
   return JSON.stringify(requestState);
 }})()
 """
-            deadline = time.monotonic() + max(1.0, request_timeout_seconds + 5.0)
+            poll_deadline = min(
+                resolved_deadline,
+                time.monotonic() + max(1.0, request_timeout_seconds + 5.0),
+            )
             result: dict[str, Any] | None = None
-            while time.monotonic() < deadline:
-                time.sleep(max(0.1, poll_interval_seconds))
+            while remaining_seconds(poll_deadline) > 0:
+                if not sleep_until_next_probe(
+                    poll_deadline, max(0.1, poll_interval_seconds)
+                ):
+                    break
+                poll_timeout = max(
+                    1,
+                    min(30, int(remaining_seconds(poll_deadline))),
+                )
                 poll_result = zclaw_exec(
                     store_id,
                     poll_script,
-                    timeout=30,
+                    timeout=poll_timeout,
                     retries=poll_exec_retries,
+                    retry_base_sec=0.8,
+                    retry_timeout_expired=retry_timeout_expired,
+                    deadline=poll_deadline,
+                    operation=f"page_api_poll_{http_method.lower()}",
                 )
                 if not isinstance(poll_result, dict):
                     raise PageApiError(
@@ -407,11 +454,15 @@ def _post_page_json(
                     result = poll_result
                     break
             if result is None:
+                if remaining_seconds(resolved_deadline) <= 0:
+                    raise LogisticsRequestTimeout(
+                        f"{endpoint} 页面异步请求耗尽总 deadline"
+                    )
                 raise PageApiError(f"{endpoint} 页面异步请求轮询超时")
         except Exception as error:
             last_error = (
                 error
-                if isinstance(error, PageApiError)
+                if isinstance(error, (PageApiError, LogisticsRequestTimeout))
                 else PageApiError(f"{endpoint} Bridge 请求失败: {error}")
             )
         else:
@@ -442,7 +493,11 @@ def _post_page_json(
                 return payload
 
         if attempt + 1 < attempts:
-            time.sleep(0.8 * (attempt + 1))
+            if not sleep_until_next_probe(resolved_deadline, 0.8 * (attempt + 1)):
+                last_error = LogisticsRequestTimeout(
+                    f"{endpoint} 重试退避耗尽总 deadline"
+                )
+                break
 
     assert last_error is not None
     raise last_error
@@ -510,6 +565,7 @@ def get_seller_read_json(
     retries: int = 2,
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """在商家订单页执行已登记的物流查询 GET。"""
     return _post_page_json(
@@ -527,4 +583,6 @@ def get_seller_read_json(
         poll_exec_retries=1,
         http_method="GET",
         request_query=query,
+        deadline=deadline,
+        retry_timeout_expired=True,
     )

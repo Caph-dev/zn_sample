@@ -11,7 +11,17 @@ from typing import Any
 
 from .debug_log import debug_log
 from .sample_dom import assert_on_pending_list
-from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, zclaw_exec
+from .sync_errors import SellerNavigationTimeout, SellerPageReadinessTimeout
+from .time_budget import (
+    deadline_from_timeout,
+    remaining_seconds,
+    sleep_until_next_probe,
+)
+from .zclaw import (
+    HREF_PROBE_TIMEOUT_SECONDS,
+    is_timeout_expired_error,
+    zclaw_exec,
+)
 
 SAMPLE_REQUEST_URL = (
     "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
@@ -68,6 +78,37 @@ INSPECT_PENDING_LIST_READINESS_JS = r"""
   });
 })()
 """
+
+INSPECT_SELLER_ORDER_READINESS_JS = r"""
+(() => {
+  const href = location.href || '';
+  const hostname = location.hostname || '';
+  const pathname = location.pathname || '';
+  const title = document.title || '';
+  const bodyText = (document.body && document.body.innerText || '').slice(0, 12000);
+  const loginPage = /login|sign[-_]?in|passport/i.test(pathname + ' ' + title)
+    || /Log in to TikTok Shop|登录 TikTok Shop|Sign in to TikTok Shop/i.test(bodyText);
+  const errorPage = /error\.html/i.test(pathname);
+  const appRoot = !!document.querySelector(
+    '#root, #app, #__next, [id^="app"], [data-app]'
+  );
+  return JSON.stringify({
+    ok: true,
+    href,
+    ready_state: document.readyState,
+    has_document_element: !!document.documentElement,
+    has_body: !!document.body,
+    has_app_root: appRoot,
+    is_login_page: loginPage,
+    is_error_page: errorPage,
+  });
+})()
+"""
+
+SELLER_HOST_PATTERN = re.compile(
+    r"^seller(?:\.[a-z0-9-]+)*\.tiktokshopglobalselling\.com$",
+    re.IGNORECASE,
+)
 
 
 def validate_navigation_start(page_state: dict[str, Any]) -> str:
@@ -127,12 +168,18 @@ def current_page_href(
     *,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     timeout: float = HREF_PROBE_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> str:
+    """读取当前 href；只读探测，TimeoutExpired 允许有限退避。"""
     result = execute_script_fn(
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
         timeout=max(1, int(timeout)),
-        retries=0,
+        retries=2,
+        retry_base_sec=0.5,
+        retry_timeout_expired=True,
+        deadline=deadline,
+        operation="href_probe",
     )
     if isinstance(result, dict):
         return str(result.get("href") or "").strip()
@@ -166,6 +213,109 @@ def is_ziniao_navigation_error_href(href: str) -> bool:
     return parsed_url.scheme == "chrome-extension" and "error.html" in path
 
 
+def validate_seller_order_readiness(state: dict[str, Any]) -> str:
+    """校验订单页稳定契约；全部满足才返回 canonical href。
+
+    不要求具体订单出现在表格或全部异步组件加载完成，
+    只确认页面 runtime 稳定、seller 同源上下文可用。
+    """
+    href = str(state.get("href") or "").strip()
+    parsed_url = urllib.parse.urlsplit(href)
+    hostname = str(parsed_url.hostname or "").lower()
+    if not SELLER_HOST_PATTERN.fullmatch(hostname):
+        raise RuntimeError(f"订单页未命中已验证 seller host: {href[:180]}")
+    if "/order" not in str(parsed_url.path or ""):
+        raise RuntimeError(f"订单页路径不含 /order: {href[:180]}")
+    if state.get("is_error_page"):
+        raise RuntimeError(f"订单页停在紫鸟 error.html: {href[:180]}")
+    if state.get("is_login_page"):
+        raise RuntimeError(f"订单页跳到了登录页: {href[:180]}")
+    ready_state = str(state.get("ready_state") or "")
+    if ready_state not in {"interactive", "complete"}:
+        raise RuntimeError(
+            f"订单页 readyState={ready_state or 'empty'} 尚未就绪: {href[:180]}"
+        )
+    if not state.get("has_document_element"):
+        raise RuntimeError(f"订单页缺少 documentElement: {href[:180]}")
+    if not state.get("has_body"):
+        raise RuntimeError(f"订单页缺少 document.body: {href[:180]}")
+    if not state.get("has_app_root"):
+        raise RuntimeError(f"订单页找不到商家中心应用根节点: {href[:180]}")
+    return href
+
+
+def wait_for_seller_order_page_ready(
+    store_id: str,
+    *,
+    deadline: float,
+    required_stable_probes: int = 2,
+    poll_interval: float = 0.5,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+) -> dict[str, Any]:
+    """轮询订单页稳定契约，连续 N 次成功才认为稳定。稳定前禁止物流 GET。"""
+    stable_href = ""
+    stable_count = 0
+    last_state: dict[str, Any] = {}
+    last_validation_error = ""
+    while remaining_seconds(deadline) > 0:
+        probe_timeout = min(HREF_PROBE_TIMEOUT_SECONDS, remaining_seconds(deadline))
+        if probe_timeout < 0.5:
+            # 剩余时间不足以完成最小 probe，不再启动 subprocess。
+            break
+        try:
+            state = execute_script_fn(
+                store_id,
+                INSPECT_SELLER_ORDER_READINESS_JS,
+                timeout=max(1, int(probe_timeout)),
+                retries=2,
+                retry_base_sec=0.5,
+                retry_timeout_expired=True,
+                deadline=deadline,
+                operation="seller_order_readiness_probe",
+            )
+        except Exception as error:
+            last_validation_error = str(error)
+            stable_href = ""
+            stable_count = 0
+            if not sleep_until_next_probe(deadline, poll_interval):
+                break
+            continue
+        if not isinstance(state, dict):
+            last_validation_error = f"订单页探测返回未知类型: {type(state).__name__}"
+            stable_href = ""
+            stable_count = 0
+            if not sleep_until_next_probe(deadline, poll_interval):
+                break
+            continue
+        last_state = state
+        try:
+            href = validate_seller_order_readiness(state)
+        except RuntimeError as error:
+            last_validation_error = str(error)
+            stable_href = ""
+            stable_count = 0
+            if not sleep_until_next_probe(deadline, poll_interval):
+                break
+            continue
+        if href == stable_href:
+            stable_count += 1
+        else:
+            stable_href = href
+            stable_count = 1
+        if stable_count >= max(1, int(required_stable_probes)):
+            return state
+        # 两次成功探测之间保留 300–500ms 的短间隔。
+        if not sleep_until_next_probe(deadline, min(max(0.3, poll_interval), 0.5)):
+            break
+    raise SellerPageReadinessTimeout(
+        "订单页稳定就绪超时。"
+        f" last_href={str(last_state.get('href') or '')[:180]}"
+        f" ready={last_state.get('ready_state')}"
+        f" stable_count={stable_count}"
+        f" 校验={last_validation_error}"
+    )
+
+
 def navigate_to_url(
     store_id: str,
     url: str,
@@ -175,14 +325,29 @@ def navigate_to_url(
     poll_interval: float = 0.5,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    """当前已在目标页则跳过；否则异步 replace 后短轮询 href。"""
+    """当前已在目标页则跳过；否则异步 replace 后短轮询 href。
+
+    所有探测、settle 等待和轮询都服从真实墙钟 deadline；
+    ``TimeoutExpired`` 消耗的真实时间同样计入预算。
+    """
+    resolved_deadline = (
+        deadline if deadline is not None else deadline_from_timeout(timeout)
+    )
     current_href = ""
     try:
-        current_href = current_page_href(
-            store_id,
-            execute_script_fn=execute_script_fn,
+        probe_timeout = min(
+            HREF_PROBE_TIMEOUT_SECONDS,
+            remaining_seconds(resolved_deadline),
         )
+        if probe_timeout >= 1.0:
+            current_href = current_page_href(
+                store_id,
+                execute_script_fn=execute_script_fn,
+                timeout=probe_timeout,
+                deadline=resolved_deadline,
+            )
     except Exception:
         current_href = ""
     if href_matches(current_href):
@@ -208,20 +373,63 @@ def navigate_to_url(
         timeout=timeout,
     )
     # endregion
-    navigator(
-        store_id,
-        url,
-        execute_script_fn=execute_script_fn,
-    )
+    try:
+        navigator(
+            store_id,
+            url,
+            execute_script_fn=execute_script_fn,
+        )
+    except Exception as error:
+        # 导航调度 TimeoutExpired 不能盲目重放：第一次调用可能已经安排了
+        # location.replace。先短 probe 当前页，已到目标页则视为成功。
+        if not is_timeout_expired_error(error):
+            raise
+        probed_href = ""
+        try:
+            probe_timeout = min(
+                HREF_PROBE_TIMEOUT_SECONDS,
+                remaining_seconds(resolved_deadline),
+            )
+            if probe_timeout >= 0.5:
+                probed_href = current_page_href(
+                    store_id,
+                    execute_script_fn=execute_script_fn,
+                    timeout=probe_timeout,
+                    deadline=resolved_deadline,
+                )
+        except Exception:
+            probed_href = ""
+        if href_matches(probed_href):
+            # region agent log
+            debug_log(
+                "navigate-schedule-timeout-but-arrived",
+                location="scripts/lib/sample_navigation.py:navigate_to_url",
+                hypothesisId="H-nav",
+                arrived_href=probed_href[:180],
+                target_url=url[:180],
+            )
+            # endregion
+            return {"ok": True, "href": probed_href, "already": False, "target_url": url}
+        if remaining_seconds(resolved_deadline) >= 1.0:
+            navigator(
+                store_id,
+                url,
+                execute_script_fn=execute_script_fn,
+            )
+        else:
+            raise
     # 跨域跳转会卸页；立刻 execute_script 常卡死并把整段等待吃掉。
     # 样品申请 → seller.us 实测约 2.5s 后 href 才变成订单页，先硬等再轮询。
     settle_seconds = max(2.0, min(3.5, poll_interval * 4)) if timeout >= 5 else max(0.2, poll_interval)
-    time.sleep(settle_seconds)
+    if not sleep_until_next_probe(resolved_deadline, settle_seconds):
+        raise SellerNavigationTimeout(
+            f"页面导航 settle 等待耗尽 deadline: target={url[:180]}"
+        )
     try:
         arrived_href = wait_for_page_href(
             store_id,
             href_matches,
-            timeout=max(1.0, timeout - settle_seconds),
+            deadline=resolved_deadline,
             poll_interval=poll_interval,
             execute_script_fn=execute_script_fn,
         )
@@ -263,30 +471,38 @@ def wait_for_page_href(
     timeout: float = 20.0,
     poll_interval: float = 0.5,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
+    deadline: float | None = None,
 ) -> str:
     """短轮询当前 href，直到命中目标页。不使用阻塞 visit_page。
 
-    跨域卸页时 execute_script 常超时。探测超时不计入等待预算，
-    否则几次 2s 超时就会把 30s 窗口吃光，而页面其实已经到了。
+    每个 probe（包括其 ``TimeoutExpired``）都消耗真实墙钟预算；
+    剩余时间不足以完成最小 probe 时，不再启动新的 subprocess。
     """
-    remaining = max(1.0, float(timeout))
+    resolved_deadline = (
+        deadline if deadline is not None else deadline_from_timeout(timeout)
+    )
     last_href = ""
     last_error = ""
-    while remaining > 0:
-        started_at = time.monotonic()
+    while True:
+        remaining = remaining_seconds(resolved_deadline)
+        if remaining <= 0:
+            break
+        probe_timeout = min(HREF_PROBE_TIMEOUT_SECONDS, remaining)
+        if probe_timeout < 0.5:
+            break
         try:
             last_href = current_page_href(
                 store_id,
                 execute_script_fn=execute_script_fn,
+                timeout=probe_timeout,
+                deadline=resolved_deadline,
             )
         except Exception as error:
             last_error = str(error)
             last_href = ""
-            time.sleep(max(0.2, poll_interval))
+            if not sleep_until_next_probe(resolved_deadline, max(0.2, poll_interval)):
+                break
             continue
-        remaining -= time.monotonic() - started_at
-        if remaining <= 0:
-            break
         if is_ziniao_navigation_error_href(last_href):
             raise RuntimeError(
                 "订单页跳转被紫鸟拦截，停在 error.html；"
@@ -294,8 +510,9 @@ def wait_for_page_href(
             )
         if href_matches(last_href):
             return last_href
-        time.sleep(max(0.2, poll_interval))
-    raise RuntimeError(
+        if not sleep_until_next_probe(resolved_deadline, max(0.2, poll_interval)):
+            break
+    raise SellerNavigationTimeout(
         "页面跳转超时。"
         f" last_href={last_href[:180]}"
         f" error={last_error}"
@@ -363,12 +580,12 @@ def _wait_for_sample_request_destination(
     poll_interval: float,
     execute_script_fn: Callable[..., Any],
 ) -> dict[str, str]:
-    deadline = time.monotonic() + max(1.0, navigation_timeout)
+    deadline = deadline_from_timeout(max(1.0, navigation_timeout))
     destination_state: dict[str, Any] = {}
     last_validation_error = ""
     stable_href = ""
     stable_count = 0
-    while time.monotonic() < deadline:
+    while remaining_seconds(deadline) > 0:
         try:
             candidate_state = execute_script_fn(
                 store_id,
@@ -398,7 +615,8 @@ def _wait_for_sample_request_destination(
                     stable_count = 1
                 if stable_count >= STABLE_DESTINATION_POLLS:
                     return destination_context
-        time.sleep(max(0.2, poll_interval))
+        if not sleep_until_next_probe(deadline, max(0.2, poll_interval)):
+            break
     raise RuntimeError(
         "自动导航样品申请页超时。"
         f" 最后页面={str(destination_state.get('href') or '')[:180]}"
@@ -442,8 +660,13 @@ def ensure_sample_request_context(
             pass
 
     # 筛查显式导航始终访问规范 URL，避免上次扫表停在中间分页后从该页续扫。
+    navigation_deadline = deadline_from_timeout(max(1.0, navigation_timeout))
     navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
-    time.sleep(max(2.0, poll_interval) if force_reload else max(0.8, min(poll_interval, 2.0)))
+    if not sleep_until_next_probe(
+        navigation_deadline,
+        max(2.0, poll_interval) if force_reload else max(0.8, min(poll_interval, 2.0)),
+    ):
+        raise RuntimeError("样品申请页导航 settle 等待耗尽 deadline")
     destination_context = _wait_for_sample_request_destination(
         store_id,
         navigation_timeout=navigation_timeout,
@@ -482,9 +705,9 @@ def navigate_from_seller_home_to_pending(
         page_wait=max(0.5, poll_interval),
         retries=4,
     )
-    readiness_deadline = time.monotonic() + max(5.0, navigation_timeout)
+    readiness_deadline = deadline_from_timeout(max(5.0, navigation_timeout))
     readiness_state: dict[str, Any] = {}
-    while time.monotonic() < readiness_deadline:
+    while remaining_seconds(readiness_deadline) > 0:
         try:
             candidate_readiness = execute_script_fn(
                 store_id,
@@ -498,7 +721,8 @@ def navigate_from_seller_home_to_pending(
             readiness_state = candidate_readiness
             if candidate_readiness.get("ready"):
                 break
-        time.sleep(max(0.2, poll_interval))
+        if not sleep_until_next_probe(readiness_deadline, max(0.2, poll_interval)):
+            break
     else:
         raise RuntimeError(
             "已进入待审核，但列表数据在超时前未就绪。"

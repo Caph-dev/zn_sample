@@ -14,6 +14,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.order_api import (  # noqa: E402
     build_logistics_query,
+    build_logistics_request,
+    enter_seller_order_page,
+    fetch_logistics_details_in_seller_context,
+    fetch_logistics_payload_in_seller_context,
     fetch_tiktok_logistics_details_api,
     fetch_tiktok_logistics_payload,
     fetch_tiktok_tracking_api,
@@ -103,6 +107,37 @@ class OrderApiParserTests(unittest.TestCase):
                 "fulfill_unit_ids[1]": "unit-2",
             },
         )
+
+    def test_query_defensively_cleans_fulfill_unit_ids(self) -> None:
+        query = build_logistics_query(
+            "order-test-001",
+            fulfill_unit_ids=[
+                "unit-1",
+                " unit-2 ",
+                "",
+                None,
+                "unit-1",
+                12345,
+            ],
+        )
+
+        self.assertEqual(
+            query,
+            {
+                "main_order_id": "order-test-001",
+                "fulfill_unit_ids[0]": "unit-1",
+                "fulfill_unit_ids[1]": "unit-2",
+                "fulfill_unit_ids[2]": "12345",
+            },
+        )
+
+    def test_request_omits_non_string_fulfill_values_after_cleaning(self) -> None:
+        request = build_logistics_request(
+            "order-test-001",
+            fulfill_unit_ids=[None, "", "   ", "unit-1", "unit-1"],
+        )
+
+        self.assertEqual(request["fulfill_unit_ids"], ["unit-1"])
 
     def test_extracts_tracking_number_from_logistics_payload(self) -> None:
         result = parse_logistics_payload(
@@ -362,6 +397,72 @@ class LogisticsDetailsParserTests(unittest.TestCase):
 
 
 class OrderApiAdapterTests(unittest.TestCase):
+    @patch("lib.order_api.get_seller_read_json")
+    @patch("lib.order_api.get_seller_page_context")
+    @patch("lib.order_api.wait_for_seller_order_page_ready")
+    @patch("lib.order_api.navigate_to_url")
+    @patch("lib.order_api.time.sleep")
+    def test_no_logistics_get_before_order_page_stable(
+        self,
+        _sleep,
+        navigate_to_url,
+        wait_ready,
+        get_context,
+        get_read_json,
+    ) -> None:
+        wait_ready.side_effect = RuntimeError("订单页稳定就绪超时")
+        get_context.return_value = SellerPageContext(
+            href="https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+            shop_id="shop-test",
+            shop_region="US",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "稳定就绪超时"):
+            enter_seller_order_page(
+                "store-test",
+                shop_id="shop-test",
+                wait=0,
+            )
+
+        navigate_to_url.assert_called_once()
+        wait_ready.assert_called_once()
+        get_read_json.assert_not_called()
+
+    @patch("lib.order_api.get_seller_read_json")
+    @patch("lib.order_api.get_seller_page_context")
+    @patch("lib.order_api.wait_for_seller_order_page_ready")
+    @patch("lib.order_api.navigate_to_url")
+    @patch("lib.order_api.time.sleep")
+    def test_enters_once_and_returns_reusable_seller_context(
+        self,
+        _sleep,
+        navigate_to_url,
+        wait_ready,
+        get_context,
+        get_read_json,
+    ) -> None:
+        wait_ready.return_value = {"href": "https://seller.us.tiktokshopglobalselling.com/order?tab=all"}
+        get_context.return_value = SellerPageContext(
+            href="https://seller.us.tiktokshopglobalselling.com/order?tab=all",
+            shop_id="shop-test",
+            shop_region="US",
+        )
+        progress_messages = []
+
+        context = enter_seller_order_page(
+            "store-test",
+            shop_id="shop-test",
+            wait=0,
+            progress=progress_messages.append,
+        )
+
+        self.assertEqual(context.shop_id, "shop-test")
+        self.assertEqual(
+            progress_messages,
+            ["正在进入商家订单页", "正在等待订单页稳定", "订单页已稳定"],
+        )
+        get_read_json.assert_not_called()
+
     @patch("lib.order_api.fetch_tiktok_logistics_payload")
     def test_fetches_and_parses_logistics_details(self, fetch_payload) -> None:
         fetch_payload.return_value = load_logistics_fixture(

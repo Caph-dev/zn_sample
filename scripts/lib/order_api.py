@@ -7,20 +7,34 @@ import json
 import re
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from .order_dom import order_lookup_url
+from .order_dom import order_lookup_url, seller_order_host
 from .page_api import (
     SELLER_LOGISTICS_ENDPOINT,
     PageApiSchemaError,
+    SellerPageContext,
     get_seller_page_context,
     get_seller_read_json,
 )
-from .sample_navigation import is_seller_order_href, navigate_to_url
+from .sample_navigation import (
+    is_seller_order_href,
+    navigate_to_url,
+    wait_for_seller_order_page_ready,
+)
+from .time_budget import remaining_seconds
 from .tracking_parse import normalize_carrier, normalize_tracking
+from .zclaw import zclaw_exec
+
+# 阶段与批次预算：任何子阶段不得超出自身上限。
+SELLER_NAVIGATION_TIMEOUT = 45
+SELLER_PAGE_READY_TIMEOUT = 30
+PER_ORDER_LOGISTICS_TIMEOUT = 70
+RETURN_TO_SAMPLE_TIMEOUT = 30
 
 TRACKING_KEY_PATTERN = re.compile(
     r"(?:tracking|waybill|logistic|express|shipment|shipping)",
@@ -60,6 +74,19 @@ LOGISTICS_PROGRESS = {
 LOGISTICS_EXCEPTION_CATEGORIES = frozenset({"exception", "returned", "lost"})
 
 
+def _normalized_fulfill_unit_ids(fulfill_unit_ids: Iterable[Any]) -> list[str]:
+    """字符串化、去空白、丢弃空值/None、按首次出现顺序去重。"""
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in fulfill_unit_ids or ():
+        text = "" if value is None else str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
 def build_logistics_request(
     order_id: str,
     *,
@@ -71,7 +98,7 @@ def build_logistics_request(
         raise ValueError("empty-order-id")
     return {
         "main_order_id": normalized_order_id,
-        "fulfill_unit_ids": [str(value) for value in fulfill_unit_ids if str(value)],
+        "fulfill_unit_ids": _normalized_fulfill_unit_ids(fulfill_unit_ids),
     }
 
 
@@ -436,6 +463,126 @@ def fetch_tiktok_tracking_api(
     return parse_logistics_payload(payload, order_id=normalized_order_id)
 
 
+def seller_order_page_url(
+    *,
+    shop_id: str = "",
+    shop_region: str = "US",
+    seller_host: str = "",
+) -> str:
+    """商家订单列表页入口 URL；批量查询只进入一次，不逐单跳转。"""
+    host = seller_order_host(shop_region=shop_region, seller_host=seller_host)
+    region = str(shop_region or "US").strip().upper() or "US"
+    url = f"https://{host}/order?tab=all&shop_region={quote(region)}"
+    if str(shop_id or "").strip():
+        url += f"&shop_id={quote(str(shop_id).strip())}"
+    return url
+
+
+def enter_seller_order_page(
+    store_id: str,
+    *,
+    shop_id: str = "",
+    shop_region: str = "US",
+    timeout: float | None = None,
+    poll_interval: float = 0.5,
+    wait: float = 4.0,
+    execute_script_fn: Callable[..., Any] = zclaw_exec,
+    navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
+    progress: Callable[[str], None] | None = None,
+    deadline: float | None = None,
+) -> SellerPageContext:
+    """进入商家订单页、确认页面稳定，并返回可复用的页面上下文。
+
+    只在批次开始时调用一次；之后所有订单复用同一 context 执行物流 GET。
+    导航与稳定探测分别服从 SELLER_NAVIGATION_TIMEOUT / SELLER_PAGE_READY_TIMEOUT，
+    且都裁剪到传入的整体 deadline 内。
+    """
+    navigation_timeout = timeout if timeout is not None else max(30.0, wait + 20.0)
+    if deadline is not None:
+        navigation_timeout = min(navigation_timeout, remaining_seconds(deadline))
+    navigation_deadline = time.monotonic() + max(1.0, navigation_timeout)
+    report = progress or (lambda _message: None)
+    report("正在进入商家订单页")
+    navigate_to_url(
+        store_id,
+        seller_order_page_url(shop_id=shop_id, shop_region=shop_region),
+        is_seller_order_href,
+        timeout=navigation_timeout,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+        navigate_page_fn=navigate_page_fn,
+        deadline=navigation_deadline,
+    )
+    time.sleep(max(0.8, min(wait, 2.5)))
+    report("正在等待订单页稳定")
+    readiness_deadline = time.monotonic() + SELLER_PAGE_READY_TIMEOUT
+    if deadline is not None:
+        readiness_deadline = min(readiness_deadline, deadline)
+    readiness_state = wait_for_seller_order_page_ready(
+        store_id,
+        deadline=readiness_deadline,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+    )
+    context = get_seller_page_context(
+        store_id,
+        shop_id=str(shop_id or ""),
+        shop_region=str(shop_region or "US"),
+    )
+    report("订单页已稳定")
+    return context
+
+
+def fetch_logistics_payload_in_seller_context(
+    store_id: str,
+    order_id: str,
+    *,
+    context: SellerPageContext,
+    fulfill_unit_ids: Iterable[str] = (),
+    retries: int = 1,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """假定已经位于订单页，只执行当前订单的白名单物流 GET。"""
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        raise ValueError("empty-order-id")
+    return get_seller_read_json(
+        store_id,
+        SELLER_LOGISTICS_ENDPOINT,
+        query=build_logistics_query(
+            normalized_order_id,
+            fulfill_unit_ids=fulfill_unit_ids,
+        ),
+        context=context,
+        retries=retries,
+        deadline=deadline,
+    )
+
+
+def fetch_logistics_details_in_seller_context(
+    store_id: str,
+    order_id: str,
+    *,
+    context: SellerPageContext,
+    fulfill_unit_ids: Iterable[str] = (),
+    retries: int = 1,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """在现有 seller context 中查询并解析一个订单的物流详情。"""
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        return {"ok": False, "error": "empty-order-id"}
+    payload = fetch_logistics_payload_in_seller_context(
+        store_id,
+        normalized_order_id,
+        context=context,
+        fulfill_unit_ids=fulfill_unit_ids,
+        retries=retries,
+        deadline=deadline,
+    )
+    return parse_logistics_details(payload, order_id=normalized_order_id)
+
+
 def fetch_tiktok_logistics_payload(
     store_id: str,
     order_id: str,
@@ -446,7 +593,10 @@ def fetch_tiktok_logistics_payload(
     wait: float = 4.0,
     retries: int = 1,
 ) -> dict[str, Any]:
-    """Fetch the raw allowlisted logistics JSON without persisting it."""
+    """Fetch the raw allowlisted logistics JSON without persisting it.
+
+    兼容包装：进入订单页 → 查询一个订单 → 返回原始 payload。
+    """
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         raise ValueError("empty-order-id")
@@ -468,14 +618,11 @@ def fetch_tiktok_logistics_payload(
         shop_id=str(shop_id or ""),
         shop_region=str(shop_region or "US"),
     )
-    return get_seller_read_json(
+    return fetch_logistics_payload_in_seller_context(
         store_id,
-        SELLER_LOGISTICS_ENDPOINT,
-        query=build_logistics_query(
-            normalized_order_id,
-            fulfill_unit_ids=fulfill_unit_ids,
-        ),
+        normalized_order_id,
         context=context,
+        fulfill_unit_ids=fulfill_unit_ids,
         retries=retries,
     )
 
@@ -490,7 +637,10 @@ def fetch_tiktok_logistics_details_api(
     wait: float = 4.0,
     retries: int = 1,
 ) -> dict[str, Any]:
-    """Fetch and parse verified logistics detail fields."""
+    """Fetch and parse verified logistics detail fields.
+
+    兼容包装：进入订单页 → 查询一个订单 → 返回已解析详情。
+    """
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return {"ok": False, "error": "empty-order-id"}

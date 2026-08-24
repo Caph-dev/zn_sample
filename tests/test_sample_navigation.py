@@ -10,6 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.sample_navigation import (  # noqa: E402
     INSPECT_NAVIGATION_PAGE_JS,
+    INSPECT_SELLER_ORDER_READINESS_JS,
     SAMPLE_REQUEST_URL,
     current_page_href,
     ensure_sample_request_context,
@@ -17,6 +18,8 @@ from lib.sample_navigation import (  # noqa: E402
     is_seller_order_href,
     is_ziniao_navigation_error_href,
     wait_for_page_href,
+    wait_for_seller_order_page_ready,
+    validate_seller_order_readiness,
     navigate_from_seller_home_to_pending,
     navigate_to_sample_request,
     sample_request_url,
@@ -24,6 +27,7 @@ from lib.sample_navigation import (  # noqa: E402
     validate_navigation_start,
     validate_sample_request_destination,
 )
+from lib.sync_errors import SellerNavigationTimeout, SellerPageReadinessTimeout  # noqa: E402
 
 SAMPLE_HREF = (
     "https://affiliate.tiktokshopglobalselling.com/"
@@ -215,7 +219,7 @@ class SampleNavigationFlowTests(unittest.TestCase):
         ensure_pending.assert_called_once()
         self.assertEqual(result["destination"]["shop_id"], "shop-two")
 
-    @patch("lib.sample_navigation.time.sleep")
+    @patch("lib.time_budget.time.sleep")
     def test_navigates_from_order_and_product_pages(self, _sleep) -> None:
         for start_href in (
             "https://seller.us.tiktokshopglobalselling.com/order?tab=all",
@@ -256,7 +260,7 @@ class SampleNavigationFlowTests(unittest.TestCase):
         self.assertTrue(result["already"])
         self.assertEqual(result["destination"]["shop_id"], "shop-two")
 
-    @patch("lib.sample_navigation.time.sleep")
+    @patch("lib.time_budget.time.sleep")
     def test_ensure_context_waits_for_shop_id_from_seller_subpage(self, _sleep) -> None:
         navigate_page = Mock(return_value={"ok": True})
         result = ensure_sample_request_context(
@@ -276,7 +280,7 @@ class SampleNavigationFlowTests(unittest.TestCase):
         self.assertFalse(result["already"])
         self.assertEqual(result["destination"]["shop_id"], "shop-two")
 
-    @patch("lib.sample_navigation.time.sleep")
+    @patch("lib.time_budget.time.sleep")
     def test_ignores_transient_sample_url_if_order_page_bounces_back(self, _sleep) -> None:
         order_state = {
             "href": (
@@ -296,7 +300,7 @@ class SampleNavigationFlowTests(unittest.TestCase):
         )
         self.assertEqual(result["destination"]["shop_id"], "shop-two")
 
-    @patch("lib.sample_navigation.time.sleep")
+    @patch("lib.time_budget.time.sleep")
     def test_times_out_if_sample_url_never_stabilizes(self, _sleep) -> None:
         order_state = {
             "href": "https://seller.tiktokshopglobalselling.com/order?tab=all",
@@ -418,28 +422,56 @@ class SampleNavigationFlowTests(unittest.TestCase):
         self.assertEqual(arrived, order_href)
         self.assertEqual(execute.call_count, 3)
 
-    @patch("lib.sample_navigation.time.sleep")
-    def test_wait_for_page_href_does_not_spend_budget_on_probe_timeouts(
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_for_page_href_probe_timeouts_consume_real_budget(
         self,
+        monotonic,
         _sleep,
     ) -> None:
-        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
-        execute = Mock(
-            side_effect=[
-                RuntimeError("timed out after 2 seconds"),
-                RuntimeError("timed out after 2 seconds"),
-                {"href": order_href},
-            ]
-        )
-        arrived = wait_for_page_href(
-            "store-two",
-            is_seller_order_href,
-            timeout=0.5,
-            poll_interval=0.01,
-            execute_script_fn=execute,
-        )
-        self.assertEqual(arrived, order_href)
-        self.assertEqual(execute.call_count, 3)
+        # TimeoutExpired 已消耗真实时间，必须计入 deadline 预算。
+        clock = {"now": 1000.0}
+
+        def tick():
+            clock["now"] += 0.6
+            return clock["now"]
+
+        monotonic.side_effect = tick
+        execute = Mock(side_effect=RuntimeError("timed out after 2 seconds"))
+
+        with self.assertRaises(SellerNavigationTimeout):
+            wait_for_page_href(
+                "store-two",
+                is_seller_order_href,
+                timeout=3,
+                poll_interval=0.01,
+                execute_script_fn=execute,
+            )
+
+        # 每次 probe 消耗真实时间，3 秒预算只够 2 次 probe。
+        self.assertEqual(execute.call_count, 2)
+
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_for_page_href_starts_no_subprocess_without_min_budget(
+        self,
+        monotonic,
+        _sleep,
+    ) -> None:
+        # 剩余 0.4 秒不足以完成最小 probe，不得再启动 subprocess。
+        monotonic.side_effect = lambda: 1000.0
+        execute = Mock(return_value={"href": "https://seller.us.tiktokshopglobalselling.com/order?tab=all"})
+
+        with self.assertRaisesRegex(RuntimeError, "页面跳转超时"):
+            wait_for_page_href(
+                "store-two",
+                is_seller_order_href,
+                timeout=0.35,
+                poll_interval=0.01,
+                execute_script_fn=execute,
+            )
+
+        execute.assert_not_called()
 
     def test_already_on_sample_page_skips_navigation(self) -> None:
         current_href = (
@@ -480,6 +512,217 @@ class SampleNavigationFlowTests(unittest.TestCase):
         self.assertEqual(result["href"], sample_href)
         navigate_page.assert_called_once()
         self.assertIn("shop_id=shop-two", navigate_page.call_args.args[1])
+
+    def test_schedule_timeout_probes_href_instead_of_replaying_navigation(self) -> None:
+        import subprocess
+
+        sample_href = (
+            "https://affiliate.tiktokshopglobalselling.com/"
+            "affiliate/sample/sample-request?shop_region=US&shop_id=shop-two"
+        )
+        # 第一次调度超时，但 href probe 显示已到目标页：不得重放导航。
+        order_href = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+        execute_script = Mock(side_effect=[{"href": order_href}, {"href": sample_href}])
+        navigate_page = Mock(
+            side_effect=subprocess.TimeoutExpired("ziniao-cli", 30)
+        )
+
+        result = navigate_to_sample_request(
+            "store-two",
+            shop_id="shop-two",
+            timeout=10,
+            poll_interval=0.01,
+            execute_script_fn=execute_script,
+            navigate_page_fn=navigate_page,
+        )
+
+        self.assertEqual(result["href"], sample_href)
+        navigate_page.assert_called_once()
+
+
+ORDER_HREF = "https://seller.us.tiktokshopglobalselling.com/order?tab=all"
+
+
+def _order_readiness_state(href=ORDER_HREF, ready_state="complete", **overrides):
+    state = {
+        "ok": True,
+        "href": href,
+        "ready_state": ready_state,
+        "has_document_element": True,
+        "has_body": True,
+        "has_app_root": True,
+        "is_login_page": False,
+        "is_error_page": False,
+    }
+    state.update(overrides)
+    return state
+
+
+class SellerOrderReadinessTests(unittest.TestCase):
+    def test_readiness_probe_reports_required_fields(self) -> None:
+        self.assertIn("ready_state", INSPECT_SELLER_ORDER_READINESS_JS)
+        self.assertIn("has_document_element", INSPECT_SELLER_ORDER_READINESS_JS)
+        self.assertIn("has_body", INSPECT_SELLER_ORDER_READINESS_JS)
+        self.assertIn("has_app_root", INSPECT_SELLER_ORDER_READINESS_JS)
+        self.assertIn("is_login_page", INSPECT_SELLER_ORDER_READINESS_JS)
+        self.assertIn("is_error_page", INSPECT_SELLER_ORDER_READINESS_JS)
+
+    def test_contract_accepts_seller_us_and_apex_hosts(self) -> None:
+        for href in (
+            ORDER_HREF,
+            "https://seller.tiktokshopglobalselling.com/order?tab=all",
+        ):
+            self.assertEqual(
+                validate_seller_order_readiness(_order_readiness_state(href=href)),
+                href,
+            )
+
+    def test_contract_rejects_affiliate_login_and_error_pages(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "seller host"):
+            validate_seller_order_readiness(
+                _order_readiness_state(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
+                )
+            )
+        with self.assertRaisesRegex(RuntimeError, "登录页"):
+            validate_seller_order_readiness(
+                _order_readiness_state(is_login_page=True)
+            )
+        with self.assertRaisesRegex(RuntimeError, "error.html"):
+            validate_seller_order_readiness(
+                _order_readiness_state(
+                    href="chrome-extension://edhdkldonkbhojdeilbcmhpplfiomheo/error.html"
+                )
+            )
+
+    def test_contract_requires_ready_state_and_app_root(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "readyState"):
+            validate_seller_order_readiness(
+                _order_readiness_state(ready_state="loading")
+            )
+        with self.assertRaisesRegex(RuntimeError, "应用根节点"):
+            validate_seller_order_readiness(
+                _order_readiness_state(has_app_root=False)
+            )
+        with self.assertRaisesRegex(RuntimeError, "document.body"):
+            validate_seller_order_readiness(
+                _order_readiness_state(has_body=False)
+            )
+
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_accepts_loading_then_interactive_then_complete(self, monotonic, _sleep) -> None:
+        clock = {"now": 1000.0}
+
+        def tick():
+            clock["now"] += 0.05
+            return clock["now"]
+
+        monotonic.side_effect = tick
+        states = iter(
+            [
+                _order_readiness_state(ready_state="loading"),
+                _order_readiness_state(ready_state="interactive"),
+                _order_readiness_state(),
+                _order_readiness_state(),
+            ]
+        )
+        execute = Mock(side_effect=lambda *a, **k: next(states))
+
+        state = wait_for_seller_order_page_ready(
+            "store-two",
+            deadline=1010.0,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+
+        self.assertEqual(state["ready_state"], "complete")
+        # loading 失败不计入，interactive + complete 连续两次成功即返回。
+        self.assertEqual(execute.call_count, 3)
+
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_resets_stability_after_execute_timeout(self, monotonic, _sleep) -> None:
+        clock = {"now": 1000.0}
+
+        def tick():
+            clock["now"] += 0.05
+            return clock["now"]
+
+        monotonic.side_effect = tick
+        states = iter(
+            [
+                _order_readiness_state(),
+                RuntimeError("timed out after 2 seconds"),
+                _order_readiness_state(),
+                _order_readiness_state(),
+            ]
+        )
+        execute = Mock(side_effect=lambda *a, **k: next(states))
+
+        state = wait_for_seller_order_page_ready(
+            "store-two",
+            deadline=1010.0,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+
+        self.assertEqual(state["ready_state"], "complete")
+        self.assertEqual(execute.call_count, 4)
+
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_resets_stability_after_bounce_to_sample_request(self, monotonic, _sleep) -> None:
+        clock = {"now": 1000.0}
+
+        def tick():
+            clock["now"] += 0.05
+            return clock["now"]
+
+        monotonic.side_effect = tick
+        sample_href = (
+            "https://affiliate.tiktokshopglobalselling.com/"
+            "affiliate/sample/sample-request?shop_region=US&shop_id=shop-two"
+        )
+        states = iter(
+            [
+                _order_readiness_state(),
+                _order_readiness_state(href=sample_href),
+                _order_readiness_state(),
+                _order_readiness_state(),
+            ]
+        )
+        execute = Mock(side_effect=lambda *a, **k: next(states))
+
+        state = wait_for_seller_order_page_ready(
+            "store-two",
+            deadline=1010.0,
+            poll_interval=0.01,
+            execute_script_fn=execute,
+        )
+
+        self.assertEqual(state["href"], ORDER_HREF)
+        self.assertEqual(execute.call_count, 4)
+
+    @patch("lib.time_budget.time.sleep")
+    @patch("lib.time_budget.time.monotonic")
+    def test_wait_times_out_when_never_stable(self, monotonic, _sleep) -> None:
+        clock = {"now": 1000.0}
+
+        def tick():
+            clock["now"] += 0.05
+            return clock["now"]
+
+        monotonic.side_effect = tick
+        execute = Mock(return_value=_order_readiness_state(ready_state="loading"))
+
+        with self.assertRaises(SellerPageReadinessTimeout):
+            wait_for_seller_order_page_ready(
+                "store-two",
+                deadline=1010.0,
+                poll_interval=0.01,
+                execute_script_fn=execute,
+            )
 
 
 if __name__ == "__main__":

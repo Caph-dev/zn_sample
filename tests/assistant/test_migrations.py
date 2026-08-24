@@ -63,11 +63,11 @@ class MigrationIntegrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0001_initial",
+                        "0002_add_shipment_sync_metadata",
                     )
 
                 for table_name, model_table in Base.metadata.tables.items():
-                    actual_columns = [
+                    actual_columns = sorted(
                         (
                             column["name"],
                             str(column["type"]),
@@ -75,11 +75,11 @@ class MigrationIntegrationTests(unittest.TestCase):
                             column["default"],
                         )
                         for column in inspector.get_columns(table_name)
-                    ]
-                    expected_columns = [
+                    )
+                    expected_columns = sorted(
                         (column.name, str(column.type), column.nullable, None)
                         for column in model_table.columns
-                    ]
+                    )
                     self.assertEqual(actual_columns, expected_columns, table_name)
 
                 expected_foreign_keys = {

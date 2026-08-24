@@ -82,6 +82,10 @@ class Shipment(TimestampMixin, Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str] = mapped_column(Text, default="")
     needs_delivery_time_confirmation: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    request_fingerprint: Mapped[str | None] = mapped_column(String)
+    last_error_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class ShipmentSnapshot(Base):
