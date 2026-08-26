@@ -167,6 +167,9 @@ def choose_available_port(starting_port: int) -> int:
     for port in range(starting_port, min(starting_port + 100, 65536)):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
             try:
+                # 旧实例刚退出时端口可能残留 TIME_WAIT 连接；
+                # 与 uvicorn 一样允许复用，保证重启回到原端口。
+                candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 candidate.bind((BIND_HOST, port))
             except OSError:
                 continue
