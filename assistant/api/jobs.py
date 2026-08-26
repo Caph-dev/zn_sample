@@ -194,6 +194,16 @@ def cancel_job(job_id: str, request: Request) -> dict:
         raise HTTPException(status_code=409, detail="job-not-cancellable")
 
 
+@router.get("/api/jobs/{job_id}/events")
+def list_job_events(job_id: str, request: Request, after: int = 0) -> dict:
+    """一次性 JSON 拉取事件（SSE 之外的补齐通道）。"""
+    session_factory = _session_factory(request)
+    with session_factory() as session:
+        if session.get(Job, job_id) is None:
+            raise HTTPException(status_code=404, detail="job-not-found")
+    return {"events": list_events(session_factory, job_id, after=max(0, after))}
+
+
 @router.get("/api/jobs/{job_id}/stream")
 def stream_job(job_id: str, request: Request, after: int = 0) -> StreamingResponse:
     session_factory = _session_factory(request)

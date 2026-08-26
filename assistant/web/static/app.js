@@ -604,8 +604,38 @@
     renderJobSnapshot(monitor.statusTarget, job);
     if (terminalStatuses.has(job.status)) {
       renderJobResult(monitor.resultTarget, job);
-      stopMonitor(monitor);
+      // 轮询快照可能早于 SSE 发完尾部事件；先补齐全量事件再关闭连接，
+      // 避免事件日志停在任务中段。
+      if (!monitor.terminalFinalized) {
+        monitor.terminalFinalized = true;
+        finalizeMonitor(monitor, job.id);
+      }
       document.dispatchEvent(new CustomEvent("assistant:job-complete", {detail: job}));
+    }
+  }
+
+  function monitorEventTarget(monitor) {
+    return monitor.eventsTarget || (monitor.useGlobalPanel
+      ? getGlobalPanel()?.querySelector("[data-task-events]")
+      : null);
+  }
+
+  async function finalizeMonitor(monitor, jobId) {
+    try {
+      const response = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}/events`,
+        {credentials: "same-origin", headers: {Accept: "application/json"}},
+      );
+      if (response.ok) {
+        const payload = await response.json();
+        for (const eventPayload of payload.events || []) {
+          appendEvent(monitorEventTarget(monitor), eventPayload, monitor);
+        }
+      }
+    } catch (_error) {
+      // SSE 已尽力补发；一次性补齐失败不阻塞收尾。
+    } finally {
+      stopMonitor(monitor);
     }
   }
 
@@ -665,9 +695,7 @@
     activeMonitors.set(jobId, monitor);
     resetGlobalPanel(monitor);
 
-    const eventTarget = monitor.eventsTarget || (monitor.useGlobalPanel
-      ? getGlobalPanel()?.querySelector("[data-task-events]")
-      : null);
+    const eventTarget = monitorEventTarget(monitor);
 
     const refreshSnapshot = () => {
       fetchJob(jobId)

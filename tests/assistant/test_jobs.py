@@ -769,6 +769,34 @@ class JobApiTests(JobTestCase):
             )
             session.commit()
 
+    def test_job_events_endpoint_returns_full_history(self) -> None:
+        job_id = self.add_job(status="succeeded")
+        for index in range(3):
+            append_event(
+                self.session_factory,
+                job_id,
+                level="info",
+                event_type="job.progress",
+                message=f"progress-{index}",
+            )
+
+        response = self.client.get(f"/api/jobs/{job_id}/events")
+        self.assertEqual(response.status_code, 200)
+        events = response.json()["events"]
+        self.assertEqual(
+            [event["message"] for event in events],
+            ["progress-0", "progress-1", "progress-2"],
+        )
+
+        after_response = self.client.get(f"/api/jobs/{job_id}/events?after=1")
+        self.assertEqual(
+            [event["message"] for event in after_response.json()["events"]],
+            ["progress-1", "progress-2"],
+        )
+
+        missing_response = self.client.get("/api/jobs/missing-job/events")
+        self.assertEqual(missing_response.status_code, 404)
+
     def test_sse_stream_hides_payload_summary(self) -> None:
         job_id = self.add_job(status="succeeded")
         append_event(
