@@ -48,8 +48,8 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertNotIn("单独操作", response.text)
         self.assertNotIn("0–3 脚本", response.text)
         self.assertIn("运行前准备", response.text)
-        self.assertIn("1–3 脚本", response.text)
-        self.assertIn("到货与跟进（只读）", response.text)
+        self.assertIn("运行 1–3", response.text)
+        self.assertIn("Part.B: 追踪物流，跟进达人视频发布", response.text)
         self.assertIn('action="/api/jobs/operator/prepare"', response.text)
         self.assertIn("data-preparation-status", response.text)
         self.assertIn("data-store-prepare-button", response.text)
@@ -58,7 +58,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertIn('action="/api/jobs/operator/tracking"', response.text)
         self.assertLess(
             response.text.index('action="/api/jobs/operator/prepare"'),
-            response.text.index("1–3 脚本"),
+            response.text.index("Part.A: 自动批准样品申请"),
         )
         self.assertLess(
             response.text.index('action="/api/jobs/operator/tracking"'),
