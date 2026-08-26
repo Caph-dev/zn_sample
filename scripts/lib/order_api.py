@@ -32,9 +32,14 @@ from .zclaw import zclaw_exec
 
 # 阶段与批次预算：任何子阶段不得超出自身上限。
 SELLER_NAVIGATION_TIMEOUT = 45
-SELLER_PAGE_READY_TIMEOUT = 30
+# 实测订单页 SPA 从 location.replace 到 complete 约 55–60s；
+# 就绪预算须覆盖加载期（30s 时页面仍在 interactive 且探测全部超时）。
+SELLER_PAGE_READY_TIMEOUT = 120
 PER_ORDER_LOGISTICS_TIMEOUT = 70
 RETURN_TO_SAMPLE_TIMEOUT = 30
+
+# 跨域跳转后 SPA 仍在解析大 bundle；settle 上限放宽到 8s（默认 wait=4）。
+SETTLE_AFTER_NAVIGATION_MAX_SECONDS = 8.0
 
 TRACKING_KEY_PATTERN = re.compile(
     r"(?:tracking|waybill|logistic|express|shipment|shipping)",
@@ -444,7 +449,7 @@ def fetch_tiktok_tracking_api(
         timeout=max(30.0, wait + 20.0),
         poll_interval=0.5,
     )
-    time.sleep(max(0.8, min(wait, 2.5)))
+    time.sleep(max(0.8, min(wait, SETTLE_AFTER_NAVIGATION_MAX_SECONDS)))
     context = get_seller_page_context(
         store_id,
         shop_id=str(shop_id or ""),
@@ -513,7 +518,7 @@ def enter_seller_order_page(
         navigate_page_fn=navigate_page_fn,
         deadline=navigation_deadline,
     )
-    time.sleep(max(0.8, min(wait, 2.5)))
+    time.sleep(max(0.8, min(wait, SETTLE_AFTER_NAVIGATION_MAX_SECONDS)))
     report("正在等待订单页稳定")
     readiness_deadline = time.monotonic() + SELLER_PAGE_READY_TIMEOUT
     if deadline is not None:
@@ -612,7 +617,7 @@ def fetch_tiktok_logistics_payload(
         timeout=max(30.0, wait + 20.0),
         poll_interval=0.5,
     )
-    time.sleep(max(0.8, min(wait, 2.5)))
+    time.sleep(max(0.8, min(wait, SETTLE_AFTER_NAVIGATION_MAX_SECONDS)))
     context = get_seller_page_context(
         store_id,
         shop_id=str(shop_id or ""),

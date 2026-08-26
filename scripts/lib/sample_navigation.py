@@ -90,7 +90,7 @@ INSPECT_SELLER_ORDER_READINESS_JS = r"""
     || /Log in to TikTok Shop|登录 TikTok Shop|Sign in to TikTok Shop/i.test(bodyText);
   const errorPage = /error\.html/i.test(pathname);
   const appRoot = !!document.querySelector(
-    '#root, #app, #__next, [id^="app"], [data-app]'
+    '#layout, #root, #app, #__next, [id^="app"], [data-app]'
   );
   return JSON.stringify({
     ok: true,
@@ -628,7 +628,7 @@ def ensure_sample_request_context(
     store_id: str,
     *,
     force_reload: bool = False,
-    navigation_timeout: float = 45.0,
+    navigation_timeout: float = 90.0,
     poll_interval: float = 1.5,
     navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
@@ -636,6 +636,8 @@ def ensure_sample_request_context(
     """从已登录商家中心任意子页跳到样品申请，并等到 URL 带上 shop_id。
 
     空白页和登录页拒绝。个别页 execute_script 失败或跳转被拦住时超时退出。
+    实测样品申请页 SPA 加载期 execute_script 可阻塞 5–24s、到 complete 约
+    60s，预算必须覆盖加载期（45s 时探测全部超时、连 href 稳定都等不到）。
     """
     initial_state = execute_script_fn(
         store_id,
@@ -664,7 +666,7 @@ def ensure_sample_request_context(
     navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
     if not sleep_until_next_probe(
         navigation_deadline,
-        max(2.0, poll_interval) if force_reload else max(0.8, min(poll_interval, 2.0)),
+        max(2.0, poll_interval) if force_reload else max(2.0, min(poll_interval, 4.0)),
     ):
         raise RuntimeError("样品申请页导航 settle 等待耗尽 deadline")
     destination_context = _wait_for_sample_request_destination(
@@ -684,7 +686,7 @@ def ensure_sample_request_context(
 def navigate_from_seller_home_to_pending(
     store_id: str,
     *,
-    navigation_timeout: float = 45.0,
+    navigation_timeout: float = 90.0,
     poll_interval: float = 1.5,
     navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
     execute_script_fn: Callable[..., Any] = zclaw_exec,

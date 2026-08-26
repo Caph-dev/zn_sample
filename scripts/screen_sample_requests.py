@@ -1835,7 +1835,7 @@ def main() -> int:
         try:
             navigation_result = navigate_from_seller_home_to_pending(
                 store_id,
-                navigation_timeout=45.0,
+                navigation_timeout=90.0,
                 poll_interval=max(0.5, min(2.0, args.page_wait)),
             )
         except Exception as error:

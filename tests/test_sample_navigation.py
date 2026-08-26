@@ -154,13 +154,15 @@ class SampleNavigationValidationTests(unittest.TestCase):
 
 
 class SampleNavigationFlowTests(unittest.TestCase):
-    def test_href_probes_use_short_timeout_constant(self) -> None:
+    def test_href_probes_use_measured_timeout_constant(self) -> None:
         from inspect import signature
 
         from lib.page_api import get_affiliate_page_context, get_seller_page_context
         from lib.zclaw import HREF_PROBE_TIMEOUT_SECONDS
 
-        self.assertEqual(HREF_PROBE_TIMEOUT_SECONDS, 2)
+        # 实测订单页 SPA 加载期 execute_script 可阻塞 5–24s；
+        # 探测单次超时必须覆盖该量级，否则每次探测必超时。
+        self.assertEqual(HREF_PROBE_TIMEOUT_SECONDS, 15)
         self.assertEqual(
             signature(current_page_href).parameters["timeout"].default,
             HREF_PROBE_TIMEOUT_SECONDS,
@@ -566,6 +568,11 @@ class SellerOrderReadinessTests(unittest.TestCase):
         self.assertIn("has_app_root", INSPECT_SELLER_ORDER_READINESS_JS)
         self.assertIn("is_login_page", INSPECT_SELLER_ORDER_READINESS_JS)
         self.assertIn("is_error_page", INSPECT_SELLER_ORDER_READINESS_JS)
+
+    def test_readiness_probe_matches_real_order_page_app_root(self) -> None:
+        # 实测 2 号店订单页：根容器是 <div id="layout">，body 直接子元素，
+        # 没有 #root/#app/#__next 这类常见 SPA 根节点。
+        self.assertIn("#layout", INSPECT_SELLER_ORDER_READINESS_JS)
 
     def test_contract_accepts_seller_us_and_apex_hosts(self) -> None:
         for href in (

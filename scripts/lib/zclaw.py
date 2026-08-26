@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 # 长跑后 execute_script 偶发 network 假阳性（doctor 仍绿）；批准前会探活+重试
 DEFAULT_EXEC_RETRIES = 4
 DEFAULT_EXEC_RETRY_BASE_SEC = 1.5
-# 跨域卸页时 execute_script 会卡住。href 探测必须短超时，且不得把这次
-# 超时算进外层等待预算，否则几次探测就会把 20–30s 窗口吃光。
-HREF_PROBE_TIMEOUT_SECONDS = 2
+# 跨域卸页/SPA 加载时 execute_script 会卡住。实测订单页 reload 后：
+# loading 期单次探测 5.4s，interactive 期 5.6–11.5s，complete 前最后一次 24s。
+# 短超时（2s）只会让每次探测都超时、把整个等待预算吃光。href/就绪探测
+# 必须给足单次上限；总预算仍由调用方 deadline 控制。
+HREF_PROBE_TIMEOUT_SECONDS = 15
 
 
 def is_timeout_expired_error(error: BaseException) -> bool:

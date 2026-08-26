@@ -142,11 +142,15 @@ def shop_id_from_href(href: str) -> str:
 
 
 def ensure_sample_page_loaded(store_id: str, *, page_wait: float = 2.0) -> dict[str, Any]:
-    """只保证样品申请页带 shop_id，不点击「已发货」tab。API 读取走 tab=30。"""
+    """只保证样品申请页带 shop_id，不点击「已发货」tab。API 读取走 tab=30。
+
+    实测样品申请页 SPA 加载期 execute_script 可阻塞 5–24s；导航预算须
+    覆盖到页面稳定（约 60s），否则加载期探测全部超时。
+    """
     result = ensure_sample_request_context(
         store_id,
         force_reload=False,
-        navigation_timeout=max(20.0, page_wait + 15.0),
+        navigation_timeout=max(90.0, page_wait + 75.0),
         poll_interval=max(0.5, min(2.0, page_wait)),
     )
     href = str((result.get("destination") or {}).get("href") or "")
@@ -173,7 +177,7 @@ def ensure_on_sample_page(
     ensure_sample_request_context(
         store_id,
         force_reload=False,
-        navigation_timeout=max(20.0, page_wait + 15.0),
+        navigation_timeout=max(90.0, page_wait + 75.0),
         poll_interval=max(0.5, min(2.0, page_wait)),
     )
     attempts = max(1, int(retries) + 1)

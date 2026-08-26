@@ -164,6 +164,10 @@
 3. 探 DOM 只用 `execute_script`；失败先查：留在详情页、Bridge、错 tab、未全部展开。
 4. 与 zn_daren 共用时引用、不复制大段 `zclaw_dom`。
 5. 同一错误第二次 → 补一条可验证规则。纪律变更同步 README。删冗长：删掉会不会更容易犯错？不会就删。
+6. **页面探测参数/契约先实测再写死**（2026-08-26 连踩三坑的教训）：
+   - 跨域导航后 TikTok 卖家/联盟 SPA 加载到 complete 约 55–60s，期间 `execute_script` 单次可阻塞 5–24s（稳态仅 0.5–2s）。探测单次超时 ≥15s（`HREF_PROBE_TIMEOUT_SECONDS`）；页面稳定/导航预算 ≥90s（20–45s 必超时）。改值前先跑 `ziniao-cli zclaw invoke execute_script` 计时实测延迟曲线。
+   - 页面 DOM 契约（应用根节点等）选择器须实测真实结构再写：订单页根容器是 `#layout`，不是 `#root/#app/#__next`。
+   - 改完代码必须重启操作台才生效（`launch_assistant.py` 已自动 kill 旧实例；旧进程持单实例锁会让新代码永远不加载）。
 
 <!-- ASTRYX:START -->
 Astryx v0.4.6 · 158 components

@@ -1087,8 +1087,8 @@ class ShipmentSyncTests(unittest.TestCase):
         monotonic.side_effect = lambda: clock["now"]
 
         def fetch_consuming_time(_store_id, _order_id, **_kwargs):
-            # 模拟一次物流 GET 消耗 300 秒真实墙钟。
-            clock["now"] += 300
+            # 模拟一次物流 GET 消耗 400 秒真实墙钟。
+            clock["now"] += 400
             return self.build_logistics_details("slow-tracking")
 
         with (
@@ -1118,7 +1118,7 @@ class ShipmentSyncTests(unittest.TestCase):
                     job_progress=lambda *args: None,
                 )
 
-        # 批次 deadline = 45+30+70*2+30 = 245s；第一个订单就耗掉 300s，
+        # 批次 deadline = 45+120+70*2+30 = 335s；第一个订单就耗掉 400s，
         # 第二个订单不允许再启动。
         self.assertEqual(fetch_details.call_count, 1)
 
