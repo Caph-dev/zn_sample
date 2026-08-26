@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
@@ -9,6 +10,10 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, FollowupTask, SampleCase, Shipment, Store
@@ -92,11 +97,23 @@ class FollowupGenerateTests(unittest.TestCase):
         with self.session_factory() as session:
             self.assertEqual([task.stage for task in session.scalars(select(FollowupTask)).all()], ["day_10_list"])
 
-    def test_wrong_product_and_b005_sku_cannot_authorize_task_or_image(self) -> None:
-        self.add_case(curr_status=40, delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc), product_id="wrong", resolved_sku="B005")
+    def test_non_hero_product_generates_task_without_image(self) -> None:
+        # 跟进不分商品：非 B005 也生成任务；刚到货不配图，走 arrival_other 话术。
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            product_id="1732060411527205730",
+            is_video_creator="是",
+            language="en",
+        )
         FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
         with self.session_factory() as session:
-            self.assertEqual(session.scalars(select(FollowupTask)).all(), [])
+            task = session.scalar(select(FollowupTask))
+            self.assertIsNotNone(task)
+            self.assertEqual(task.stage, "arrival")
+            self.assertEqual(task.attachment_key, "")
+            self.assertIn("arrival_other", task.template_key)
+            self.assertIn("excited to see your content", task.message_preview)
 
     def test_ambiguous_creator_flags_require_review(self) -> None:
         self.add_case(curr_status=40, delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc), is_video_creator="是", is_live_creator="是", language="en")

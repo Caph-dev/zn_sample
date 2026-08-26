@@ -18,7 +18,6 @@ from assistant.domain.message_templates import TEMPLATE_VERSION, choose_template
 from assistant.domain.policies import choose_followup_creator_type, choose_followup_language
 from assistant.domain.sku_images import resolve_followup_attachment
 from assistant.domain.timeutil import beijing_now
-from scripts.lib.filters import ACTIVE_HERO_PRODUCT_ID
 
 
 class FollowupService:
@@ -34,9 +33,8 @@ class FollowupService:
         created = 0
         with self.session_factory() as session:
             cases = session.scalars(select(SampleCase)).all()
+            # 跟进不分商品（B005 与非 B005 都跟进）；批准仍只过 B005。
             for sample_case in cases:
-                if sample_case.product_id != ACTIVE_HERO_PRODUCT_ID:
-                    continue
                 self.cancel_check()
                 shipment = session.scalar(
                     select(Shipment).where(Shipment.sample_case_id == sample_case.id)

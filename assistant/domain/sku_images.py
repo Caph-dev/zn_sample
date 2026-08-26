@@ -1,4 +1,4 @@
-"""Attachment resolution for the single active B005 product."""
+"""Attachment resolution: only B005 ships an image (讲解图); other products get text only."""
 from __future__ import annotations
 
 from scripts.lib.filters import ACTIVE_HERO_PRODUCT_ID
