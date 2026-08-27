@@ -89,6 +89,18 @@ def create_creator_enrich(request: Request) -> dict:
     return {"job_id": job_id, "deduplicated": deduplicated}
 
 
+@router.post("/api/jobs/content-thanks-preview")
+def create_content_thanks_preview(request: Request) -> dict:
+    """Create the dry-run completed-content thanks preview job. Never sends."""
+    session_factory = _session_factory(request)
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type="content_thanks_preview",
+        store_id=None,
+    )
+    return {"job_id": job_id, "deduplicated": deduplicated}
+
+
 def _create_operator_job(
     request: Request,
     *,

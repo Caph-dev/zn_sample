@@ -22,6 +22,7 @@ from lib.sample_api import (  # noqa: E402
     locate_pending_application,
     parse_pending_list_payload,
     scrape_pending_list_api,
+    scrape_completed_list_api,
     scrape_processing_list_api,
     scrape_shipped_list_api,
 )
@@ -110,6 +111,31 @@ class SampleApiParserTests(unittest.TestCase):
 
         self.assertEqual(rows, [])
         self.assertEqual(request_bodies[0]["tab"], 40)
+        assert_pending.assert_not_called()
+
+    def test_completed_scraper_searches_creator_on_completed_tab(self) -> None:
+        request_bodies: list[dict] = []
+
+        def request_json(store_id: str, endpoint: str, body: dict, **kwargs) -> dict:
+            request_bodies.append(body)
+            return {"code": 0, "agg_info": [], "total_count": 0, "has_more": False}
+
+        with patch("lib.sample_api.assert_on_pending_list") as assert_pending:
+            rows = scrape_completed_list_api(
+                "store-test",
+                creator_handle="alice",
+                max_pages=1,
+                request_json=request_json,
+                context=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+            )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(request_bodies[0]["tab"], 50)
+        self.assertEqual(request_bodies[0]["search_params"][0]["value"], "alice")
         assert_pending.assert_not_called()
 
     def test_scraper_follows_has_more_and_deduplicates(self) -> None:

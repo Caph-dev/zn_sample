@@ -1,0 +1,342 @@
+"""Dry-run SOP 2 content-thanks: Feishu 待发布 → 已完成 tab → preview DM.
+
+Development/test always keep execute=False and write_feishu=False.
+Uncertain matches, thread copy, or content type are held, never sent.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select
+
+from assistant.database.models import FollowupTask, SampleCase
+from assistant.domain.content_thanks import (
+    CONTENT_THANKS_STAGE,
+    DECISION_ALREADY_SENT,
+    DECISION_HOLD,
+    DECISION_PREVIEW,
+    DECISION_SKIP,
+    classify_completed_content,
+    content_thanks_since,
+    decide_content_thanks_action,
+    first_content_url,
+    match_completed_rows,
+    render_content_thanks_preview,
+    resolve_content_thanks_language,
+)
+from assistant.domain.followup_stage import followup_task_completed
+from assistant.domain.timeutil import beijing_now
+from assistant.jobs.registry import HandlerFailure
+from assistant.services.store_service import StoreService
+from scripts.lib.feishu_bitable import (
+    _field_plain,
+    record_outreach_ms,
+)
+
+
+class ContentThanksService:
+    def __init__(
+        self,
+        session_factory,
+        *,
+        warning=None,
+        cancel_check=None,
+        progress=None,
+        execute: bool = False,
+        write_feishu: bool = False,
+        list_completed=None,
+        inspect_content=None,
+        send_message=None,
+        search_feishu=None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.session_factory = session_factory
+        self.warning = warning or (lambda message: None)
+        self.cancel_check = cancel_check or (lambda: None)
+        self.progress = progress or (lambda current, total, message: None)
+        if execute or write_feishu:
+            raise HandlerFailure(
+                "content-thanks-writes-disabled",
+                "开发和测试阶段禁止实际发送私信或写飞书。",
+            )
+        self.execute = False
+        self.write_feishu = False
+        self.list_completed = list_completed
+        self.inspect_content = inspect_content
+        self.send_message = send_message
+        self.search_feishu = search_feishu
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def preview(self) -> dict[str, Any]:
+        self.cancel_check()
+        store_result = StoreService(self.session_factory).resolve_unique_running_store()
+        if not store_result.get("ok"):
+            raise HandlerFailure("running-not-unique", "请只开一家店后再预演已完成感谢私信。")
+        store = store_result["store"]
+        store_id = str(store.get("storeId") or "")
+        shop_id = str(store.get("shopId") or "")
+        now = beijing_now(self.clock())
+        records = self._load_feishu_candidates(now)
+        summary = {
+            "candidates": len(records),
+            "preview": 0,
+            "already_sent": 0,
+            "hold": 0,
+            "skip": 0,
+            "execute": False,
+            "write_feishu": False,
+            "rows": [],
+        }
+        total = max(1, len(records))
+        for index, record in enumerate(records, start=1):
+            self.cancel_check()
+            self.progress(index - 1, total, f"预演已完成感谢 {index}/{len(records)}")
+            row = self._preview_record(
+                store_id=store_id,
+                shop_id=shop_id,
+                record=record,
+                now=now,
+            )
+            summary["rows"].append(row)
+            decision = str(row.get("decision") or DECISION_HOLD)
+            if decision == DECISION_PREVIEW:
+                summary["preview"] += 1
+            elif decision == DECISION_ALREADY_SENT:
+                summary["already_sent"] += 1
+            elif decision == DECISION_SKIP:
+                summary["skip"] += 1
+            else:
+                summary["hold"] += 1
+        self.progress(total, total, "已完成感谢预演结束")
+        return summary
+
+    def _load_feishu_candidates(self, now: datetime) -> list[dict[str, Any]]:
+        if self.search_feishu is not None:
+            return list(self.search_feishu(since=content_thanks_since(now)) or [])
+        from lib.app_config import load_bitable_settings
+        from lib.feishu_bitable import (
+            DEFAULT_BITABLE_APP_ID,
+            FeishuBitableError,
+            get_bitable_access_token,
+            search_pending_post_records,
+        )
+
+        settings = load_bitable_settings(default_app_id=DEFAULT_BITABLE_APP_ID)
+        if not (settings.get("app_id") and settings.get("app_secret")):
+            raise HandlerFailure("feishu-credentials-missing", "未配置飞书密钥，无法读取待发布达人。")
+        try:
+            token = get_bitable_access_token()
+            return search_pending_post_records(token, since=content_thanks_since(now))
+        except FeishuBitableError as error:
+            raise HandlerFailure("feishu-search-failed", str(error)) from error
+
+    def _preview_record(
+        self,
+        *,
+        store_id: str,
+        shop_id: str,
+        record: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        creator_handle = _field_plain(fields.get("红人ID")).strip()
+        sample_product = _field_plain(fields.get("寄样产品")).strip()
+        feishu_status = _field_plain(fields.get("合作状态")).strip()
+        feishu_lang = _field_plain(fields.get("使用语言")).strip()
+        record_id = str(record.get("record_id") or "").strip()
+        outreach_ms = record_outreach_ms(record)
+        outreach_age_days = None
+        if outreach_ms is not None:
+            outreach_at = datetime.fromtimestamp(outreach_ms / 1000, tz=timezone.utc)
+            outreach_age_days = (now.date() - beijing_now(outreach_at).date()).days
+        sample_case = self._local_case(creator_handle)
+        completed_match = {"status": "none", "rows": [], "reason": "not-searched"}
+        content = {"status": "hold", "content_type": "", "reason": "not-inspected"}
+        thread_text = ""
+        content_url = ""
+        if creator_handle:
+            completed_match = self._search_completed(store_id, creator_handle, sample_case)
+        if completed_match.get("status") == "unique":
+            inspected = self._inspect_content(store_id, creator_handle)
+            content = classify_completed_content(
+                panel_text=str(inspected.get("panel_text") or ""),
+                links=list(inspected.get("links") or []),
+            )
+            content_url = first_content_url(list(inspected.get("links") or []))
+            if inspected.get("ok"):
+                thread_probe = self._preview_thread(
+                    store_id=store_id,
+                    shop_id=shop_id,
+                    sample_case=sample_case,
+                    creator_handle=creator_handle,
+                )
+                thread_text = str(thread_probe.get("thread_text") or "")
+        decision = decide_content_thanks_action(
+            feishu_status=feishu_status,
+            outreach_age_days=outreach_age_days,
+            completed_match=str(completed_match.get("status") or "none"),
+            content_type=str(content.get("content_type") or ""),
+            content_reason=str(content.get("reason") or ""),
+            thread_text=thread_text,
+            today=now.date(),
+            local_sent_at=self._latest_local_thanks_sent_at(sample_case),
+            feishu_record_count=1,
+        )
+        language = resolve_content_thanks_language(
+            feishu_lang=feishu_lang,
+            manual_lang=str(sample_case.language or "") if sample_case else "",
+            bio=str(sample_case.bio or "") if sample_case else "",
+        )
+        preview = {"ok": False, "message": "", "template_key": "", "language": language}
+        if decision["decision"] in {DECISION_PREVIEW, DECISION_ALREADY_SENT} and decision["content_type"]:
+            preview = render_content_thanks_preview(
+                content_type=str(decision["content_type"]),
+                lang=language,
+                creator_name=creator_handle,
+                content_url=content_url,
+            )
+            if decision["decision"] == DECISION_PREVIEW and preview.get("ok") and preview.get("message"):
+                self._preview_send(
+                    store_id=store_id,
+                    shop_id=shop_id,
+                    sample_case=sample_case,
+                    creator_handle=creator_handle,
+                    body=str(preview["message"]),
+                )
+        row = {
+            "creator_handle": creator_handle,
+            "sample_product": sample_product,
+            "record_id": record_id,
+            "decision": decision["decision"],
+            "reason": decision["reason"],
+            "content_type": decision["content_type"],
+            "language": language,
+            "template_key": preview.get("template_key") or "",
+            "message_preview": preview.get("message") or "",
+            "planned_feishu_status": "已完成",
+            "send": False,
+            "write_feishu": False,
+            "execute": False,
+        }
+        if not creator_handle:
+            row["decision"] = DECISION_HOLD
+            row["reason"] = "missing-creator-handle"
+        return row
+
+    def _local_case(self, creator_handle: str) -> SampleCase | None:
+        handle = str(creator_handle or "").strip()
+        if not handle:
+            return None
+        with self.session_factory() as session:
+            matches = session.scalars(
+                select(SampleCase).where(SampleCase.creator_name == handle)
+            ).all()
+            if len(matches) == 1:
+                return matches[0]
+            return None
+
+    def _latest_local_thanks_sent_at(self, sample_case: SampleCase | None):
+        if sample_case is None:
+            return None
+        with self.session_factory() as session:
+            tasks = session.scalars(
+                select(FollowupTask).where(
+                    FollowupTask.sample_case_id == sample_case.id,
+                    FollowupTask.stage == CONTENT_THANKS_STAGE,
+                )
+            ).all()
+        sent_times = [
+            task.sent_at
+            for task in tasks
+            if followup_task_completed(
+                {"sent_at": task.sent_at, "send_result": task.send_result}
+            )
+            and task.sent_at is not None
+        ]
+        if not sent_times:
+            return None
+        return max(sent_times)
+
+    def _search_completed(
+        self,
+        store_id: str,
+        creator_handle: str,
+        sample_case: SampleCase | None,
+    ) -> dict[str, Any]:
+        if self.list_completed is not None:
+            rows = list(
+                self.list_completed(
+                    store_id,
+                    creator_handle=creator_handle,
+                )
+                or []
+            )
+        else:
+            from lib.sample_api import scrape_completed_list_api
+            from lib.shipped_dom import ensure_sample_page_loaded
+            from lib.completed_content_dom import ensure_completed_tab, search_completed_creator
+
+            ensure_sample_page_loaded(store_id)
+            ensure_completed_tab(store_id)
+            search_completed_creator(store_id, creator_handle)
+            rows = scrape_completed_list_api(
+                store_id,
+                creator_handle=creator_handle,
+                max_pages=3,
+            )
+        return match_completed_rows(
+            rows,
+            creator_handle=creator_handle,
+            creator_id=str(sample_case.creator_id or "") if sample_case else "",
+        )
+
+    def _inspect_content(self, store_id: str, creator_handle: str) -> dict[str, Any]:
+        if self.inspect_content is not None:
+            return dict(self.inspect_content(store_id, creator_handle) or {})
+        from lib.completed_content_dom import inspect_view_content
+
+        return inspect_view_content(store_id, creator_handle)
+
+    def _preview_thread(
+        self,
+        *,
+        store_id: str,
+        shop_id: str,
+        sample_case: SampleCase | None,
+        creator_handle: str,
+    ) -> dict[str, Any]:
+        from lib.im_dom import im_thread_text, inspect_current_thread, open_target_conversation
+
+        opened = open_target_conversation(
+            store_id,
+            creator_handle,
+            creator_id=str(sample_case.creator_id or "") if sample_case else "",
+            shop_id=shop_id,
+        )
+        if not opened.get("ok"):
+            return {"ok": False, "thread_text": ""}
+        probe = inspect_current_thread(store_id, creator_handle)
+        return {"ok": True, "thread_text": im_thread_text(probe)}
+
+    def _preview_send(
+        self,
+        *,
+        store_id: str,
+        shop_id: str,
+        sample_case: SampleCase | None,
+        creator_handle: str,
+        body: str,
+    ) -> dict[str, Any]:
+        sender = self.send_message
+        if sender is None:
+            from lib.im_api import send_direct_message as sender
+        return sender(
+            store_id,
+            body,
+            creator_name=creator_handle,
+            creator_id=str(sample_case.creator_id or "") if sample_case else "",
+            shop_id=shop_id,
+            execute=False,
+        )

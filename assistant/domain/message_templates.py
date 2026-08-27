@@ -1,6 +1,8 @@
 """Versioned, I/O-free message templates copied from authoritative SOP2."""
 from __future__ import annotations
 
+import unicodedata
+
 from assistant.domain.policies import followup_message_creator_type
 
 
@@ -189,6 +191,51 @@ def choose_template_key(
     if stage == "day_7":
         return f"unpublished_7_{message_creator_type}_{lang}"
     return None
+
+
+CONTENT_THANKS_FINGERPRINTS = (
+    "we just saw the video you created for us",
+    "acabamos de ver el video que creaste para nosotros",
+    "we noticed your recent live stream",
+    "hemos visto tu reciente transmision en vivo",
+)
+
+_UNCERTAIN_THANKS_PAIRS = (
+    ("thank you", "video"),
+    ("thank you", "live"),
+    ("gracias", "video"),
+    ("gracias", "live"),
+    ("appreciate your support", ""),
+    ("appreciate your creativity", ""),
+    ("apreciamos muchisimo", ""),
+)
+
+
+def _fold_thanks_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(text or "").lower())
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def looks_like_content_thanks(text: str) -> bool:
+    """True only when the thread already contains SOP content-thanks copy."""
+    blob = _fold_thanks_text(text)
+    return any(token in blob for token in CONTENT_THANKS_FINGERPRINTS)
+
+
+def looks_like_uncertain_thanks(text: str) -> bool:
+    """Colleague-style thanks that is not the SOP fingerprint."""
+    if looks_like_content_thanks(text):
+        return False
+    blob = _fold_thanks_text(text)
+    for left, right in _UNCERTAIN_THANKS_PAIRS:
+        if left in blob and (not right or right in blob):
+            return True
+    return False
+
+
+def looks_like_any_thanks(text: str) -> bool:
+    """SOP thanks copy or a colleague-style thanks message."""
+    return looks_like_content_thanks(text) or looks_like_uncertain_thanks(text)
 
 
 def render_followup_message(

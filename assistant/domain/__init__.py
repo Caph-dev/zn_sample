@@ -23,9 +23,17 @@ from .followup_labels import (
     followup_status_display,
     followup_status_label,
 )
+from .content_thanks import (
+    classify_completed_content,
+    decide_content_thanks_action,
+    match_completed_rows,
+)
 from .message_templates import (
     TEMPLATE_VERSION,
     choose_template_key,
+    looks_like_any_thanks,
+    looks_like_content_thanks,
+    looks_like_uncertain_thanks,
     render_followup_message,
 )
 from .policies import (
@@ -69,6 +77,12 @@ __all__ = [
     "feishu_update_idempotency_key",
     "resolve_followup_attachment",
     "choose_template_key",
+    "looks_like_content_thanks",
+    "looks_like_uncertain_thanks",
+    "looks_like_any_thanks",
+    "classify_completed_content",
+    "decide_content_thanks_action",
+    "match_completed_rows",
     "render_followup_message",
     "TEMPLATE_VERSION",
     "FOLLOWUP_IMAGE_PRODUCT_ID",

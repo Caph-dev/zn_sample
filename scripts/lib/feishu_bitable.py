@@ -430,13 +430,58 @@ def record_created_ms(record: dict[str, Any]) -> int | None:
     raw = record.get("created_time")
     if raw is None:
         raw = record.get("createdTime")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
+    return _datetime_ms(raw)
+
+
+def _datetime_ms(value: Any) -> int | None:
+    if value is None or value == "":
         return None
-    if value <= 0:
+    if isinstance(value, bool):
         return None
-    return value
+    if isinstance(value, (int, float)):
+        number = int(value)
+        if number <= 0:
+            return None
+        if number < 10**12:
+            number *= 1000
+        return number
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return _datetime_ms(int(text))
+        for format_name in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(text, format_name)
+            except ValueError:
+                continue
+            return int(parsed.timestamp() * 1000)
+        return None
+    if isinstance(value, list):
+        for item in value:
+            parsed = _datetime_ms(item)
+            if parsed is not None:
+                return parsed
+        return None
+    if isinstance(value, dict):
+        for key in ("value", "timestamp", "time", "start", "text"):
+            if key in value:
+                parsed = _datetime_ms(value.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+    return None
+
+
+def record_outreach_ms(record: dict[str, Any]) -> int | None:
+    """建联时间优先；没有可解析值时回退系统 created_time。"""
+    fields = record.get("fields") if isinstance(record, dict) else None
+    if isinstance(fields, dict):
+        parsed = _datetime_ms(fields.get("建联时间"))
+        if parsed is not None:
+            return parsed
+    return record_created_ms(record if isinstance(record, dict) else {})
 
 
 def search_pending_ship_records(
@@ -482,6 +527,61 @@ def search_pending_ship_records(
                 continue
             created_ms = record_created_ms(record)
             if created_ms is None or created_ms < since_ms:
+                continue
+            items.append(record)
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
+def search_pending_post_records(
+    access_token: str,
+    *,
+    since: datetime,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+    view_id: str = DEFAULT_VIEW_ID,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """近窗内、合作状态=待发布的行。建联时间优先，缺省用 created_time。"""
+    if since.tzinfo is None:
+        raise FeishuBitableError("search_pending_post_records 需要带时区的 since")
+    since_ms = int(since.timestamp() * 1000)
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        body: dict[str, Any] = {
+            "page_size": min(max(1, int(page_size)), 500),
+            "automatic_fields": True,
+            "view_id": view_id,
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": "合作状态",
+                        "operator": "is",
+                        "value": [COOPERATION_STATUS_PENDING_POST],
+                    }
+                ],
+            },
+        }
+        if page_token:
+            body["page_token"] = page_token
+        payload = _http_json(
+            "POST",
+            f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=body,
+        )
+        data = payload.get("data") or {}
+        for record in data.get("items") or []:
+            if not isinstance(record, dict):
+                continue
+            outreach_ms = record_outreach_ms(record)
+            if outreach_ms is None or outreach_ms < since_ms:
                 continue
             items.append(record)
         if not data.get("has_more"):

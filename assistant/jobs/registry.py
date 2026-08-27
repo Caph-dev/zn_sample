@@ -11,6 +11,7 @@ ZINIAO_JOB_TYPES = frozenset(
         "environment_check",
         "shipment_sync",
         "daily_refresh",
+        "content_thanks_preview",
         "operator_prepare",
         "operator_screen",
         "operator_pipeline",
@@ -25,6 +26,7 @@ REGISTERED_JOB_TYPES = frozenset(
         "creator_enrich",
         "report_export",
         "daily_refresh",
+        "content_thanks_preview",
         "operator_prepare",
         "operator_screen",
         "operator_pipeline",
@@ -66,6 +68,9 @@ def get_handler(job_type: str) -> JobHandler | None:
     if job_type == "daily_refresh":
         from assistant.jobs.handlers.daily_refresh import run_daily_refresh
         return run_daily_refresh
+    if job_type == "content_thanks_preview":
+        from assistant.jobs.handlers.content_thanks import run_content_thanks_preview
+        return run_content_thanks_preview
     if job_type in {
         "operator_prepare",
         "operator_screen",

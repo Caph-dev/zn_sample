@@ -56,6 +56,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertIn('action="/api/jobs/operator/screen"', response.text)
         self.assertIn('action="/api/jobs/operator/pipeline"', response.text)
         self.assertIn('action="/api/jobs/operator/tracking"', response.text)
+        self.assertIn('action="/api/jobs/content-thanks-preview"', response.text)
         self.assertLess(
             response.text.index('action="/api/jobs/operator/prepare"'),
             response.text.index("Part.A: 自动批准样品申请"),

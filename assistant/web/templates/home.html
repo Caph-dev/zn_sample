@@ -113,6 +113,16 @@
       </form>
     </li>
     <li>
+      <strong class="operator-kind" aria-hidden="true">预演</strong>
+      <section class="operator-copy">
+        <h3>预演已完成感谢私信</h3>
+        <p>读取飞书近 30 天「待发布」达人，在免费样品【已完成】搜到达人后按「查看内容」判断视频/直播话术。当前只预演打开会话，不发送、不改飞书。只有能确认过去 14 天内已经发过感谢类私信才跳过，其余情况仍预演要发。</p>
+      </section>
+      <form method="post" action="/api/jobs/content-thanks-preview" data-job-form data-job-label="预演已完成感谢私信">
+        <button type="submit" class="operator-action-button">执行</button>
+      </form>
+    </li>
+    <li>
       <strong class="operator-kind" aria-hidden="true">导出</strong>
       <section class="operator-copy">
         <h3>导出跟进报表</h3>
@@ -125,7 +135,7 @@
 {% if dashboard %}
 {% set job_tones = {"pending": "warning", "running": "info", "succeeded": "success", "failed": "error", "cancelled": "neutral", "interrupted": "neutral"} %}
 {% set job_status_labels = {"pending": "等待执行", "running": "正在执行", "succeeded": "已完成", "failed": "执行失败", "cancelled": "已取消", "interrupted": "已中断"} %}
-{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出", "operator_prepare": "打开店铺", "operator_screen": "只出名单", "operator_pipeline": "筛查批准写飞书发私信", "operator_tracking": "获取物流信息写飞书发单号"} %}
+{% set job_labels = {"shipment_sync": "物流同步", "followup_generate": "跟进待办生成", "content_thanks_preview": "预演已完成感谢私信", "daily_refresh": "今日更新", "environment_check": "店铺连接检查", "report_export": "报表导出", "operator_prepare": "打开店铺", "operator_screen": "只出名单", "operator_pipeline": "筛查批准写飞书发私信", "operator_tracking": "获取物流信息写飞书发单号"} %}
 <section>
   <h2>今日待处理</h2>
   <ul class="queue-list">

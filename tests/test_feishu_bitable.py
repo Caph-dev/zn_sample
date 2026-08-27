@@ -23,6 +23,7 @@ from lib.feishu_bitable import (  # noqa: E402
     pending_ship_lookup_key,
     resolve_duplicate_record,
     resolve_sample_product_for_row,
+    search_pending_post_records,
     search_pending_ship_records,
     update_record_order_no,
     plan_cooperation_status_transition,
@@ -126,6 +127,41 @@ class PendingShipSearchTests(unittest.TestCase):
             body["filter"]["conditions"][0]["value"],
             ["待发货"],
         )
+        self.assertEqual([item["record_id"] for item in items], ["fresh"])
+
+    def test_search_pending_post_uses_outreach_time_and_pending_post(self) -> None:
+        since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        response = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "record_id": "old",
+                        "created_time": int(datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                        "fields": {
+                            "红人ID": "old",
+                            "合作状态": ["待发布"],
+                            "建联时间": int(datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                        },
+                    },
+                    {
+                        "record_id": "fresh",
+                        "created_time": int(datetime(2026, 8, 20, tzinfo=timezone.utc).timestamp() * 1000),
+                        "fields": {
+                            "红人ID": "fresh",
+                            "合作状态": ["待发布"],
+                            "建联时间": int(datetime(2026, 8, 20, tzinfo=timezone.utc).timestamp() * 1000),
+                        },
+                    },
+                ],
+                "has_more": False,
+            },
+        }
+        with patch("lib.feishu_bitable._http_json", return_value=response) as request:
+            items = search_pending_post_records("token", since=since)
+        body = request.call_args.kwargs["body"]
+        self.assertEqual(body["filter"]["conditions"][0]["value"], ["待发布"])
+        self.assertEqual(body["view_id"], "vewNtqmTk4")
         self.assertEqual([item["record_id"] for item in items], ["fresh"])
 
 

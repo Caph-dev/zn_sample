@@ -20,6 +20,7 @@ PENDING_TAB = 10
 READY_TO_SHIP_TAB = 20
 SHIPPED_TAB = 30
 PROCESSING_TAB = 40  # 免费样品【处理中】= 已到货。D+10 只出这个 tab。
+COMPLETED_TAB = 50  # 免费样品【已完成】= 已出视频/直播。未实测前仍走同一列表 API。
 DEFAULT_PAGE_SIZE = 50
 
 RequestJson = Callable[
@@ -33,6 +34,7 @@ def build_pending_list_request(
     page_size: int = DEFAULT_PAGE_SIZE,
     *,
     tab: int = PENDING_TAB,
+    search_value: str = "",
 ) -> dict[str, Any]:
     return {
         "tab": int(tab),
@@ -42,7 +44,7 @@ def build_pending_list_request(
             {
                 "search_key": 1,
                 "search_type": 2,
-                "value": "",
+                "value": str(search_value or ""),
             }
         ],
         "order_params": [
@@ -188,6 +190,7 @@ def scrape_pending_list_api(
     request_json: Callable[..., dict[str, Any]] = post_read_json,
     context: AffiliatePageContext | None = None,
     tab: int = PENDING_TAB,
+    search_value: str = "",
 ) -> list[dict[str, Any]]:
     """通过页面同源 API 读取待审核列表，不点击分页控件。"""
     if ensure_page:
@@ -204,6 +207,7 @@ def scrape_pending_list_api(
             page_number,
             page_size,
             tab=tab,
+            search_value=search_value,
         )
         payload = request_json(
             store_id,
@@ -296,6 +300,21 @@ def scrape_processing_list_api(store_id: str, **kwargs) -> list[dict[str, Any]]:
     kwargs.setdefault("ensure_page", False)
     kwargs["tab"] = PROCESSING_TAB
     kwargs["ensure_page"] = False
+    return scrape_pending_list_api(store_id, **kwargs)
+
+
+def scrape_completed_list_api(
+    store_id: str,
+    *,
+    creator_handle: str = "",
+    **kwargs,
+) -> list[dict[str, Any]]:
+    """只读免费样品「已完成」列表；可按达人 ID 缩小搜索。"""
+    kwargs.setdefault("ensure_page", False)
+    kwargs["tab"] = COMPLETED_TAB
+    kwargs["ensure_page"] = False
+    if creator_handle and "search_value" not in kwargs:
+        kwargs["search_value"] = str(creator_handle).strip()
     return scrape_pending_list_api(store_id, **kwargs)
 
 
