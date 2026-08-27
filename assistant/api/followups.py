@@ -153,6 +153,18 @@ async def mark_unfulfilled(task_id: int, request: Request):
     return _local_response(task_id, is_json, extra=result)
 
 
+@router.post("/api/followups/{task_id}/preview-send")
+async def preview_send(task_id: int, request: Request):
+    is_json = "application/json" in request.headers.get("content-type", "").lower()
+    try:
+        result = FollowupService(
+            request.app.state.session_factory
+        ).preview_followup_message(task_id)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return _local_response(task_id, is_json, extra=result)
+
+
 @router.post("/api/followups/{task_id}/mark-sent")
 async def mark_sent(task_id: int, request: Request):
     is_json = "application/json" in request.headers.get("content-type", "").lower()

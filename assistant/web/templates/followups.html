@@ -2,7 +2,13 @@
 {% import "_ui.html" as ui %}
 {% set sample_status_labels = {"processing": "处理中", "shipped": "已发货", "completed": "已完成", "cancelled": "已取消"} %}
 {% block content %}
-<h1>跟进待办</h1>
+<div class="page-header">
+  <h1>跟进待办</h1>
+  <form method="post" action="/api/jobs/report-export" data-job-form data-job-label="到货后第 10 天名单">
+    <input type="hidden" name="kind" value="day_10_list">
+    <button type="submit" class="button--secondary">导出到货后第 10 天名单</button>
+  </form>
+</div>
 {% call ui.banner('info') %}这里只提供预览、人工分类和本地完成标记。写飞书「已完成 / 未发布」必须勾选显式开关；默认不会发私信。被新阶段取代的旧步骤默认不出现。{% endcall %}
 <nav class="section-nav quick-filters" aria-label="跟进待办快捷筛选">
   <a href="/followups" {% if not filters.stage and not filters.status %}class="is-active"{% endif %}>全部</a>

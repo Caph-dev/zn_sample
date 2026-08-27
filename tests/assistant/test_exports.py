@@ -4,7 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +52,26 @@ class ExportTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8-sig")
             self.assertIn("order-40", text); self.assertIn("track-40", text)
             self.assertNotIn("order-30", text)
+            engine.dispose()
+
+    def test_day_10_export_filename_uses_beijing_yyyymmdd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = create_database_engine(root / "test.sqlite3")
+            Base.metadata.create_all(engine)
+            factory = sessionmaker(bind=engine, expire_on_commit=False)
+            with patch(
+                "assistant.services.export_service.beijing_now",
+                return_value=datetime(2026, 8, 27, 9, 30),
+            ):
+                path = ExportService(
+                    factory, exports_directory=root / "exports"
+                ).export("day_10_list")
+            self.assertEqual(path.name, "处理中超过10天_20260827.csv")
+            today_path = ExportService(
+                factory, exports_directory=root / "exports"
+            ).export("today")
+            self.assertRegex(today_path.name, r"^today_\d{8}T\d{6}Z\.csv$")
             engine.dispose()
 
     def test_export_serializes_formula_prefix_cells_as_text(self) -> None:

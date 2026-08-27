@@ -8,7 +8,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
-from lib.im_api import send_message_via_sdk  # noqa: E402
+from lib.im_api import send_direct_message, send_message_via_sdk  # noqa: E402
 
 
 class ImSdkSendTests(unittest.TestCase):
@@ -61,6 +61,35 @@ class ImSdkSendTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "message-too-long")
         execute.assert_not_called()
+
+    @patch("lib.im_api.send_message_via_sdk")
+    @patch("lib.im_dom.fill_or_send_message")
+    @patch("lib.im_dom.inspect_current_thread", return_value={"thread_text": ""})
+    @patch(
+        "lib.im_dom.open_target_conversation",
+        return_value={"ok": True, "click": {"conversation_id": "conv"}},
+    )
+    def test_send_direct_message_defaults_to_dry_run(
+        self,
+        open_conversation,
+        inspect_thread,
+        fill_or_send,
+        send_via_sdk,
+    ) -> None:
+        result = send_direct_message(
+            "store-test",
+            "SOP follow-up copy",
+            creator_name="creator_test",
+            creator_id="creator-id",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "dry-run")
+        self.assertEqual(result["message"], "SOP follow-up copy")
+        open_conversation.assert_called_once()
+        inspect_thread.assert_called_once()
+        send_via_sdk.assert_not_called()
+        fill_or_send.assert_not_called()
 
 
 if __name__ == "__main__":

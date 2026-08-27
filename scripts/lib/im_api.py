@@ -8,7 +8,9 @@ TikTok 联盟私信发送不是普通 JSON HTTP 写接口，而是由页面内 I
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from .zclaw import zclaw_exec
@@ -139,3 +141,105 @@ def send_message_via_sdk(
     if conversation_id:
         result["conversation_id"] = str(conversation_id)
     return result
+
+
+def send_direct_message(
+    store_id: str,
+    body: str,
+    *,
+    creator_name: str,
+    creator_id: str = "",
+    shop_id: str = "",
+    execute: bool = False,
+    wait: float = 2.5,
+    write_source: str = "api",
+    already_sent_predicate: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Open the creator IM thread, then optionally send one text message.
+
+    Default is dry-run: open the conversation and inspect it, but never call
+    the IM SDK or click the send button. ``execute=True`` is required to send.
+    """
+    from .im_dom import (
+        fill_or_send_message,
+        im_thread_text,
+        inspect_current_thread,
+        open_target_conversation,
+    )
+
+    name = str(creator_name or "").strip()
+    normalized_body = str(body or "").strip()
+    opened = open_target_conversation(
+        store_id,
+        name,
+        creator_id=str(creator_id or ""),
+        shop_id=str(shop_id or ""),
+        wait=wait,
+    )
+    if not opened.get("ok"):
+        return {
+            "ok": False,
+            "error": opened.get("error") or "找不到会话",
+            "message": normalized_body,
+        }
+    clicked = opened.get("click") if isinstance(opened.get("click"), dict) else {}
+    probe = inspect_current_thread(store_id, name, wait=wait)
+    thread_text = im_thread_text(probe)
+    if already_sent_predicate is not None and already_sent_predicate(thread_text):
+        return {"ok": True, "status": "already-sent", "message": normalized_body}
+    if not execute:
+        return {"ok": True, "status": "dry-run", "message": normalized_body}
+
+    if write_source == "api":
+        click_detail = (
+            clicked.get("click") if isinstance(clicked.get("click"), dict) else clicked
+        )
+        sent = send_message_via_sdk(
+            store_id,
+            normalized_body,
+            expected_creator_name=name,
+            expected_creator_id=str(creator_id or ""),
+            conversation_id=str((click_detail or {}).get("conversation_id") or ""),
+        )
+        if not sent.get("ok"):
+            return {
+                "ok": False,
+                "error": sent.get("reason") or str(sent),
+                "message": normalized_body,
+                "send_source": write_source,
+            }
+        time.sleep(max(1.5, wait))
+        post_probe = inspect_current_thread(store_id, name, wait=wait)
+        confirmed = True
+        if already_sent_predicate is not None:
+            confirmed = already_sent_predicate(im_thread_text(post_probe))
+        return {
+            "ok": confirmed,
+            "status": "sent" if confirmed else "send-unknown",
+            "message": normalized_body,
+            "send_source": write_source,
+            "send_postcheck": "confirmed" if confirmed else "unknown",
+            "error": "API 已启动但发送后未确认，禁止自动重试" if not confirmed else "",
+        }
+
+    sent = fill_or_send_message(store_id, normalized_body, execute=True)
+    if sent.get("ok") and sent.get("sent"):
+        time.sleep(1.0)
+        post_probe = inspect_current_thread(store_id, name, wait=wait)
+        confirmed = True
+        if already_sent_predicate is not None:
+            confirmed = already_sent_predicate(im_thread_text(post_probe))
+        return {
+            "ok": confirmed,
+            "status": "sent" if confirmed else "send-unknown",
+            "message": normalized_body,
+            "send_source": write_source,
+            "send_postcheck": "confirmed" if confirmed else "unknown",
+            "error": "DOM 点击后未确认消息，禁止自动重试" if not confirmed else "",
+        }
+    return {
+        "ok": False,
+        "error": sent.get("error") or str(sent),
+        "message": normalized_body,
+        "send_source": write_source,
+    }

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from assistant.database.models import FollowupTask, SampleCase, Shipment, Store
 from assistant.domain.followup_stage import followup_task_completed
+from assistant.domain.timeutil import beijing_now
 from assistant.paths import user_data_dir
 
 
@@ -39,9 +40,13 @@ class ExportService:
             raise ValueError("unsupported-export-kind")
         rows = self._rows(normalized_kind)
         self.exports_directory.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        label = "处理中超过10天" if normalized_kind == "day_10_list" else normalized_kind
-        output_path = self.exports_directory / f"{label}_{timestamp}.csv"
+        if normalized_kind == "day_10_list":
+            date_stamp = beijing_now().strftime("%Y%m%d")
+            output_name = f"处理中超过10天_{date_stamp}.csv"
+        else:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            output_name = f"{normalized_kind}_{timestamp}.csv"
+        output_path = self.exports_directory / output_name
         with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=EXPORT_FIELDS)
             writer.writeheader()

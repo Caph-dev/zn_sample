@@ -56,12 +56,17 @@
   {% if action_completed %}
   <p>已在本地标记为「已发跟进私信」。这不是平台发送回执，也不会撤回。</p>
   {% elif task.status == "needs_review" %}
-  <p>先完成上方的人工确认，再标记已发跟进私信。不会调用平台发送接口。</p>
+  <p>先完成上方的人工确认，再预演或标记已发跟进私信。预演只会打开会话，不会发送。</p>
   {% else %}
-  <p>人工发出对应阶段私信后，再点这里记成本地完成。不会调用平台发送接口。</p>
-  <form method="post" action="/api/followups/{{ task.id }}/mark-sent">
-    <button>标记已发跟进私信</button>
-  </form>
+  <p>可先预演打开会话并核对话术（不会发送）。人工发出后，再点这里记成本地完成。</p>
+  <div class="button-row">
+    <form method="post" action="/api/followups/{{ task.id }}/preview-send">
+      <button type="submit" class="button--secondary">预演跟进私信</button>
+    </form>
+    <form method="post" action="/api/followups/{{ task.id }}/mark-sent">
+      <button>标记已发跟进私信</button>
+    </form>
+  </div>
   {% endif %}
 </section>
 {% endif %}

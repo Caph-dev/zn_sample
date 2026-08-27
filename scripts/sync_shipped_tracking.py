@@ -46,13 +46,7 @@ from lib.feishu_bitable import (  # noqa: E402
     update_record_fields,
 )
 from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
-from lib.im_dom import (  # noqa: E402
-    fill_or_send_message,
-    im_thread_text,
-    inspect_current_thread,
-    open_target_conversation,
-)
-from lib.im_api import send_message_via_sdk  # noqa: E402
+from lib.im_api import send_direct_message  # noqa: E402
 from lib.message_templates import looks_like_tracking, tracking_message  # noqa: E402
 from lib.order_dom import fetch_tiktok_tracking  # noqa: E402
 from lib.order_api import fetch_tiktok_tracking_api  # noqa: E402
@@ -134,69 +128,18 @@ def _send_tracking_dm(
     wait: float,
     write_source: str,
 ) -> dict[str, Any]:
-    name = str(row.get("creator_name") or "")
     body = tracking_message(lang, tracking_no)
-    opened = open_target_conversation(
+    return send_direct_message(
         store_id,
-        name,
+        body,
+        creator_name=str(row.get("creator_name") or ""),
         creator_id=str(row.get("creator_id") or ""),
         shop_id=str(row.get("_shop_id") or ""),
+        execute=execute,
         wait=wait,
+        write_source=write_source,
+        already_sent_predicate=lambda thread: looks_like_tracking(thread, tracking_no),
     )
-    if not opened.get("ok"):
-        return {"ok": False, "error": opened.get("error") or "找不到会话", "message": body}
-    clicked = opened.get("click") if isinstance(opened.get("click"), dict) else {}
-    probe = inspect_current_thread(store_id, name, wait=wait)
-    if looks_like_tracking(im_thread_text(probe), tracking_no):
-        return {"ok": True, "status": "already-sent", "message": body}
-    if not execute:
-        return {"ok": True, "status": "dry-run", "message": body}
-    if write_source == "api":
-        click_detail = clicked.get("click") if isinstance(clicked.get("click"), dict) else clicked
-        sent = send_message_via_sdk(
-            store_id,
-            body,
-            expected_creator_name=name,
-            expected_creator_id=str(row.get("creator_id") or ""),
-            conversation_id=str((click_detail or {}).get("conversation_id") or ""),
-        )
-        if not sent.get("ok"):
-            return {
-                "ok": False,
-                "error": sent.get("reason") or str(sent),
-                "message": body,
-                "send_source": write_source,
-            }
-        time.sleep(max(1.5, wait))
-        post_probe = inspect_current_thread(store_id, name, wait=wait)
-        confirmed = looks_like_tracking(im_thread_text(post_probe), tracking_no)
-        return {
-            "ok": confirmed,
-            "status": "sent" if confirmed else "send-unknown",
-            "message": body,
-            "send_source": write_source,
-            "send_postcheck": "confirmed" if confirmed else "unknown",
-            "error": "API 已启动但发送后未确认，禁止自动重试" if not confirmed else "",
-        }
-    sent = fill_or_send_message(store_id, body, execute=True)
-    if sent.get("ok") and sent.get("sent"):
-        time.sleep(1.0)
-        post_probe = inspect_current_thread(store_id, name, wait=wait)
-        confirmed = looks_like_tracking(im_thread_text(post_probe), tracking_no)
-        return {
-            "ok": confirmed,
-            "status": "sent" if confirmed else "send-unknown",
-            "message": body,
-            "send_source": write_source,
-            "send_postcheck": "confirmed" if confirmed else "unknown",
-            "error": "DOM 点击后未确认消息，禁止自动重试" if not confirmed else "",
-        }
-    return {
-        "ok": False,
-        "error": sent.get("error") or str(sent),
-        "message": body,
-        "send_source": write_source,
-    }
 
 
 def main() -> int:

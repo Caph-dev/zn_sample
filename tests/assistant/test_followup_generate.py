@@ -596,6 +596,62 @@ class FollowupGenerateTests(unittest.TestCase):
             filtered = client.get("/followups?platform_status=processing&language=en")
             self.assertIn("Alpha", filtered.text)
             self.assertIn('option value="en" selected', filtered.text)
+            self.assertIn('action="/api/jobs/report-export"', listing.text)
+            self.assertIn('name="kind" value="day_10_list"', listing.text)
+            self.assertIn("导出到货后第 10 天名单", listing.text)
+
+    def test_preview_followup_message_never_sends(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        FollowupService(self.session_factory).generate(
+            datetime(2026, 8, 12, tzinfo=timezone.utc)
+        )
+        with self.session_factory() as session:
+            task = session.scalar(select(FollowupTask))
+            self.assertEqual(task.action_kind, "send_message")
+            task_id = task.id
+            body = task.message_preview
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={"ok": True, "status": "dry-run", "message": body},
+        ) as send_direct:
+            result = FollowupService(self.session_factory).preview_followup_message(
+                task_id
+            )
+        send_direct.assert_called_once()
+        self.assertEqual(send_direct.call_args.kwargs["execute"], False)
+        self.assertEqual(result["status"], "dry-run")
+        self.assertFalse(result["execute"])
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            self.assertEqual(task.send_confirmation, "dry-run")
+            self.assertIsNone(task.sent_at)
+            self.assertEqual(task.send_result, "")
+        app = create_app(port=8765)
+        app.state.session_factory = self.session_factory
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            headers = {"Origin": "http://127.0.0.1:8765"}
+            detail = client.get(f"/followups/{task_id}")
+            self.assertIn("preview-send", detail.text)
+            self.assertIn("预演跟进私信", detail.text)
+            self.assertNotIn(">发送</button>", detail.text)
+            with patch(
+                "lib.im_api.send_direct_message",
+                return_value={"ok": True, "status": "dry-run", "message": body},
+            ) as preview_send:
+                preview_response = client.post(
+                    f"/api/followups/{task_id}/preview-send",
+                    data={},
+                    headers=headers,
+                    follow_redirects=False,
+                )
+            self.assertEqual(preview_response.status_code, 303)
+            preview_send.assert_called_once()
+            self.assertEqual(preview_send.call_args.kwargs["execute"], False)
 
     def test_mark_sent_is_local_only(self) -> None:
         self.add_case(

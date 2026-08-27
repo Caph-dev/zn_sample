@@ -7,7 +7,7 @@ from datetime import date, datetime
 
 from sqlalchemy import select
 
-from assistant.database.models import ContentEvidence, FollowupTask, SampleCase, Shipment
+from assistant.database.models import ContentEvidence, FollowupTask, SampleCase, Shipment, Store
 from assistant.domain.followup_stage import (
     ACTION_KIND_ACKNOWLEDGE_CONTENT,
     ACTION_KIND_CONFIRM_DELIVERY_DATE,
@@ -278,6 +278,53 @@ class FollowupService:
                     sample_case.feishu_cooperation_status = COOPERATION_STATUS_UNPUBLISHED
             session.commit()
             return {"ok": True, "feishu": feishu_result}
+
+    def preview_followup_message(self, task_id: int) -> dict:
+        """Open the IM thread and fill/inspect SOP copy. Never sends."""
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            if task is None:
+                raise ValueError("followup-not-found")
+            action_kind = task.action_kind or action_kind_for_stage(task.stage)
+            if action_kind != ACTION_KIND_SEND_MESSAGE:
+                raise ValueError("not-message-task")
+            if task.status == "needs_review":
+                raise ValueError("task-needs-review")
+            if not str(task.message_preview or "").strip():
+                raise ValueError("missing-message")
+            sample_case = session.get(SampleCase, task.sample_case_id)
+            store = session.get(Store, sample_case.store_id) if sample_case else None
+            store_id = str((store.ziniao_store_id if store else "") or self.store_id or "").strip()
+            creator_name = str(sample_case.creator_name if sample_case else "")
+            creator_id = str(sample_case.creator_id if sample_case else "")
+            shop_id = str(store.shop_id if store else "")
+            body = str(task.message_preview)
+            attachment_key = str(task.attachment_key or "")
+        if not store_id:
+            raise ValueError("missing-store")
+        from lib.im_api import send_direct_message
+
+        result = send_direct_message(
+            store_id,
+            body,
+            creator_name=creator_name,
+            creator_id=creator_id,
+            shop_id=shop_id,
+            execute=False,
+            write_source="api",
+        )
+        result["attachment_key"] = attachment_key
+        result["execute"] = False
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            if task is not None:
+                if result.get("ok"):
+                    task.send_confirmation = str(result.get("status") or "dry-run")
+                    task.last_error = ""
+                else:
+                    task.last_error = str(result.get("error") or "preview-failed")
+                session.commit()
+        return result
 
     def mark_message_sent(self, task_id: int) -> dict:
         return self._mark_local_completion(
