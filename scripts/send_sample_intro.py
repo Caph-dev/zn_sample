@@ -25,6 +25,7 @@ from lib.creator_detail import (  # noqa: E402
     extract_creator_detail,
     open_creator_detail_by_url,
 )
+from lib.app_config import load_dotenv  # noqa: E402
 from lib.detect_lang import detect_creator_lang  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import set_verbose  # noqa: E402
@@ -253,6 +254,7 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    load_dotenv()
     configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
     try:

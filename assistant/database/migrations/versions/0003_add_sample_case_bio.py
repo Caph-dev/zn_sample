@@ -1,8 +1,8 @@
 """Add creator bio to sample cases.
 
 Follow-up language resolution falls back to the creator profile bio
-(detect_creator_lang) when the Feishu language field is empty. The bio is
-fetched once from the creator detail page and cached on the sample case.
+(LLM JSON via detect_creator_lang) when the Feishu language field is empty.
+The bio is fetched once from the creator detail page and cached on the sample case.
 """
 from __future__ import annotations
 

@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -77,10 +78,10 @@ class FollowupPolicyTests(unittest.TestCase):
             },
         )
 
-    def test_empty_bio_recommends_english_for_review(self) -> None:
+    def test_empty_bio_falls_back_to_english_without_review(self) -> None:
         result = choose_followup_language(bio="")
         self.assertEqual(result["lang"], "en")
-        self.assertTrue(result["needs_review"])
+        self.assertFalse(result["needs_review"])
         self.assertEqual(result["reason"], "empty-bio-default-en")
 
     def test_feishu_spanish_overrides_empty_bio(self) -> None:
@@ -98,11 +99,31 @@ class FollowupPolicyTests(unittest.TestCase):
         self.assertFalse(result["needs_review"])
         self.assertEqual(result["reason"], "manual_override")
 
-    def test_high_confidence_spanish_bio_is_selected(self) -> None:
-        result = choose_followup_language(
-            bio="Hola, gracias por tu contenido y colaboración."
-        )
+    def test_llm_lang_is_used_even_when_confidence_is_low(self) -> None:
+        with patch(
+            "assistant.domain.policies.detect_creator_lang",
+            return_value={
+                "lang": "es",
+                "confidence": "low",
+                "reason": "Spanish phrase but minimal content",
+            },
+        ):
+            result = choose_followup_language(bio="La Nica")
         self.assertEqual(result["lang"], "es")
+        self.assertFalse(result["needs_review"])
+        self.assertEqual(result["reason"], "Spanish phrase but minimal content")
+
+    def test_invalid_llm_lang_falls_back_to_english(self) -> None:
+        with patch(
+            "assistant.domain.policies.detect_creator_lang",
+            return_value={
+                "lang": "fr",
+                "confidence": "low",
+                "reason": "unsupported-language",
+            },
+        ):
+            result = choose_followup_language(bio="Bonjour")
+        self.assertEqual(result["lang"], "en")
         self.assertFalse(result["needs_review"])
 
     def test_idempotency_keys_use_only_stable_business_fields(self) -> None:

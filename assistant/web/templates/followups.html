@@ -14,21 +14,60 @@
   <a href="/followups?status=needs_review" {% if filters.status == "needs_review" %}class="is-active"{% endif %}>需确认</a>
 </nav>
 <form method="get" class="form-toolbar">
-  <label>阶段 <input name="stage" value="{{ filters.stage }}"></label>
-  <label>状态 <input name="status" value="{{ filters.status }}"></label>
-  <label>语言 <input name="language" value="{{ filters.language }}"></label>
-  <label>样品状态 <input name="curr_status" value="{{ filters.curr_status or '' }}"></label>
+  <label>阶段
+    <select name="stage">
+      <option value="">全部</option>
+      {% for value, label in filter_options.stages %}
+      <option value="{{ value }}" {% if filters.stage == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>状态
+    <select name="status">
+      <option value="">全部</option>
+      {% for value, label in filter_options.statuses %}
+      <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>语言
+    <select name="language">
+      <option value="">全部</option>
+      {% for value, label in filter_options.languages %}
+      <option value="{{ value }}" {% if filters.language == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>样品状态
+    <select name="platform_status">
+      <option value="">全部</option>
+      {% for value, label in filter_options.platform_statuses %}
+      <option value="{{ value }}" {% if filters.platform_status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
   <button>筛选</button>
 </form>
 {% if rows %}
 <table>
-  <thead><tr><th>达人</th><th>阶段</th><th>动作</th><th>状态</th><th>语言</th><th>样品状态</th></tr></thead>
+  <thead>
+    <tr>
+      <th class="table-index">序号</th>
+      <th>达人</th>
+      <th>阶段</th>
+      <th>动作</th>
+      <th>状态</th>
+      <th>语言</th>
+      <th>样品状态</th>
+    </tr>
+  </thead>
   <tbody>
   {% for task, sample_case in rows %}
     {% set action_label = followup_action_display(task.action_kind, sent_at=task.sent_at, send_result=task.send_result) %}
     {% set action_tone = followup_action_tone(task.action_kind, sent_at=task.sent_at, send_result=task.send_result) %}
     {% set status_label = followup_status_display(task.status, suppressed_reason=task.suppressed_reason) %}
     <tr>
+      <td class="table-index">{{ loop.index }}</td>
       <td><a href="/followups/{{ task.id }}">{{ sample_case.creator_name }}</a></td>
       <td>{{ ui.status_token(FOLLOWUP_STAGE_LABELS.get(task.stage, task.stage), FOLLOWUP_STAGE_TONES.get(task.stage, 'neutral')) }}</td>
       <td>{{ ui.status_token(action_label, action_tone) }}</td>
@@ -41,7 +80,7 @@
           {{ ui.status_token(status_label, FOLLOWUP_STATUS_TONES.get(task.status, 'neutral')) }}
         {% endif %}
       </td>
-      <td>{{ task.language }}</td>
+      <td>{{ followup_language_label(task.language) }}</td>
       <td>{{ sample_status_labels.get(sample_case.platform_status, sample_case.platform_status_label or sample_case.curr_status) }}</td>
     </tr>
   {% endfor %}

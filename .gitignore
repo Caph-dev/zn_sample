@@ -3,6 +3,7 @@ config.toml
 config/config.toml
 .env
 .env.*
+!.env.example
 
 # Node
 node_modules/

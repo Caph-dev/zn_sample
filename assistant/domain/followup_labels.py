@@ -27,6 +27,28 @@ FOLLOWUP_STAGE_LABELS = {
     "content_found": "达人已出内容",
 }
 
+FOLLOWUP_STAGE_LIST_ORDER = (
+    "unfulfilled",
+    "day_10_list",
+    "day_7",
+    "day_3",
+    "arrival",
+    "confirm_delivery_time",
+    "content_found",
+)
+
+FOLLOWUP_LANGUAGE_LABELS = {
+    "en": "英语",
+    "es": "西班牙语",
+}
+
+FOLLOWUP_PLATFORM_STATUS_FILTER_LABELS = {
+    "processing": "处理中",
+    "shipped": "已发货",
+    "completed": "已完成",
+    "cancelled": "已取消",
+}
+
 FOLLOWUP_ACTION_LABELS = {
     "send_message": "待发跟进私信",
     "list_only": "待出名单给业务",
@@ -135,3 +157,14 @@ def followup_status_display(status: str, *, suppressed_reason: str = "") -> str:
 
 def followup_review_label(review_reason: str) -> str:
     return REVIEW_REASON_LABELS.get(review_reason, review_reason)
+
+
+def followup_stage_list_rank(stage: str) -> int:
+    try:
+        return FOLLOWUP_STAGE_LIST_ORDER.index(stage)
+    except ValueError:
+        return len(FOLLOWUP_STAGE_LIST_ORDER)
+
+
+def followup_language_label(language: str) -> str:
+    return FOLLOWUP_LANGUAGE_LABELS.get(language, language or "")

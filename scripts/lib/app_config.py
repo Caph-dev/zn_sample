@@ -8,6 +8,7 @@
   4. 代码默认值
 
 含密钥的 config.toml **不得**提交 git；见 config.toml.example。
+仓库根目录 `.env` 只提供 LLM 等环境变量，同样不得提交；见 `.env.example`。
 """
 from __future__ import annotations
 
@@ -22,6 +23,9 @@ DEFAULT_CONFIG_PATHS = (
     PROJECT_ROOT / "config.toml",
     PROJECT_ROOT / "config" / "config.toml",
 )
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
+DEFAULT_LLM_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_LLM_MODEL_ID = "deepseek-v4-flash"
 
 
 class AppConfigError(RuntimeError):
@@ -87,6 +91,43 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(section, dict):
         raise AppConfigError(f"config.toml 中 [{name}] 必须是表")
     return section
+
+
+def load_dotenv(env_path: str | Path | None = None) -> Path | None:
+    """把仓库根目录 `.env` 载入环境变量；已存在的环境变量不覆盖。"""
+    path = Path(env_path).expanduser() if env_path is not None else DEFAULT_ENV_PATH
+    if not path.is_file():
+        return None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+    return path
+
+
+def load_llm_settings(*, env_path: str | Path | None = None) -> dict[str, str]:
+    """读取简介语言识别用的 OpenAI 兼容接口配置。"""
+    load_dotenv(env_path)
+    return {
+        "base_url": _pick_str(
+            os.environ.get("LLM_BASE_URL"),
+            default=DEFAULT_LLM_BASE_URL,
+        )
+        or DEFAULT_LLM_BASE_URL,
+        "api_key": _pick_str(os.environ.get("LLM_API_KEY"), default="") or "",
+        "model_id": _pick_str(
+            os.environ.get("LLM_MODEL_ID"),
+            default=DEFAULT_LLM_MODEL_ID,
+        )
+        or DEFAULT_LLM_MODEL_ID,
+    }
 
 
 def _pick_str(*candidates: Any, default: str | None = None) -> str | None:

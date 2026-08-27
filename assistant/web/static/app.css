@@ -252,6 +252,14 @@ td {
   border-bottom: 1px solid var(--color-border);
 }
 
+th.table-index,
+td.table-index {
+  width: 3rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 tbody tr:hover td {
   background: var(--color-background-muted);
 }
@@ -407,6 +415,7 @@ label {
 }
 
 input,
+select,
 textarea {
   font: inherit;
   font-size: var(--font-size-base);
@@ -417,7 +426,12 @@ textarea {
   padding: 0.5rem 0.75rem;
 }
 
+select {
+  min-height: 2.25rem;
+}
+
 input:focus,
+select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--color-text-accent);
@@ -473,6 +487,7 @@ button:active {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
+select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--focus-outline-color);
   outline-offset: 2px;

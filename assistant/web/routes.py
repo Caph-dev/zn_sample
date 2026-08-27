@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from assistant.api.jobs import router as jobs_api_router
 from assistant.api.dashboard import dashboard_summary, router as dashboard_api_router
@@ -17,13 +17,18 @@ from assistant.api.shipments import router as shipments_api_router
 from assistant.api.stores import running_store_summary
 from assistant.database.models import FollowupTask, Job, SampleCase, Shipment, Store
 from assistant.domain.followup_labels import (
+    FOLLOWUP_LANGUAGE_LABELS,
+    FOLLOWUP_PLATFORM_STATUS_FILTER_LABELS,
     FOLLOWUP_STAGE_LABELS,
+    FOLLOWUP_STAGE_LIST_ORDER,
     FOLLOWUP_STAGE_TONES,
+    FOLLOWUP_STATUS_LABELS,
     FOLLOWUP_STATUS_TONES,
     SUPERSEDED_REASON,
     followup_action_completed,
     followup_action_display,
     followup_action_tone,
+    followup_language_label,
     followup_status_display,
 )
 from assistant.jobs.locks import request_safe_store_summary
@@ -43,6 +48,7 @@ templates.env.globals.update(
     followup_action_completed=followup_action_completed,
     followup_action_display=followup_action_display,
     followup_action_tone=followup_action_tone,
+    followup_language_label=followup_language_label,
     followup_status_display=followup_status_display,
     FOLLOWUP_STAGE_LABELS=FOLLOWUP_STAGE_LABELS,
     FOLLOWUP_STAGE_TONES=FOLLOWUP_STAGE_TONES,
@@ -258,12 +264,34 @@ def shipment_detail_page(shipment_id: int, request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "shipment_detail.html", context)
 
 
+def _followup_filter_options() -> dict[str, list[tuple[str, str]]]:
+    return {
+        "stages": [
+            (stage, FOLLOWUP_STAGE_LABELS[stage]) for stage in FOLLOWUP_STAGE_LIST_ORDER
+        ],
+        "statuses": list(FOLLOWUP_STATUS_LABELS.items()),
+        "languages": list(FOLLOWUP_LANGUAGE_LABELS.items()),
+        "platform_statuses": list(FOLLOWUP_PLATFORM_STATUS_FILTER_LABELS.items()),
+    }
+
+
+def _followup_stage_order_expression():
+    return case(
+        *(
+            (FollowupTask.stage == stage, rank)
+            for rank, stage in enumerate(FOLLOWUP_STAGE_LIST_ORDER)
+        ),
+        else_=len(FOLLOWUP_STAGE_LIST_ORDER),
+    )
+
+
 @router.get("/followups", response_class=HTMLResponse)
 def followups_page(
     request: Request,
     stage: str = "",
     status: str = "",
     language: str = "",
+    platform_status: str = "",
     curr_status: int | None = None,
 ) -> HTMLResponse:
     context = _base_context(request)
@@ -277,6 +305,8 @@ def followups_page(
             query = query.where(FollowupTask.status == status)
         if language:
             query = query.where(FollowupTask.language == language)
+        if platform_status:
+            query = query.where(SampleCase.platform_status == platform_status)
         if curr_status is not None:
             query = query.where(SampleCase.curr_status == curr_status)
         if not status:
@@ -284,12 +314,21 @@ def followups_page(
                 (FollowupTask.status != "suppressed")
                 | (FollowupTask.suppressed_reason != SUPERSEDED_REASON)
             )
+        query = query.order_by(
+            _followup_stage_order_expression(),
+            func.lower(SampleCase.creator_id),
+            FollowupTask.id,
+        )
         context["rows"] = session.execute(query).all()
     context["filters"] = {
-        "stage": stage, "status": status, "language": language,
+        "stage": stage,
+        "status": status,
+        "language": language,
+        "platform_status": platform_status,
         "curr_status": curr_status,
         "include_superseded": bool(status),
     }
+    context["filter_options"] = _followup_filter_options()
     return templates.TemplateResponse(request, "followups.html", context)
 
 

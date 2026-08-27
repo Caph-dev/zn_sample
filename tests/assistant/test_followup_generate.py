@@ -194,6 +194,56 @@ class FollowupGenerateTests(unittest.TestCase):
         with self.session_factory() as session:
             self.assertEqual(session.scalars(select(FollowupTask)).all(), [])
 
+    def test_stale_processing_case_still_refreshes_existing_tasks(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            is_video_creator="是",
+            is_live_creator="是",
+            bio="Mujer Guerrero siempre saliendo adelante",
+            platform_status_stale=True,
+        )
+        with self.session_factory() as session:
+            sample_case = session.scalar(select(SampleCase))
+            session.add(
+                FollowupTask(
+                    sample_case_id=sample_case.id,
+                    stage="day_7",
+                    scheduled_for=date(2026, 8, 19),
+                    status="needs_review",
+                    action_kind="send_message",
+                    creator_type="both",
+                    review_reason="",
+                    requires_manual_confirmation=True,
+                    language="en",
+                    template_key="",
+                )
+            )
+            session.commit()
+        with patch(
+            "assistant.domain.policies.detect_creator_lang",
+            return_value={
+                "lang": "es",
+                "confidence": "low",
+                "reason": "spanish-bio",
+            },
+        ):
+            result = FollowupService(self.session_factory).generate(
+                datetime(2026, 8, 26, tzinfo=timezone.utc)
+            )
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["refreshed"], 1)
+        with self.session_factory() as session:
+            tasks = session.scalars(select(FollowupTask)).all()
+            self.assertEqual(len(tasks), 1)
+            task = tasks[0]
+            self.assertEqual(task.stage, "day_7")
+            self.assertEqual(task.status, "pending")
+            self.assertFalse(task.requires_manual_confirmation)
+            self.assertEqual(task.language, "es")
+            self.assertEqual(task.creator_type, "both")
+            self.assertIn("unpublished_7_video_es", task.template_key)
+
     def test_confirm_content_creates_thanks_preview_without_writing_feishu(self) -> None:
         self.add_case(
             curr_status=40,
@@ -319,11 +369,12 @@ class FollowupGenerateTests(unittest.TestCase):
         with self.session_factory() as session:
             task = session.scalar(select(FollowupTask))
             self.assertEqual(result["created"], 1)
-            self.assertTrue(task.requires_manual_confirmation)
+            self.assertEqual(task.language, "en")
+            self.assertFalse(task.requires_manual_confirmation)
         self.assertTrue(any("飞书语言只读查询失败" in message for message in warnings))
 
     def test_bio_language_detection_used_when_feishu_missing(self) -> None:
-        # 飞书无值 + 有 running 店铺 → 拉详情简介 → 高置信西语 → 自动 es。
+        # 飞书无值 + 有 running 店铺 → 拉详情简介 → 用 LLM lang，不看置信度。
         self.add_case(
             curr_status=40,
             delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
@@ -342,6 +393,14 @@ class FollowupGenerateTests(unittest.TestCase):
                     )
                 },
             ) as extract_detail,
+            patch(
+                "assistant.domain.policies.detect_creator_lang",
+                return_value={
+                    "lang": "es",
+                    "confidence": "high",
+                    "reason": "spanish-greeting-and-collab",
+                },
+            ),
         ):
             FollowupService(
                 self.session_factory,
@@ -374,7 +433,7 @@ class FollowupGenerateTests(unittest.TestCase):
         with self.session_factory() as session:
             task = session.scalar(select(FollowupTask))
             self.assertEqual(task.language, "en")
-            self.assertTrue(task.requires_manual_confirmation)
+            self.assertFalse(task.requires_manual_confirmation)
 
     def test_followup_filters_and_local_form_controls_refresh_detail(self) -> None:
         with self.session_factory() as session:
@@ -465,11 +524,78 @@ class FollowupGenerateTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
+            table_body = listing.text.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
             self.assertIn("current_creator", listing.text)
             self.assertNotIn("superseded_creator", listing.text)
             self.assertIn("待发跟进私信", listing.text)
             self.assertNotIn("已由新阶段取代", listing.text)
-            self.assertNotIn("待处理", listing.text)
+            self.assertNotIn("待处理", table_body)
+            self.assertIn('option value="pending"', listing.text)
+
+    def test_followup_list_orders_by_stage_then_creator_id_and_uses_select_filters(self) -> None:
+        with self.session_factory() as session:
+            store = Store(ziniao_store_id="sort-store", store_name="Sort")
+            session.add(store)
+            session.flush()
+            rows = (
+                ("zeta", "arrival", "pending"),
+                ("mike", "day_10_list", "pending"),
+                ("beta", "unfulfilled", "pending"),
+                ("Alpha", "unfulfilled", "pending"),
+                ("alpha-day3", "day_3", "pending"),
+            )
+            for creator_id, stage, status in rows:
+                sample_case = SampleCase(
+                    store_id=store.id,
+                    creator_id=creator_id,
+                    creator_name=creator_id,
+                    apply_id=creator_id,
+                    product_id="1732414717062320994",
+                    curr_status=40,
+                    platform_status="processing",
+                    platform_status_label="处理中",
+                    language="en",
+                )
+                session.add(sample_case)
+                session.flush()
+                session.add(
+                    FollowupTask(
+                        sample_case_id=sample_case.id,
+                        stage=stage,
+                        scheduled_for=date(2026, 8, 12),
+                        status=status,
+                        action_kind="send_message",
+                        language="en",
+                    )
+                )
+            session.commit()
+        app = create_app(port=8765)
+        app.state.session_factory = self.session_factory
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            listing = client.get("/followups")
+            names = [
+                "Alpha",
+                "beta",
+                "mike",
+                "alpha-day3",
+                "zeta",
+            ]
+            positions = [listing.text.index(name) for name in names]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn(">序号<", listing.text)
+            self.assertIn('class="table-index">1<', listing.text)
+            self.assertIn('class="table-index">5<', listing.text)
+            self.assertIn("<select name=\"stage\">", listing.text)
+            self.assertIn("<select name=\"status\">", listing.text)
+            self.assertIn("<select name=\"language\">", listing.text)
+            self.assertIn("<select name=\"platform_status\">", listing.text)
+            self.assertIn("到货后第 15 天未履约", listing.text)
+            self.assertIn("需人工确认", listing.text)
+            self.assertIn("英语", listing.text)
+            self.assertIn("处理中", listing.text)
+            filtered = client.get("/followups?platform_status=processing&language=en")
+            self.assertIn("Alpha", filtered.text)
+            self.assertIn('option value="en" selected', filtered.text)
 
     def test_mark_sent_is_local_only(self) -> None:
         self.add_case(

@@ -102,7 +102,11 @@ def choose_followup_language(
     feishu_lang: str | None = None,
     manual_lang: str | None = None,
 ) -> dict:
-    """Choose English or Spanish using manual, Feishu, then bio priority."""
+    """Choose English or Spanish using manual, Feishu, then bio priority.
+
+    Bio fallback uses the LLM ``lang`` field as-is. Confidence is ignored.
+    Empty bio, LLM failure, or an invalid lang fall back to English.
+    """
     if manual_lang in {"en", "es"}:
         return {
             "lang": manual_lang,
@@ -119,16 +123,13 @@ def choose_followup_language(
         }
 
     detected_language = detect_creator_lang(bio)
-    if detected_language["confidence"] == "high":
-        return {
-            "lang": detected_language["lang"],
-            "needs_review": False,
-            "reason": detected_language["reason"],
-        }
+    lang = detected_language.get("lang")
+    if lang not in {"en", "es"}:
+        lang = "en"
     return {
-        "lang": "en",
-        "needs_review": True,
-        "reason": detected_language["reason"],
+        "lang": lang,
+        "needs_review": False,
+        "reason": detected_language.get("reason") or "empty-bio-default-en",
     }
 
 

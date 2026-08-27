@@ -22,6 +22,7 @@ from alembic.config import Config
 
 from assistant.database.engine import backup_sqlite, create_database_engine
 from assistant.paths import database_path, ensure_user_dirs
+from lib.app_config import load_dotenv
 from lib.app_log import configure_logging
 
 
@@ -75,6 +76,7 @@ def upgrade_database(
 
 
 def main() -> int:
+    load_dotenv()
     configure_logging()
     upgrade_database()
     from assistant.lifecycle import run_assistant

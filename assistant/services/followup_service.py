@@ -69,59 +69,59 @@ class FollowupService:
                 self._suppress_confirmation(session, sample_case.id)
                 if shipment.delivered_at is None:
                     continue
-                if not is_processing_followup_case(
+                confirmed_content = self._latest_confirmed_content(session, sample_case.id)
+                created_keys: set[tuple] = set()
+                if is_processing_followup_case(
                     platform_status=sample_case.platform_status or "",
                     stale=bool(sample_case.platform_status_stale),
                 ):
-                    continue
-                confirmed_content = self._latest_confirmed_content(session, sample_case.id)
-                days = days_since_delivery(shipment.delivered_at, today=effective_now.date())
-                existing_tasks = session.scalars(
-                    select(FollowupTask).where(
-                        FollowupTask.sample_case_id == sample_case.id,
-                        FollowupTask.stage != CONFIRM_DELIVERY_TIME_STAGE,
+                    days = days_since_delivery(shipment.delivered_at, today=effective_now.date())
+                    existing_tasks = session.scalars(
+                        select(FollowupTask).where(
+                            FollowupTask.sample_case_id == sample_case.id,
+                            FollowupTask.stage != CONFIRM_DELIVERY_TIME_STAGE,
+                        )
+                    ).all()
+                    mutation = plan_followup_mutation(
+                        existing_unpublished=[
+                            {
+                                "stage": task.stage,
+                                "scheduled_for": task.scheduled_for,
+                                "status": task.status,
+                                "sent_at": task.sent_at,
+                                "send_result": task.send_result,
+                            }
+                            for task in existing_tasks
+                        ],
+                        days=days,
+                        has_confirmed_content=confirmed_content is not None,
+                        today=effective_now.date(),
                     )
-                ).all()
-                mutation = plan_followup_mutation(
-                    existing_unpublished=[
-                        {
-                            "stage": task.stage,
-                            "scheduled_for": task.scheduled_for,
-                            "status": task.status,
-                            "sent_at": task.sent_at,
-                            "send_result": task.send_result,
-                        }
-                        for task in existing_tasks
-                    ],
-                    days=days,
-                    has_confirmed_content=confirmed_content is not None,
-                    today=effective_now.date(),
-                )
-                created_keys = {
-                    (task_creation["stage"], task_creation["scheduled_for"])
-                    for task_creation in mutation["create"]
-                }
-                for task_creation in mutation["create"]:
-                    created += self._upsert_stage(
-                        session,
-                        sample_case,
-                        task_creation["stage"],
-                        task_creation["scheduled_for"],
-                    )
-                for suppression in mutation["suppress"]:
-                    self._suppress_matching_task(
-                        session,
-                        sample_case.id,
-                        stage=suppression["stage"],
-                        scheduled_for=suppression["scheduled_for"],
-                        reason=suppression["reason"],
-                    )
-                if confirmed_content is not None:
-                    created += self._upsert_content_found(
-                        session,
-                        sample_case,
-                        confirmed_content,
-                    )
+                    created_keys = {
+                        (task_creation["stage"], task_creation["scheduled_for"])
+                        for task_creation in mutation["create"]
+                    }
+                    for task_creation in mutation["create"]:
+                        created += self._upsert_stage(
+                            session,
+                            sample_case,
+                            task_creation["stage"],
+                            task_creation["scheduled_for"],
+                        )
+                    for suppression in mutation["suppress"]:
+                        self._suppress_matching_task(
+                            session,
+                            sample_case.id,
+                            stage=suppression["stage"],
+                            scheduled_for=suppression["scheduled_for"],
+                            reason=suppression["reason"],
+                        )
+                    if confirmed_content is not None:
+                        created += self._upsert_content_found(
+                            session,
+                            sample_case,
+                            confirmed_content,
+                        )
                 refreshed += self._refresh_active_unpublished_tasks(
                     session,
                     sample_case,
@@ -521,12 +521,6 @@ class FollowupService:
         review_reason = ""
         if creator_type["needs_review"]:
             review_reason = str(creator_type.get("review_reason") or "missing_creator_type")
-        elif language["needs_review"]:
-            review_reason = (
-                "low_confidence_language"
-                if language.get("reason") not in {"empty-bio-default-en", ""}
-                else "missing_language"
-            )
         elif action_kind == ACTION_KIND_SEND_MESSAGE and not template_key:
             review_reason = "missing_template"
         elif action_kind == ACTION_KIND_ACKNOWLEDGE_CONTENT and not template_key:
