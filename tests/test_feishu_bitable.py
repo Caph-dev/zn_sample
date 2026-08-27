@@ -25,6 +25,10 @@ from lib.feishu_bitable import (  # noqa: E402
     resolve_sample_product_for_row,
     search_pending_ship_records,
     update_record_order_no,
+    plan_cooperation_status_transition,
+    update_record_cooperation_status,
+    COOPERATION_STATUS_COMPLETED,
+    COOPERATION_STATUS_UNPUBLISHED,
 )
 
 
@@ -334,6 +338,64 @@ class BuildShippingFieldsTests(unittest.TestCase):
         self.assertNotIn("是否已寄样", result["fields"])
         self.assertNotIn("合作状态", result["fields"])
         self.assertEqual(result["status_transition"], "not-applicable")
+
+
+class CooperationStatusTransitionTests(unittest.TestCase):
+    def test_pending_post_can_become_completed(self) -> None:
+        plan = plan_cooperation_status_transition(
+            current_status="待发布",
+            target_status=COOPERATION_STATUS_COMPLETED,
+        )
+        self.assertEqual(plan["status"], "ready")
+        self.assertEqual(plan["fields"]["合作状态"], ["已完成"])
+
+    def test_pending_post_can_become_unpublished(self) -> None:
+        plan = plan_cooperation_status_transition(
+            current_status="待发布",
+            target_status=COOPERATION_STATUS_UNPUBLISHED,
+        )
+        self.assertEqual(plan["status"], "ready")
+        self.assertEqual(plan["fields"]["合作状态"], ["未发布"])
+
+    def test_completed_is_not_reverted(self) -> None:
+        plan = plan_cooperation_status_transition(
+            current_status="已完成",
+            target_status=COOPERATION_STATUS_UNPUBLISHED,
+        )
+        self.assertEqual(plan["status"], "preserved")
+        self.assertEqual(plan["fields"], {})
+
+    def test_pending_ship_cannot_jump_to_completed(self) -> None:
+        plan = plan_cooperation_status_transition(
+            current_status="待发货",
+            target_status=COOPERATION_STATUS_COMPLETED,
+        )
+        self.assertEqual(plan["status"], "blocked-unexpected-status")
+
+    def test_update_writes_then_rereads_without_hitting_network(self) -> None:
+        with patch("lib.feishu_bitable._http_json") as request:
+            request.side_effect = [
+                {
+                    "code": 0,
+                    "data": {"record": {"record_id": "rec-1", "fields": {"合作状态": ["待发布"]}}},
+                },
+                {"code": 0, "data": {"record": {"record_id": "rec-1"}}},
+                {
+                    "code": 0,
+                    "data": {"record": {"record_id": "rec-1", "fields": {"合作状态": ["已完成"]}}},
+                },
+            ]
+            result = update_record_cooperation_status(
+                "token-test",
+                "rec-1",
+                COOPERATION_STATUS_COMPLETED,
+            )
+        self.assertEqual(result["status"], "written")
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["body"]["fields"],
+            {"合作状态": ["已完成"]},
+        )
 
 
 class DescribeCooperationTransitionTests(unittest.TestCase):

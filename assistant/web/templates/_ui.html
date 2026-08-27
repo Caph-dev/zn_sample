@@ -5,8 +5,8 @@ Astryx 组件模式的 Jinja 复刻（配合 stone-theme.css 的 token 使用）
 - Empty State：空列表占位
 #}
 
-{% macro status_token(value, tone='neutral') -%}
-<span class="token token--{{ tone }}"><span class="status-dot status-dot--{{ tone }}"></span>{{ value }}</span>
+{% macro status_token(value, tone='neutral', title=None) -%}
+<span class="token token--{{ tone }}"{% if title %} title="{{ title }}"{% endif %}><span class="status-dot status-dot--{{ tone }}"></span>{{ value }}</span>
 {%- endmacro %}
 
 {% macro banner(kind) -%}

@@ -77,6 +77,18 @@ def create_daily_refresh(request: Request) -> dict:
     return {"job_id": job_id, "deduplicated": deduplicated}
 
 
+@router.post("/api/jobs/creator-enrich")
+def create_creator_enrich(request: Request) -> dict:
+    """Create the read-only creator profile enrichment job."""
+    session_factory = _session_factory(request)
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type="creator_enrich",
+        store_id=None,
+    )
+    return {"job_id": job_id, "deduplicated": deduplicated}
+
+
 def _create_operator_job(
     request: Request,
     *,

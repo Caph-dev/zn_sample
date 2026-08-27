@@ -34,7 +34,16 @@ class ExportTests(unittest.TestCase):
             with factory() as session:
                 store = Store(ziniao_store_id="store", store_name="store"); session.add(store); session.flush()
                 for status in (30, 40):
-                    case = SampleCase(store_id=store.id, creator_id=str(status), creator_name="creator", apply_id=str(status), product_id="1732414717062320994", curr_status=status, main_order_id=f"order-{status}")
+                    case = SampleCase(
+                        store_id=store.id,
+                        creator_id=str(status),
+                        creator_name="creator",
+                        apply_id=str(status),
+                        product_id="1732414717062320994",
+                        curr_status=status,
+                        platform_status="processing" if status == 40 else "shipped",
+                        main_order_id=f"order-{status}",
+                    )
                     session.add(case); session.flush()
                     session.add(Shipment(sample_case_id=case.id, tracking_display=f"track-{status}"))
                     session.add(FollowupTask(sample_case_id=case.id, stage="day_10_list", scheduled_for=date(2026, 8, 1)))
@@ -72,6 +81,7 @@ class ExportTests(unittest.TestCase):
                     apply_id=ordinary_apply_id,
                     product_id=dangerous_prefix_values["product_id"],
                     curr_status=40,
+                    platform_status="processing",
                     main_order_id="ordinary-order-id",
                 )
                 session.add(sample_case)

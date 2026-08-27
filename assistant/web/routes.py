@@ -16,6 +16,16 @@ from assistant.api.followups import router as followups_api_router
 from assistant.api.shipments import router as shipments_api_router
 from assistant.api.stores import running_store_summary
 from assistant.database.models import FollowupTask, Job, SampleCase, Shipment, Store
+from assistant.domain.followup_labels import (
+    FOLLOWUP_STAGE_LABELS,
+    FOLLOWUP_STAGE_TONES,
+    FOLLOWUP_STATUS_TONES,
+    SUPERSEDED_REASON,
+    followup_action_completed,
+    followup_action_display,
+    followup_action_tone,
+    followup_status_display,
+)
 from assistant.jobs.locks import request_safe_store_summary
 from assistant.paths import database_path, user_data_dir
 from assistant.security.secret_redaction import redact_text
@@ -29,6 +39,15 @@ router.include_router(followups_api_router)
 router.include_router(shipments_api_router)
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
+templates.env.globals.update(
+    followup_action_completed=followup_action_completed,
+    followup_action_display=followup_action_display,
+    followup_action_tone=followup_action_tone,
+    followup_status_display=followup_status_display,
+    FOLLOWUP_STAGE_LABELS=FOLLOWUP_STAGE_LABELS,
+    FOLLOWUP_STAGE_TONES=FOLLOWUP_STAGE_TONES,
+    FOLLOWUP_STATUS_TONES=FOLLOWUP_STATUS_TONES,
+)
 
 
 def _latest_active_job(request: Request):
@@ -260,10 +279,16 @@ def followups_page(
             query = query.where(FollowupTask.language == language)
         if curr_status is not None:
             query = query.where(SampleCase.curr_status == curr_status)
+        if not status:
+            query = query.where(
+                (FollowupTask.status != "suppressed")
+                | (FollowupTask.suppressed_reason != SUPERSEDED_REASON)
+            )
         context["rows"] = session.execute(query).all()
     context["filters"] = {
         "stage": stage, "status": status, "language": language,
         "curr_status": curr_status,
+        "include_superseded": bool(status),
     }
     return templates.TemplateResponse(request, "followups.html", context)
 
@@ -286,7 +311,7 @@ def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
         "/static/sop-images/2-查看到货+达人跟进-b05.png"
         if Path(context["task"].attachment_key).name == "2-查看到货+达人跟进-b05.png" else ""
     )
-    context["scheduled_label"] = "待确认送达日" if context["task"].stage == "confirm_delivery_time" else str(context["task"].scheduled_for)
+    context["scheduled_label"] = "待确认送达日" if context["task"].stage == "confirm_delivery_time" or context["task"].scheduled_for is None else str(context["task"].scheduled_for)
     return templates.TemplateResponse(request, "followup_detail.html", context)
 
 

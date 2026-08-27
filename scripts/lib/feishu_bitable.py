@@ -11,6 +11,7 @@
   - 去重键：红人ID + 寄样产品（命中则跳过不写）
   - 新建记录默认人员=王良希（技术）、合作状态=待发货、是否已寄样=否
   - 物流单号写入后才允许待发货 → 待发布，不回退后续状态
+  - D+15 未履约只允许待发布 → 未发布；确认内容后只允许待发布 → 已完成
   - 测试环境默认不调用写接口（由 CLI --write-feishu 显式开启）
 """
 from __future__ import annotations
@@ -39,6 +40,15 @@ COOPERATION_STATUS_PENDING_SHIP = "待发货"
 COOPERATION_STATUS_PENDING_POST = "待发布"
 # SOP 2 D+15「未履约」写这个选项，不要和「待发布」混名。
 COOPERATION_STATUS_UNPUBLISHED = "未发布"
+COOPERATION_STATUS_COMPLETED = "已完成"
+COOPERATION_STATUS_PUBLISHED_LEGACY = "已发布"
+PROTECTED_COOPERATION_STATUSES = frozenset(
+    {
+        COOPERATION_STATUS_UNPUBLISHED,
+        COOPERATION_STATUS_COMPLETED,
+        COOPERATION_STATUS_PUBLISHED_LEGACY,
+    }
+)
 FEISHU_LANG_EN = "英语"
 FEISHU_LANG_ES = "西班牙语"
 
@@ -653,6 +663,146 @@ def update_record_order_no(
     }
 
 
+def _current_cooperation_status_values(current_status: str) -> set[str]:
+    return {
+        status.strip()
+        for status in str(current_status or "").split(",")
+        if status.strip()
+    }
+
+
+def plan_cooperation_status_transition(
+    *,
+    current_status: str,
+    target_status: str,
+) -> dict[str, Any]:
+    """Plan a one-way cooperation-status change without writing.
+
+    Allowed SOP 2 transitions:
+      待发布 -> 未发布
+      待发布 -> 已完成
+    Already at the target is unchanged. Protected later statuses are preserved.
+    """
+    current_values = _current_cooperation_status_values(current_status)
+    if target_status not in {COOPERATION_STATUS_UNPUBLISHED, COOPERATION_STATUS_COMPLETED}:
+        raise FeishuBitableError(f"不支持的合作状态目标：{target_status}")
+    if target_status in current_values and len(current_values) == 1:
+        return {
+            "fields": {},
+            "status": "unchanged",
+            "current_status": current_status,
+            "target_status": target_status,
+            "status_transition": f"already-{target_status}",
+        }
+    if current_values & PROTECTED_COOPERATION_STATUSES:
+        return {
+            "fields": {},
+            "status": "preserved",
+            "current_status": current_status,
+            "target_status": target_status,
+            "status_transition": f"preserved:{current_status}",
+        }
+    if COOPERATION_STATUS_PENDING_POST not in current_values or len(current_values) != 1:
+        return {
+            "fields": {},
+            "status": "blocked-unexpected-status",
+            "current_status": current_status,
+            "target_status": target_status,
+            "status_transition": f"blocked:{current_status or '空'}->{target_status}",
+        }
+    return {
+        "fields": {"合作状态": [target_status]},
+        "status": "ready",
+        "current_status": current_status,
+        "target_status": target_status,
+        "status_transition": f"{COOPERATION_STATUS_PENDING_POST}->{target_status}",
+    }
+
+
+def update_record_cooperation_status(
+    access_token: str,
+    record_id: str,
+    target_status: str,
+    *,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write one SOP 2 cooperation-status transition, then re-read to verify.
+
+    Mirrors ``update_record_order_no``: GET current, PUT only when allowed,
+    GET again. Tests must mock ``_http_json`` and never hit Feishu.
+    """
+    if not record_id:
+        raise FeishuBitableError("缺少 record_id")
+    if current and isinstance(current.get("fields"), dict):
+        current_fields = current["fields"]
+    else:
+        current_fields = get_record_fields(
+            access_token,
+            record_id,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    current_status = _field_plain(current_fields.get("合作状态")).strip()
+    plan = plan_cooperation_status_transition(
+        current_status=current_status,
+        target_status=target_status,
+    )
+    if plan["status"] != "ready":
+        return {
+            "status": plan["status"],
+            "record_id": record_id,
+            "current_status": current_status,
+            "target_status": target_status,
+            "status_transition": plan["status_transition"],
+        }
+    updated = update_record_fields(
+        access_token,
+        record_id,
+        plan["fields"],
+        app_token=app_token,
+        table_id=table_id,
+    )
+    try:
+        verified_fields = get_record_fields(
+            access_token,
+            record_id,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    except FeishuBitableError as error:
+        return {
+            "status": "write-uncertain",
+            "record_id": record_id,
+            "current_status": current_status,
+            "target_status": target_status,
+            "status_transition": plan["status_transition"],
+            "verification_error": str(error),
+            "raw": updated.get("raw"),
+        }
+    verified_status = _field_plain(verified_fields.get("合作状态")).strip()
+    if verified_status != target_status:
+        return {
+            "status": "write-uncertain",
+            "record_id": record_id,
+            "current_status": verified_status,
+            "target_status": target_status,
+            "status_transition": plan["status_transition"],
+            "verification_error": "写后读取的合作状态与请求值不一致",
+            "raw": updated.get("raw"),
+        }
+    return {
+        "status": "written",
+        "record_id": record_id,
+        "current_status": current_status,
+        "target_status": target_status,
+        "status_transition": plan["status_transition"],
+        "fields": plan["fields"],
+        "raw": updated.get("raw"),
+    }
+
+
 def build_shipping_fields(
     *,
     order_no: str,
@@ -702,10 +852,12 @@ def build_shipping_fields(
             for status in current_status.split(",")
             if status.strip()
         }
-        protected_statuses = current_status_values - {
-            COOPERATION_STATUS_PENDING_SHIP,
-            COOPERATION_STATUS_PENDING_POST,
-        }
+        protected_statuses = current_status_values & PROTECTED_COOPERATION_STATUSES
+        if not protected_statuses:
+            protected_statuses = current_status_values - {
+                COOPERATION_STATUS_PENDING_SHIP,
+                COOPERATION_STATUS_PENDING_POST,
+            }
         if protected_statuses:
             status_transition = f"preserved:{current_status}"
         elif not current_status_values or COOPERATION_STATUS_PENDING_SHIP in current_status_values:
@@ -751,6 +903,10 @@ def describe_cooperation_transition(transition: str) -> str:
     text = str(transition or "").strip()
     if text == "already-pending-post":
         return "合作状态已是「待发布」，不用再改"
+    if text == f"already-{COOPERATION_STATUS_UNPUBLISHED}":
+        return "合作状态已是「未发布」，不用再改"
+    if text == f"already-{COOPERATION_STATUS_COMPLETED}":
+        return "合作状态已是「已完成」，不用再改"
     if text.startswith("preserved:"):
         current = text.split(":", 1)[1].strip() or "当前值"
         return f"合作状态保持「{current}」，不回退"

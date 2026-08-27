@@ -4,7 +4,7 @@
 <h1>CSV 报表</h1>
 {% call ui.banner('info') %}报表写入本机用户数据目录 exports/。{% endcall %}
 <div class="button-row">
-{% for kind, label in [("today","今日待办"),("day_10_list","处理中超过 10 天"),("logistics_exception","物流异常"),("needs_review","需要人工确认")] %}
+{% for kind, label in [("today","今日待办"),("day_10_list","D+10 待出名单"),("logistics_exception","物流异常"),("needs_review","需要人工确认")] %}
   <form method="post" action="/api/jobs/report-export" data-job-form data-job-label="{{ label }}报表">
     <input type="hidden" name="kind" value="{{ kind }}">
     <button type="submit" class="button--secondary">{{ label }}</button>

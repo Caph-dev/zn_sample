@@ -102,6 +102,8 @@ class ShipmentSyncTests(unittest.TestCase):
         with self.session_factory() as session:
             sample_case = session.scalar(select(SampleCase))
             self.assertEqual(sample_case.curr_status, 40)
+            self.assertEqual(sample_case.platform_status, "processing")
+            self.assertFalse(sample_case.platform_status_stale)
             self.assertEqual(sample_case.store_id, 1)
             # 同一申请同时出现在 tab 30/40：本轮只持久化一次，只生成一次 Snapshot。
             self.assertEqual(len(session.scalars(select(ShipmentSnapshot)).all()), 1)
@@ -970,7 +972,6 @@ class ShipmentSyncTests(unittest.TestCase):
                 "tracking_number": "known-tracking",
                 "tracking_display": "Carrier, known-tracking",
                 "carrier": "Carrier",
-                "status_code": "2",
                 "status_category": "in_transit",
                 "status_label": "In transit",
                 "package_count": 1,
@@ -1004,7 +1005,6 @@ class ShipmentSyncTests(unittest.TestCase):
             session.add(
                 ShipmentSnapshot(
                     shipment_id=shipment.id,
-                    status_code="2",
                     status_label="In transit",
                     status_category="in_transit",
                     last_event_text="",

@@ -1,20 +1,16 @@
 {% extends "base.html" %}
 {% import "_ui.html" as ui %}
-{% set stage_tones = {"arrival": "teal", "day_3": "blue", "day_7": "purple", "day_10_list": "orange", "unfulfilled": "red", "confirm_delivery_time": "pink"} %}
-{% set task_tones = {"pending": "warning", "ready": "blue", "needs_review": "orange", "done": "success", "sent": "success", "skipped": "neutral"} %}
-{% set stage_labels = {"arrival": "到货当天", "day_3": "D+3 跟进", "day_7": "D+7 跟进", "day_10_list": "D+10 只出名单", "unfulfilled": "D+15 未发布", "confirm_delivery_time": "待确认到货日"} %}
-{% set task_labels = {"pending": "待处理", "ready": "可以跟进", "needs_review": "需要人工确认", "done": "已完成", "sent": "已发送", "skipped": "已跳过", "suppressed": "已隐藏"} %}
-{% set sample_status_labels = {30: "已发货", 40: "处理中"} %}
+{% set sample_status_labels = {"processing": "处理中", "shipped": "已发货", "completed": "已完成", "cancelled": "已取消"} %}
 {% block content %}
 <h1>跟进待办</h1>
-{% call ui.banner('info') %}这里只提供预览、人工分类和跳过，不会自动发送。{% endcall %}
+{% call ui.banner('info') %}这里只提供预览、人工分类和本地完成标记。写飞书「已完成 / 未发布」必须勾选显式开关；默认不会发私信。被新阶段取代的旧步骤默认不出现。{% endcall %}
 <nav class="section-nav quick-filters" aria-label="跟进待办快捷筛选">
   <a href="/followups" {% if not filters.stage and not filters.status %}class="is-active"{% endif %}>全部</a>
   <a href="/followups?stage=arrival" {% if filters.stage == "arrival" %}class="is-active"{% endif %}>今日到货</a>
   <a href="/followups?stage=day_3" {% if filters.stage == "day_3" %}class="is-active"{% endif %}>D+3</a>
   <a href="/followups?stage=day_7" {% if filters.stage == "day_7" %}class="is-active"{% endif %}>D+7</a>
-  <a href="/followups?stage=day_10_list" {% if filters.stage == "day_10_list" %}class="is-active"{% endif %}>D+10 只出名单</a>
-  <a href="/followups?stage=unfulfilled" {% if filters.stage == "unfulfilled" %}class="is-active"{% endif %}>D+15 未发布</a>
+  <a href="/followups?stage=day_10_list" {% if filters.stage == "day_10_list" %}class="is-active"{% endif %}>D+10 出名单</a>
+  <a href="/followups?stage=unfulfilled" {% if filters.stage == "unfulfilled" %}class="is-active"{% endif %}>D+15 未履约</a>
   <a href="/followups?status=needs_review" {% if filters.status == "needs_review" %}class="is-active"{% endif %}>需确认</a>
 </nav>
 <form method="get" class="form-toolbar">
@@ -26,15 +22,27 @@
 </form>
 {% if rows %}
 <table>
-  <thead><tr><th>达人</th><th>阶段</th><th>状态</th><th>语言</th><th>样品状态</th></tr></thead>
+  <thead><tr><th>达人</th><th>阶段</th><th>动作</th><th>状态</th><th>语言</th><th>样品状态</th></tr></thead>
   <tbody>
   {% for task, sample_case in rows %}
+    {% set action_label = followup_action_display(task.action_kind, sent_at=task.sent_at, send_result=task.send_result) %}
+    {% set action_tone = followup_action_tone(task.action_kind, sent_at=task.sent_at, send_result=task.send_result) %}
+    {% set status_label = followup_status_display(task.status, suppressed_reason=task.suppressed_reason) %}
     <tr>
       <td><a href="/followups/{{ task.id }}">{{ sample_case.creator_name }}</a></td>
-      <td>{{ ui.status_token(stage_labels.get(task.stage, task.stage), stage_tones.get(task.stage, 'neutral')) }}</td>
-      <td>{{ ui.status_token(task_labels.get(task.status, task.status), task_tones.get(task.status, 'neutral')) }}</td>
+      <td>{{ ui.status_token(FOLLOWUP_STAGE_LABELS.get(task.stage, task.stage), FOLLOWUP_STAGE_TONES.get(task.stage, 'neutral')) }}</td>
+      <td>{{ ui.status_token(action_label, action_tone) }}</td>
+      <td>
+        {% if status_label == "-" %}
+          {{ ui.status_token("-", "neutral") }}
+        {% elif task.status == "needs_review" %}
+          {{ ui.status_token(status_label, "orange", title=task.review_reason) }}
+        {% else %}
+          {{ ui.status_token(status_label, FOLLOWUP_STATUS_TONES.get(task.status, 'neutral')) }}
+        {% endif %}
+      </td>
       <td>{{ task.language }}</td>
-      <td>{{ sample_status_labels.get(sample_case.curr_status, sample_case.curr_status) }}</td>
+      <td>{{ sample_status_labels.get(sample_case.platform_status, sample_case.platform_status_label or sample_case.curr_status) }}</td>
     </tr>
   {% endfor %}
   </tbody>

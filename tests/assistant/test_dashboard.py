@@ -32,7 +32,15 @@ class DashboardTests(unittest.TestCase):
                 store = Store(ziniao_store_id="store", store_name="store")
                 session.add(store); session.flush()
                 for status, task_status in ((30, "pending"), (40, "pending"), (40, "suppressed")):
-                    sample_case = SampleCase(store_id=store.id, creator_id=f"c-{status}-{task_status}", creator_name="creator", apply_id=f"a-{status}-{task_status}", product_id="product", curr_status=status)
+                    sample_case = SampleCase(
+                        store_id=store.id,
+                        creator_id=f"c-{status}-{task_status}",
+                        creator_name="creator",
+                        apply_id=f"a-{status}-{task_status}",
+                        product_id="product",
+                        curr_status=status,
+                        platform_status="processing" if status == 40 else "shipped",
+                    )
                     session.add(sample_case); session.flush()
                     session.add(FollowupTask(sample_case_id=sample_case.id, stage="day_10_list", scheduled_for=date(2026, 8, 1), status=task_status, requires_manual_confirmation=True))
                     session.add(Shipment(sample_case_id=sample_case.id, status_category="exception" if status == 40 else "in_transit"))

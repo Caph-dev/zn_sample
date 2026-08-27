@@ -1,6 +1,8 @@
 """Versioned, I/O-free message templates copied from authoritative SOP2."""
 from __future__ import annotations
 
+from assistant.domain.policies import followup_message_creator_type
+
 
 TEMPLATE_VERSION = 1
 
@@ -166,21 +168,26 @@ def choose_template_key(
     """Choose a SOP2 template key for the current follow-up context."""
     if lang not in {"en", "es"}:
         return None
-    if stage in {"day_10_list", "unfulfilled"}:
+    if stage in {"day_10_list", "unfulfilled", "confirm_delivery_time"}:
         return None
     if stage == "video_found":
         return f"video_found_{lang}"
     if stage == "live_found":
         return f"live_found_{lang}"
-    if creator_type not in {"video", "live"}:
+    message_creator_type = followup_message_creator_type(creator_type)
+    if stage == "content_found" and message_creator_type == "video":
+        return f"video_found_{lang}"
+    if stage == "content_found" and message_creator_type == "live":
+        return f"live_found_{lang}"
+    if message_creator_type not in {"video", "live"}:
         return None
     if stage == "arrival":
         sku_group = "hero" if is_hero_sku else "other"
-        return f"arrival_{sku_group}_{creator_type}_{lang}"
+        return f"arrival_{sku_group}_{message_creator_type}_{lang}"
     if stage == "day_3":
-        return f"unpublished_3_{creator_type}_{lang}"
+        return f"unpublished_3_{message_creator_type}_{lang}"
     if stage == "day_7":
-        return f"unpublished_7_{creator_type}_{lang}"
+        return f"unpublished_7_{message_creator_type}_{lang}"
     return None
 
 

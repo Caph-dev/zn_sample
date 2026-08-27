@@ -3,19 +3,55 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from scripts.lib.feishu_bitable import COOPERATION_STATUS_UNPUBLISHED
+from scripts.lib.feishu_bitable import (
+    COOPERATION_STATUS_COMPLETED,
+    COOPERATION_STATUS_UNPUBLISHED,
+)
 
 from .timeutil import beijing_date, beijing_now
 
 
 FEISHU_UNFULFILLED_COOPERATION_STATUS = COOPERATION_STATUS_UNPUBLISHED
+FEISHU_COMPLETED_COOPERATION_STATUS = COOPERATION_STATUS_COMPLETED
 CONFIRM_DELIVERY_TIME_STAGE = "confirm_delivery_time"
-CONFIRM_DELIVERY_TIME_SENTINEL = date(1970, 1, 1)
+CONTENT_FOUND_STAGE = "content_found"
 
 FOLLOWUP_STAGES = frozenset(
     {"arrival", "day_3", "day_7", "day_10_list", "unfulfilled"}
 )
-MUTABLE_TASK_STATUSES = frozenset({"pending", "ready", "needs_review"})
+ACTIVE_TASK_STATUSES = frozenset({"pending", "needs_review"})
+MUTABLE_TASK_STATUSES = ACTIVE_TASK_STATUSES
+FOLLOWUP_TASK_STATUSES = frozenset(
+    {"pending", "needs_review", "skipped", "suppressed"}
+)
+
+ACTION_KIND_SEND_MESSAGE = "send_message"
+ACTION_KIND_LIST_ONLY = "list_only"
+ACTION_KIND_CONFIRM_DELIVERY_DATE = "confirm_delivery_date"
+ACTION_KIND_MARK_UNFULFILLED = "mark_unfulfilled"
+ACTION_KIND_ACKNOWLEDGE_CONTENT = "acknowledge_content"
+COMPLETED_LOCAL_RESULTS = frozenset({"marked-sent", "listed"})
+
+ACTION_KIND_BY_STAGE = {
+    "arrival": ACTION_KIND_SEND_MESSAGE,
+    "day_3": ACTION_KIND_SEND_MESSAGE,
+    "day_7": ACTION_KIND_SEND_MESSAGE,
+    "day_10_list": ACTION_KIND_LIST_ONLY,
+    "unfulfilled": ACTION_KIND_MARK_UNFULFILLED,
+    CONFIRM_DELIVERY_TIME_STAGE: ACTION_KIND_CONFIRM_DELIVERY_DATE,
+    CONTENT_FOUND_STAGE: ACTION_KIND_ACKNOWLEDGE_CONTENT,
+}
+
+
+def action_kind_for_stage(stage: str) -> str:
+    return ACTION_KIND_BY_STAGE.get(stage, "")
+
+
+def followup_task_completed(task: dict) -> bool:
+    """Local completion: marked sent or handed to ops. Not a platform send."""
+    if task.get("sent_at"):
+        return True
+    return str(task.get("send_result") or "") in COMPLETED_LOCAL_RESULTS
 
 
 def days_since_delivery(delivered_at: datetime, today: date | None = None) -> int:
@@ -40,7 +76,9 @@ def latest_due_unpublished_stage(days: int) -> tuple[str, int] | None:
     return ("unfulfilled", 15)
 
 
-def _as_date(scheduled_for: str | date) -> date:
+def _as_date(scheduled_for: str | date | None) -> date | None:
+    if scheduled_for is None:
+        return None
     if isinstance(scheduled_for, datetime):
         return scheduled_for.date()
     if isinstance(scheduled_for, date):
@@ -64,6 +102,8 @@ def plan_followup_mutation(
 
     if has_confirmed_content:
         for existing_task in existing_unpublished:
+            if followup_task_completed(existing_task):
+                continue
             if (
                 existing_task["stage"] in FOLLOWUP_STAGES
                 and existing_task["status"] in MUTABLE_TASK_STATUSES
@@ -94,7 +134,12 @@ def plan_followup_mutation(
     creations = []
     if target_key not in existing_keys:
         creations.append(
-            {"stage": stage, "scheduled_for": scheduled_for, "status": "pending"}
+            {
+                "stage": stage,
+                "scheduled_for": scheduled_for,
+                "status": "pending",
+                "action_kind": action_kind_for_stage(stage),
+            }
         )
 
     for existing_task in existing_unpublished:
@@ -102,6 +147,8 @@ def plan_followup_mutation(
             existing_task["stage"],
             _as_date(existing_task["scheduled_for"]),
         )
+        if followup_task_completed(existing_task):
+            continue
         if (
             existing_task["stage"] in FOLLOWUP_STAGES
             and existing_task["status"] in MUTABLE_TASK_STATUSES

@@ -13,6 +13,7 @@ from assistant.domain.policies import (
     choose_followup_creator_type,
     choose_followup_language,
     feishu_update_idempotency_key,
+    followup_message_creator_type,
     followup_task_idempotency_key,
     message_send_idempotency_key,
 )
@@ -25,7 +26,10 @@ class FollowupPolicyTests(unittest.TestCase):
             is_video_creator="是",
             is_live_creator="",
         )
-        self.assertEqual(result, {"creator_type": "live", "needs_review": False})
+        self.assertEqual(
+            result,
+            {"creator_type": "live", "needs_review": False, "review_reason": ""},
+        )
 
     def test_single_export_flag_selects_creator_type(self) -> None:
         self.assertEqual(
@@ -34,7 +38,7 @@ class FollowupPolicyTests(unittest.TestCase):
                 is_video_creator="是",
                 is_live_creator="",
             ),
-            {"creator_type": "video", "needs_review": False},
+            {"creator_type": "video", "needs_review": False, "review_reason": ""},
         )
         self.assertEqual(
             choose_followup_creator_type(
@@ -42,19 +46,36 @@ class FollowupPolicyTests(unittest.TestCase):
                 is_video_creator="",
                 is_live_creator="是",
             ),
-            {"creator_type": "live", "needs_review": False},
+            {"creator_type": "live", "needs_review": False, "review_reason": ""},
         )
 
-    def test_ambiguous_creator_flags_require_review(self) -> None:
-        for video_flag, live_flag in (("是", "是"), ("", "")):
-            with self.subTest(video_flag=video_flag, live_flag=live_flag):
-                result = choose_followup_creator_type(
-                    manual_type=None,
-                    is_video_creator=video_flag,
-                    is_live_creator=live_flag,
-                )
-                self.assertIsNone(result["creator_type"])
-                self.assertTrue(result["needs_review"])
+    def test_dual_marked_creator_stays_both_without_review(self) -> None:
+        result = choose_followup_creator_type(
+            manual_type=None,
+            is_video_creator="是",
+            is_live_creator="是",
+        )
+        self.assertEqual(
+            result,
+            {"creator_type": "both", "needs_review": False, "review_reason": ""},
+        )
+        self.assertEqual(followup_message_creator_type("both"), "video")
+        self.assertEqual(followup_message_creator_type("live"), "live")
+
+    def test_missing_creator_type_still_requires_review(self) -> None:
+        result = choose_followup_creator_type(
+            manual_type=None,
+            is_video_creator="",
+            is_live_creator="",
+        )
+        self.assertEqual(
+            result,
+            {
+                "creator_type": "unknown",
+                "needs_review": True,
+                "review_reason": "missing_creator_type",
+            },
+        )
 
     def test_empty_bio_recommends_english_for_review(self) -> None:
         result = choose_followup_language(bio="")

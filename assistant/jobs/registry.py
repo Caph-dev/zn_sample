@@ -22,6 +22,7 @@ REGISTERED_JOB_TYPES = frozenset(
         "environment_check",
         "shipment_sync",
         "followup_generate",
+        "creator_enrich",
         "report_export",
         "daily_refresh",
         "operator_prepare",
@@ -56,6 +57,9 @@ def get_handler(job_type: str) -> JobHandler | None:
     if job_type == "followup_generate":
         from assistant.jobs.handlers.followup_generate import run_followup_generate
         return run_followup_generate
+    if job_type == "creator_enrich":
+        from assistant.jobs.handlers.creator_enrich import run_creator_enrich
+        return run_creator_enrich
     if job_type == "report_export":
         from assistant.jobs.handlers.report_export import run_report_export
         return run_report_export

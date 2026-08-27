@@ -104,7 +104,7 @@ class FollowupMessageTemplateTests(unittest.TestCase):
                     render_followup_message(template_key, creator_name="Creator"),
                 )
 
-    def test_non_message_stages_and_ambiguous_types_have_no_template(self) -> None:
+    def test_non_message_stages_and_unknown_types_have_no_template(self) -> None:
         for stage in ("day_10_list", "unfulfilled"):
             self.assertIsNone(
                 choose_template_key(
@@ -121,6 +121,35 @@ class FollowupMessageTemplateTests(unittest.TestCase):
                 lang="en",
                 is_hero_sku=True,
             )
+        )
+
+    def test_dual_marked_creator_uses_video_templates(self) -> None:
+        self.assertEqual(
+            choose_template_key(
+                stage="arrival",
+                creator_type="both",
+                lang="en",
+                is_hero_sku=True,
+            ),
+            "arrival_hero_video_en",
+        )
+        self.assertEqual(
+            choose_template_key(
+                stage="day_3",
+                creator_type="both",
+                lang="es",
+                is_hero_sku=False,
+            ),
+            "unpublished_3_video_es",
+        )
+        self.assertEqual(
+            choose_template_key(
+                stage="content_found",
+                creator_type="both",
+                lang="en",
+                is_hero_sku=True,
+            ),
+            "video_found_en",
         )
 
     def test_found_templates_ignore_creator_type(self) -> None:

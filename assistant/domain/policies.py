@@ -6,23 +6,94 @@ from datetime import date
 from scripts.lib.detect_lang import detect_creator_lang
 
 
+CREATOR_TYPE_VIDEO = "video"
+CREATOR_TYPE_LIVE = "live"
+CREATOR_TYPE_BOTH = "both"
+CREATOR_TYPE_UNKNOWN = "unknown"
+FOLLOWUP_CREATOR_TYPES = frozenset(
+    {CREATOR_TYPE_VIDEO, CREATOR_TYPE_LIVE, CREATOR_TYPE_BOTH, CREATOR_TYPE_UNKNOWN}
+)
+MESSAGE_CREATOR_TYPES = frozenset({CREATOR_TYPE_VIDEO, CREATOR_TYPE_LIVE})
+UPSTREAM_CREATOR_TYPE_ALIASES = {
+    "video": CREATOR_TYPE_VIDEO,
+    "live": CREATOR_TYPE_LIVE,
+    "both": CREATOR_TYPE_BOTH,
+    "unknown": CREATOR_TYPE_UNKNOWN,
+    "视频达人": CREATOR_TYPE_VIDEO,
+    "直播达人": CREATOR_TYPE_LIVE,
+    "视频+直播": CREATOR_TYPE_BOTH,
+    "视频达人+直播达人": CREATOR_TYPE_BOTH,
+}
+
+
+def normalize_creator_type(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return UPSTREAM_CREATOR_TYPE_ALIASES.get(raw, raw if raw in FOLLOWUP_CREATOR_TYPES else None)
+
+
+def followup_message_creator_type(creator_type: str | None) -> str | None:
+    """Map stored creator type to the template family used for follow-up DMs.
+
+    Dual-marked creators stay ``both`` on the case, but follow-up copy uses the
+    video-creator templates unless a person explicitly chose live.
+    """
+    if creator_type == CREATOR_TYPE_BOTH:
+        return CREATOR_TYPE_VIDEO
+    return creator_type
+
+
 def choose_followup_creator_type(
     *,
     manual_type: str | None,
     is_video_creator: str = "",
     is_live_creator: str = "",
 ) -> dict:
-    """Choose one creator type, leaving ambiguous exports for human review."""
-    if manual_type in {"video", "live"}:
-        return {"creator_type": manual_type, "needs_review": False}
+    """Choose the stored creator type for a follow-up task.
+
+    Dual-marked creators stay ``both`` and do not need type review. Follow-up
+    message templates treat ``both`` as video unless a person picked live.
+    """
+    normalized_manual = normalize_creator_type(manual_type)
+    if normalized_manual in MESSAGE_CREATOR_TYPES:
+        return {
+            "creator_type": normalized_manual,
+            "needs_review": False,
+            "review_reason": "",
+        }
 
     is_video = is_video_creator == "是"
     is_live = is_live_creator == "是"
+    if is_video and is_live:
+        return {
+            "creator_type": CREATOR_TYPE_BOTH,
+            "needs_review": False,
+            "review_reason": "",
+        }
     if is_video and not is_live:
-        return {"creator_type": "video", "needs_review": False}
+        return {
+            "creator_type": CREATOR_TYPE_VIDEO,
+            "needs_review": False,
+            "review_reason": "",
+        }
     if is_live and not is_video:
-        return {"creator_type": "live", "needs_review": False}
-    return {"creator_type": None, "needs_review": True}
+        return {
+            "creator_type": CREATOR_TYPE_LIVE,
+            "needs_review": False,
+            "review_reason": "",
+        }
+    if normalized_manual == CREATOR_TYPE_BOTH:
+        return {
+            "creator_type": CREATOR_TYPE_BOTH,
+            "needs_review": False,
+            "review_reason": "",
+        }
+    return {
+        "creator_type": CREATOR_TYPE_UNKNOWN,
+        "needs_review": True,
+        "review_reason": "missing_creator_type",
+    }
 
 
 def choose_followup_language(

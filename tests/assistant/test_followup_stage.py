@@ -69,7 +69,14 @@ class FollowupStageTests(unittest.TestCase):
         )
         self.assertEqual(
             mutation["create"],
-            [{"stage": "day_3", "scheduled_for": date(2026, 8, 19), "status": "pending"}],
+            [
+                {
+                    "stage": "day_3",
+                    "scheduled_for": date(2026, 8, 19),
+                    "status": "pending",
+                    "action_kind": "send_message",
+                }
+            ],
         )
         self.assertEqual(mutation["suppress"], [])
 
@@ -98,7 +105,7 @@ class FollowupStageTests(unittest.TestCase):
         today = date(2026, 8, 22)
         mutation = plan_followup_mutation(
             existing_unpublished=[
-                {"stage": "day_7", "scheduled_for": today, "status": "ready"}
+                {"stage": "day_7", "scheduled_for": today, "status": "pending"}
             ],
             days=7,
             has_confirmed_content=False,
@@ -118,7 +125,8 @@ class FollowupStageTests(unittest.TestCase):
                 {
                     "stage": "day_7",
                     "scheduled_for": scheduled_for,
-                    "status": "sent",
+                    "status": "pending",
+                    "send_result": "marked-sent",
                 },
             ],
             days=11,
@@ -128,6 +136,25 @@ class FollowupStageTests(unittest.TestCase):
         self.assertEqual(len(mutation["suppress"]), 1)
         self.assertEqual(mutation["suppress"][0]["stage"], "day_10_list")
         self.assertEqual(mutation["suppress"][0]["reason"], "content_confirmed")
+
+    def test_later_stage_does_not_suppress_locally_sent_message(self) -> None:
+        today = date(2026, 8, 22)
+        arrival_date = today - timedelta(days=3)
+        mutation = plan_followup_mutation(
+            existing_unpublished=[
+                {
+                    "stage": "arrival",
+                    "scheduled_for": arrival_date,
+                    "status": "pending",
+                    "send_result": "marked-sent",
+                }
+            ],
+            days=3,
+            has_confirmed_content=False,
+            today=today,
+        )
+        self.assertEqual(mutation["create"][0]["stage"], "day_3")
+        self.assertEqual(mutation["suppress"], [])
 
     def test_unfulfilled_status_matches_feishu_constant(self) -> None:
         self.assertEqual(

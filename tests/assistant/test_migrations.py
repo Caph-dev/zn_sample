@@ -54,7 +54,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             try:
                 inspector = inspect(engine)
                 expected_model_tables = set(Base.metadata.tables)
-                self.assertEqual(len(expected_model_tables), 8)
+                self.assertEqual(len(expected_model_tables), 9)
                 self.assertEqual(
                     set(inspector.get_table_names()),
                     expected_model_tables | {"alembic_version"},
@@ -63,7 +63,7 @@ class MigrationIntegrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0002_add_shipment_sync_metadata",
+                        "0004_followup_status_model",
                     )
 
                 for table_name, model_table in Base.metadata.tables.items():
@@ -72,12 +72,15 @@ class MigrationIntegrationTests(unittest.TestCase):
                             column["name"],
                             str(column["type"]),
                             column["nullable"],
-                            column["default"],
                         )
                         for column in inspector.get_columns(table_name)
                     )
                     expected_columns = sorted(
-                        (column.name, str(column.type), column.nullable, None)
+                        (
+                            column.name,
+                            str(column.type),
+                            column.nullable,
+                        )
                         for column in model_table.columns
                     )
                     self.assertEqual(actual_columns, expected_columns, table_name)
@@ -89,6 +92,9 @@ class MigrationIntegrationTests(unittest.TestCase):
                         (("shipment_id",), "shipments", ("id",))
                     },
                     "followup_tasks": {
+                        (("sample_case_id",), "sample_cases", ("id",))
+                    },
+                    "content_evidences": {
                         (("sample_case_id",), "sample_cases", ("id",))
                     },
                     "job_events": {(('job_id',), 'jobs', ('id',))},

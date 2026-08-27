@@ -34,6 +34,7 @@
     environment_check: "店铺连接检查",
     shipment_sync: "物流同步",
     followup_generate: "跟进待办生成",
+    creator_enrich: "补齐达人资料",
     report_export: "报表导出",
     operator_prepare: "打开店铺",
     operator_screen: "只出名单",
@@ -405,6 +406,15 @@
 
     if (job.job_type === "followup_generate") {
       return [["新增跟进待办", `${formatNumber(result.created)} 条`]];
+    }
+
+    if (job.job_type === "creator_enrich") {
+      return [
+        ["待补齐", `${formatNumber(result.missing)} 位达人`],
+        ["类型补齐", `${formatNumber(result.type_filled)} 位`],
+        ["语言补齐", `${formatNumber(result.language_filled)} 位`],
+        ["补齐失败", `${formatNumber(result.failed)} 位`],
+      ];
     }
 
     if (job.job_type === "environment_check") {

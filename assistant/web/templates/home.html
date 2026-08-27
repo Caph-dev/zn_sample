@@ -93,10 +93,20 @@
       </form>
     </li>
     <li>
+      <strong class="operator-kind" aria-hidden="true">只读</strong>
+      <section class="operator-copy">
+        <h3>补齐达人资料</h3>
+        <p>对处理中达人补齐缺失的视频/直播类型与语言（飞书使用语言优先，无值则读详情简介缓存本地）；只读，不批准、不发私信、不写飞书。</p>
+      </section>
+      <form method="post" action="/api/jobs/creator-enrich" data-job-form data-job-label="补齐达人资料">
+        <button type="submit" class="operator-action-button">执行</button>
+      </form>
+    </li>
+    <li>
       <strong class="operator-kind" aria-hidden="true">本地</strong>
       <section class="operator-copy">
         <h3>生成今日跟进待办</h3>
-        <p>使用本地到货数据生成 D0、D+3、D+7、D+10、D+15 待办和话术预览；不会自动发送或写飞书。</p>
+        <p>使用本地到货数据生成 D0、D+3、D+7、D+10、D+15 待办和话术预览。确认内容或未履约后，只有勾选写飞书开关才会改合作状态；默认不发私信。</p>
       </section>
       <form method="post" action="/api/jobs/followup-generate" data-job-form data-job-label="跟进待办生成">
         <button type="submit" class="operator-action-button">执行</button>
@@ -106,7 +116,7 @@
       <strong class="operator-kind" aria-hidden="true">导出</strong>
       <section class="operator-copy">
         <h3>导出跟进报表</h3>
-        <p>导出今日待办、D+10 只出名单、物流异常和人工确认清单。</p>
+        <p>导出今日待办、D+10 待出名单、物流异常和人工确认清单。</p>
       </section>
       <a class="button-link operator-action-button" href="/reports">执行</a>
     </li>
@@ -123,7 +133,7 @@
     <li><a href="/followups?stage=arrival"><span>今日到货提醒</span><span class="queue-count">{{ dashboard.arrival }}</span></a></li>
     <li><a href="/followups?stage=day_3"><span>D+3 跟进</span><span class="queue-count">{{ dashboard.day_3 }}</span></a></li>
     <li><a href="/followups?stage=day_7"><span>D+7 跟进</span><span class="queue-count">{{ dashboard.day_7 }}</span></a></li>
-    <li><a href="/followups?stage=day_10_list"><span>D+10 只出名单</span><span class="queue-count">{{ dashboard.day_10_list }}</span></a></li>
+    <li><a href="/followups?stage=day_10_list"><span>D+10 待出名单</span><span class="queue-count">{{ dashboard.day_10_list }}</span></a></li>
     <li><a href="/followups?stage=unfulfilled"><span>D+15 未发布</span><span class="queue-count">{{ dashboard.unfulfilled }}</span></a></li>
     <li><a href="/followups?status=needs_review"><span>需要人工确认</span>{{ ui.status_token(dashboard.needs_review, 'warning' if dashboard.needs_review else 'neutral') }}</a></li>
     <li><a href="/shipments"><span>物流异常</span>{{ ui.status_token(dashboard.logistics_exceptions, 'error' if dashboard.logistics_exceptions else 'neutral') }}</a></li>

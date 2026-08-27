@@ -12,6 +12,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from assistant.database.models import SampleCase, Shipment, ShipmentSnapshot, Store
+from assistant.domain.platform_status import normalize_platform_status
 from assistant.jobs.registry import HandlerFailure
 from assistant.services.store_service import StoreService
 
@@ -105,7 +106,6 @@ class ShipmentService:
             (
                 str(shipment.tracking_number or ""),
                 str(shipment.carrier or ""),
-                str(shipment.status_code or ""),
                 str(shipment.status_category or ""),
                 str(shipment.status_label or ""),
                 str(shipment.estimated_delivery_at or ""),
@@ -262,7 +262,6 @@ class ShipmentService:
                 session.add(
                     ShipmentSnapshot(
                         shipment_id=shipment.id,
-                        status_code=shipment.status_code,
                         status_label=shipment.status_label,
                         status_category=shipment.status_category,
                         estimated_delivery_at=shipment.estimated_delivery_at,
@@ -460,6 +459,7 @@ class ShipmentService:
         combined_rows = [(row, 30) for row in shipped_rows]
         combined_rows.extend((row, 40) for row in processing_rows)
         total = len(combined_rows)
+        seen_case_ids: set[int] = set()
 
         changed = 0
         synchronized = 0
@@ -473,6 +473,7 @@ class ShipmentService:
             sample_case = self._upsert_sample_case(store_model.id, row, source_status)
             if sample_case is None:
                 continue
+            seen_case_ids.add(sample_case.id)
             order_id = self._normalize_order_id(row.get("main_order_id"))
             if not VALID_ORDER_ID.fullmatch(order_id):
                 changed += int(
@@ -689,6 +690,7 @@ class ShipmentService:
                             )
                         )
                         synchronized += 1
+            stale_marked = self._mark_unseen_cases_stale(store_model.id, seen_case_ids)
             job_progress(total, total, "物流同步完成")
             logger.info(
                 "event=shipment_sync_batch source_rows=%d valid_rows=%d "
@@ -714,6 +716,7 @@ class ShipmentService:
                 "synchronized_cases": synchronized,
                 "synchronized": synchronized,
                 "processing": len(processing_rows),
+                "stale_marked": stale_marked,
             }
         finally:
             if entered_seller_order_page:
@@ -786,9 +789,43 @@ class ShipmentService:
             model.creator_nickname = str(row.get("nick_name") or model.creator_nickname or "")
             model.sku_id = str(row.get("sku_id") or model.sku_id or "")
             model.main_order_id = str(row.get("main_order_id") or model.main_order_id or "")
-            model.curr_status = max(int(model.curr_status or 0), source_status)
+            observed = normalize_platform_status(source_status)
+            current_rank = {
+                "processing": 40,
+                "shipped": 30,
+                "ready_to_ship": 20,
+                "pending_review": 10,
+            }
+            incoming_rank = current_rank.get(str(observed["platform_status"]), 0)
+            existing_rank = current_rank.get(str(model.platform_status or ""), 0)
+            if incoming_rank >= existing_rank or model.platform_status_stale:
+                model.curr_status = int(observed["curr_status"])
+                model.platform_status = str(observed["platform_status"])
+                model.platform_status_label = str(observed["platform_status_label"])
+                model.platform_status_source = str(observed["platform_status_source"])
+                model.platform_status_stale = False
+                model.platform_status_observed_at = now
             model.last_seen_at = now
             session.commit()
             session.refresh(model)
             session.expunge(model)
             return model
+
+    def _mark_unseen_cases_stale(self, store_id: int, seen_case_ids: set[int]) -> int:
+        """Stop treating last cycle's processing rows as current if they vanished."""
+        with self.session_factory() as session:
+            cases = session.scalars(
+                select(SampleCase).where(
+                    SampleCase.store_id == store_id,
+                    SampleCase.platform_status.in_(("processing", "shipped")),
+                    SampleCase.platform_status_stale.is_(False),
+                )
+            ).all()
+            marked = 0
+            for sample_case in cases:
+                if sample_case.id in seen_case_ids:
+                    continue
+                sample_case.platform_status_stale = True
+                marked += 1
+            session.commit()
+            return marked
