@@ -27,12 +27,14 @@ PLATFORM_STATUS_BY_CODE = {
     30: PLATFORM_STATUS_SHIPPED,
     40: PLATFORM_STATUS_PROCESSING,
     50: PLATFORM_STATUS_COMPLETED,
+    100: PLATFORM_STATUS_COMPLETED,
 }
 
 PLATFORM_STATUS_SOURCE_BY_CODE = {
     30: "shipped_tab",
     40: "processing_tab",
     50: "completed_tab",
+    100: "completed_tab",
     20: "ready_to_ship_tab",
     10: "pending_tab",
     11: "pending_tab",

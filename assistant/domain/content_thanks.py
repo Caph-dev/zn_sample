@@ -41,6 +41,10 @@ DECISION_SKIP = "skip"
 
 VIDEO_CONTENT_MARKERS = ("视频", "video")
 LIVE_CONTENT_MARKERS = ("直播", "live")
+_DRAWER_COUNT_PATTERN = re.compile(
+    r"视频\s+(\d+)\s+直播\s+(\d+)|video\s+(\d+)\s+live\s+(\d+)",
+    re.IGNORECASE,
+)
 
 
 def content_thanks_since(now: datetime | None = None) -> datetime:
@@ -52,36 +56,73 @@ def classify_completed_content(
     *,
     panel_text: str = "",
     links: list[str] | None = None,
+    video_count: int | None = None,
+    live_count: int | None = None,
 ) -> dict:
-    """Classify 查看内容 as video, live, both-as-video, or uncertain."""
-    blob = str(panel_text or "").lower()
+    """Classify 查看内容 from the content-detail drawer, not tab labels.
+
+    Measured drawer copy is ``内容详情 / 视频 N / 直播 M``. Tab titles always
+    contain both words, so a bare 视频/直播 match is not evidence.
+
+    ``video_count`` / ``live_count`` come from the sample/performance API and
+    take precedence over text parsing when provided.
+    """
+    raw = str(panel_text or "")
+    compact = re.sub(r"\s+", " ", raw).strip()
     hrefs = [str(link or "").lower() for link in (links or [])]
     has_video_link = any("/video/" in href for href in hrefs)
     has_live_link = any("/live" in href for href in hrefs)
-    has_video = has_video_link or any(marker in blob for marker in VIDEO_CONTENT_MARKERS)
-    has_live = has_live_link or any(marker in blob for marker in LIVE_CONTENT_MARKERS)
+    has_view_video = "在tiktok查看视频" in compact.lower() or "view video on tiktok" in compact.lower()
+    has_view_live = "在tiktok查看直播" in compact.lower() or "view live on tiktok" in compact.lower()
+    if video_count is None or live_count is None:
+        count_match = _DRAWER_COUNT_PATTERN.search(compact)
+        if count_match:
+            if count_match.group(1) is not None:
+                video_count = int(count_match.group(1))
+                live_count = int(count_match.group(2))
+            else:
+                video_count = int(count_match.group(3))
+                live_count = int(count_match.group(4))
+    has_video = has_video_link or has_view_video or (video_count is not None and video_count > 0)
+    has_live = has_live_link or has_view_live or (live_count is not None and live_count > 0)
     if has_video and has_live:
         return {
             "status": "classified",
             "content_type": "video",
             "reason": "both-prefer-video",
+            "video_count": video_count,
+            "live_count": live_count,
         }
     if has_video:
         return {
             "status": "classified",
             "content_type": "video",
             "reason": "video-only",
+            "video_count": video_count,
+            "live_count": live_count,
         }
     if has_live:
         return {
             "status": "classified",
             "content_type": "live",
             "reason": "live-only",
+            "video_count": video_count,
+            "live_count": live_count,
+        }
+    if video_count is not None and live_count is not None and video_count == 0 and live_count == 0:
+        return {
+            "status": "hold",
+            "content_type": "",
+            "reason": "no-content-found",
+            "video_count": video_count,
+            "live_count": live_count,
         }
     return {
         "status": "hold",
         "content_type": "",
         "reason": "content-type-uncertain",
+        "video_count": video_count,
+        "live_count": live_count,
     }
 
 
@@ -174,6 +215,22 @@ _RELATIVE_DAYS = re.compile(
     r"(\d+)\s*(?:天前|days?|d)\b",
     re.IGNORECASE,
 )
+
+_WEEKDAY_ALIASES = {
+    "一": 0, "1": 0, "mon": 0, "monday": 0,
+    "二": 1, "2": 1, "tue": 1, "tues": 1, "tuesday": 1,
+    "三": 2, "3": 2, "wed": 2, "wednesday": 2,
+    "四": 3, "4": 3, "thu": 3, "thur": 3, "thurs": 3, "thursday": 3,
+    "五": 4, "5": 4, "fri": 4, "friday": 4,
+    "六": 5, "6": 5, "sat": 5, "saturday": 5,
+    "日": 6, "天": 6, "7": 6, "sun": 6, "sunday": 6,
+}
+_RELATIVE_WEEKDAY = re.compile(
+    r"(?:星期|礼拜|周)([一二三四五六日天])"
+    r"|(?:^|[\s（(])(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tues?|wed|thurs?|fri|sat|sun)[\s，,：:.）)]",
+    re.IGNORECASE,
+)
 _ISO_DATE = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
 _CHINESE_DATE = re.compile(r"(\d{1,2})月(\d{1,2})日")
 _MONTH_NAME_DATE = re.compile(
@@ -201,6 +258,12 @@ def _date_with_current_year(month: int, day: int, today: date) -> date | None:
     return parsed
 
 
+def _most_recent_weekday(weekday_number: int, today: date) -> date:
+    """最近一次该星期几（含今天），不会落到未来。"""
+    days_back = (today.weekday() - weekday_number) % 7
+    return today - timedelta(days=days_back)
+
+
 def parse_im_thread_dates(text: str, *, today: date) -> list[date]:
     """Best-effort Beijing dates visible in a concatenated IM thread blob."""
     blob = str(text or "")
@@ -209,6 +272,12 @@ def parse_im_thread_dates(text: str, *, today: date) -> list[date]:
         found.append(today)
     if _RELATIVE_YESTERDAY.search(blob):
         found.append(today - timedelta(days=1))
+    for match in _RELATIVE_WEEKDAY.finditer(blob):
+        raw = (match.group(1) or match.group(2) or "").strip().lower()
+        weekday_number = _WEEKDAY_ALIASES.get(raw)
+        if weekday_number is None:
+            continue
+        found.append(_most_recent_weekday(weekday_number, today))
     for match in _RELATIVE_HOURS.finditer(blob):
         hours = int(match.group(1))
         found.append(today if hours < 24 else today - timedelta(days=hours // 24))
@@ -289,9 +358,14 @@ def decide_content_thanks_action(
     thread_text: str = "",
     today: date | None = None,
     local_sent_at: datetime | None = None,
+    thread_checked: bool = True,
     feishu_record_count: int = 1,
 ) -> dict:
-    """Preview thanks unless a recent thanks DM is confirmed, or identity is unsafe."""
+    """Preview thanks unless a recent thanks DM is confirmed, or identity is unsafe.
+
+    ``thread_checked=False`` means the IM conversation could not be opened, so
+    the 14-day dedup cannot be verified. Fail closed: hold instead of preview.
+    """
     current_status = str(feishu_status or "").strip()
     if current_status in {COOPERATION_STATUS_COMPLETED, COOPERATION_STATUS_PUBLISHED_LEGACY}:
         return {
@@ -360,6 +434,14 @@ def decide_content_thanks_action(
         return {
             "decision": DECISION_ALREADY_SENT,
             "reason": "already-sent-within-14-days",
+            "content_type": content_type,
+            "send": False,
+            "write_feishu": False,
+        }
+    if not thread_checked:
+        return {
+            "decision": DECISION_HOLD,
+            "reason": "thread-unreadable",
             "content_type": content_type,
             "send": False,
             "write_feishu": False,

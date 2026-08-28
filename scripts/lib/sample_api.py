@@ -20,7 +20,7 @@ PENDING_TAB = 10
 READY_TO_SHIP_TAB = 20
 SHIPPED_TAB = 30
 PROCESSING_TAB = 40  # 免费样品【处理中】= 已到货。D+10 只出这个 tab。
-COMPLETED_TAB = 50  # 免费样品【已完成】= 已出视频/直播。未实测前仍走同一列表 API。
+COMPLETED_TAB = 100  # 免费样品【已完成】。search_key=1 实测为达人昵称；tab=100 才是已完成（tab=50 是待评价）。
 DEFAULT_PAGE_SIZE = 50
 
 RequestJson = Callable[

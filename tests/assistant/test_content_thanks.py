@@ -37,18 +37,34 @@ from assistant.services.content_thanks_service import ContentThanksService
 class ContentThanksDecisionTests(unittest.TestCase):
     def test_both_video_and_live_use_video_copy(self) -> None:
         classified = classify_completed_content(
-            panel_text="视频 Video 直播 Live",
-            links=[
-                "https://www.tiktok.com/@creator/video/123",
-                "https://www.tiktok.com/@creator/live",
-            ],
+            panel_text="内容详情\n视频\n2\n直播\n1\n在TikTok查看视频\n在TikTok查看直播",
         )
         self.assertEqual(classified["content_type"], "video")
         self.assertEqual(classified["reason"], "both-prefer-video")
+        self.assertEqual(classified["video_count"], 2)
+        self.assertEqual(classified["live_count"], 1)
 
     def test_live_only_panel_uses_live_copy(self) -> None:
-        classified = classify_completed_content(panel_text="最近直播 LIVE")
+        classified = classify_completed_content(panel_text="内容详情\n视频\n0\n直播\n1\n在TikTok查看直播")
         self.assertEqual(classified["content_type"], "live")
+        self.assertEqual(classified["reason"], "live-only")
+
+    def test_tab_labels_without_counts_are_not_content(self) -> None:
+        classified = classify_completed_content(panel_text="免费样品 已完成 视频 直播")
+        self.assertEqual(classified["status"], "hold")
+        self.assertEqual(classified["content_type"], "")
+
+    def test_measured_jaxxelyn_drawer_is_video_only(self) -> None:
+        classified = classify_completed_content(
+            panel_text=(
+                "内容详情\n视频\n3\n直播\n0\nHicloth 7 Pack\n"
+                "发布时间：2026/8/27\n在TikTok查看视频"
+            )
+        )
+        self.assertEqual(classified["content_type"], "video")
+        self.assertEqual(classified["reason"], "video-only")
+        self.assertEqual(classified["video_count"], 3)
+        self.assertEqual(classified["live_count"], 0)
 
     def test_empty_panel_is_held(self) -> None:
         classified = classify_completed_content(panel_text="暂无数据")
@@ -118,6 +134,39 @@ class ContentThanksDecisionTests(unittest.TestCase):
         )
         self.assertEqual(decision["decision"], "already-sent")
         self.assertEqual(decision["reason"], "already-sent-within-14-days")
+        self.assertFalse(decision["send"])
+
+    def test_weekday_label_means_recent_live_thanks(self) -> None:
+        # 用户实测：IM 里「星期一」标签 + live 感谢原文 = 近期已发。
+        thread_text = (
+            "星期一：Hi kesha_the_brand! ❤️\n\n"
+            "We noticed your recent live stream and wanted to sincerely thank you "
+            "for all the effort and support you've put into promoting our brand. "
+            "We truly appreciate it! 🥰"
+        )
+        decision = decide_content_thanks_action(
+            feishu_status="待发布",
+            outreach_age_days=3,
+            completed_match="unique",
+            content_type="live",
+            thread_text=thread_text,
+            today=date(2026, 8, 28),
+        )
+        self.assertEqual(decision["decision"], "already-sent")
+        self.assertFalse(decision["send"])
+
+    def test_unreadable_thread_holds_instead_of_preview(self) -> None:
+        decision = decide_content_thanks_action(
+            feishu_status="待发布",
+            outreach_age_days=3,
+            completed_match="unique",
+            content_type="video",
+            thread_text="",
+            thread_checked=False,
+            today=date(2026, 8, 28),
+        )
+        self.assertEqual(decision["decision"], "hold")
+        self.assertEqual(decision["reason"], "thread-unreadable")
         self.assertFalse(decision["send"])
 
     def test_old_thanks_still_previews_send(self) -> None:
@@ -211,14 +260,18 @@ class ContentThanksServiceTests(unittest.TestCase):
 
         def list_completed(store_id, creator_handle=""):
             self.assertEqual(creator_handle, "alice")
-            return [{"creator_name": "alice", "creator_id": "c1", "is_live_creator": "是"}]
+            return [
+                {
+                    "creator_name": "alice",
+                    "creator_id": "c1",
+                    "apply_id": "apply-1",
+                    "is_live_creator": "是",
+                }
+            ]
 
-        def inspect_content(store_id, creator_handle):
-            return {
-                "ok": True,
-                "panel_text": "视频 Video",
-                "links": ["https://www.tiktok.com/@alice/video/99"],
-            }
+        def fetch_performance(store_id, apply_ids):
+            self.assertEqual(apply_ids, ["apply-1"])
+            return {"ok": True, "video_count": 1, "live_count": 0}
 
         def send_message(*args, **kwargs):
             sent.append({"args": args, "kwargs": kwargs})
@@ -239,7 +292,7 @@ class ContentThanksServiceTests(unittest.TestCase):
                 self.session_factory,
                 search_feishu=search_feishu,
                 list_completed=list_completed,
-                inspect_content=inspect_content,
+                fetch_performance=fetch_performance,
                 send_message=send_message,
                 clock=lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
             ).preview()

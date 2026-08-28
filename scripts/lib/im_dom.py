@@ -30,7 +30,8 @@ CLICK_MESSAGE_JS = r"""
     window.__openHooked = true;
   }
   const existing = document.querySelector('textarea, [placeholder*="发送消息"], [placeholder*="Send a message"]');
-  if (existing) {
+  const detailOpen = !!document.querySelector('#creator-detail-profile-container') || /\/seller\/im/.test(location.href);
+  if (existing && detailOpen) {
     return JSON.stringify({
       ok: true,
       already: true,
@@ -133,6 +134,7 @@ INSPECT_IM_JS = r"""
   }
   const search = document.querySelector('input[placeholder*="搜索"], input.core-input');
   const dock = document.querySelector('[class*="entryWrapper"]');
+  const detailProfile = document.querySelector('#creator-detail-profile-container');
   return JSON.stringify({
     href: location.href,
     title: document.title || '',
@@ -140,6 +142,7 @@ INSPECT_IM_JS = r"""
     hasComposer: !!(input || /发送消息|0\/2000/.test(text)),
     hasDock: !!(dock || /聊天数/.test(text)),
     hasSearch: !!search,
+    hasDetailProfile: !!detailProfile,
     selected_preview: selected ? String(selected.innerText || '').slice(0, 200) : '',
     selected_user_id: selectedUserId,
     selected_conversation_id: selectedConversationId,
@@ -152,7 +155,10 @@ INSPECT_IM_JS = r"""
 
 SEARCH_USER_JS_TMPL = r"""
 ((name) => {
-  const input = document.querySelector('input[placeholder*="搜索"], input.core-input');
+  // 只在 /seller/im 页面搜索 IM 会话；不碰页面其它搜索（如样品页「搜索达人昵称」）。
+  const input = [...document.querySelectorAll('input')].find(el =>
+    /搜索|search/i.test(String(el.placeholder || ''))
+  );
   if (!input) return JSON.stringify({ok: false, reason: 'no-search'});
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
   input.focus();
@@ -287,6 +293,144 @@ FILL_MESSAGE_JS_TMPL = r"""
 })(%BODY%, %DO_SEND%)
 """
 
+# 样品申请等业务页右下角「聊天数」浮动入口 → 弹出聊天数面板。
+OPEN_CHAT_PANEL_JS = r"""
+(() => {
+  if ([...document.querySelectorAll('.core-modal-content')].some(m => /最近联系人/.test(m.innerText || ''))) {
+    return JSON.stringify({ok: true, already: true});
+  }
+  const entry = [...document.querySelectorAll('div')].find(el => {
+    const cls = String(el.className || '');
+    return /entryWrapper/.test(cls) && el.getBoundingClientRect().width > 0;
+  }) || [...document.querySelectorAll('div,button,span')].find(el => {
+    const t = (el.innerText || '').trim();
+    return t === '聊天数' && el.getBoundingClientRect().width > 0;
+  });
+  if (!entry) return JSON.stringify({ok: false, reason: 'no-chat-dock'});
+  const fiberKey = Object.keys(entry).find(k =>
+    k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+  );
+  let fiber = fiberKey ? entry[fiberKey] : null;
+  let via = 'react-onClick';
+  let clicked = false;
+  for (let depth = 0; depth < 10 && fiber; depth++, fiber = fiber.return) {
+    const props = fiber.memoizedProps;
+    if (props && typeof props.onClick === 'function') {
+      props.onClick({
+        currentTarget: entry,
+        target: entry,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+      clicked = true;
+      break;
+    }
+  }
+  if (!clicked) {
+    entry.click();
+    via = 'native';
+  }
+  return JSON.stringify({ok: true, via});
+})()
+"""
+
+# 聊天数面板标题「聊天数」旁的编辑图标（新消息入口）。
+CLICK_NEW_MESSAGE_BTN_JS = r"""
+(() => {
+  const modal = [...document.querySelectorAll('.core-modal-content')].find(m =>
+    /最近联系人/.test(m.innerText || '')
+  );
+  if (!modal) return JSON.stringify({ok: false, reason: 'no-chat-panel'});
+  const btn = [...modal.querySelectorAll('button')].find(b => {
+    const svg = b.querySelector('svg.arco-icon-edit');
+    return !!svg && b.getBoundingClientRect().width > 0;
+  });
+  if (!btn) return JSON.stringify({ok: false, reason: 'no-edit-btn'});
+  const fiberKey = Object.keys(btn).find(k =>
+    k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+  );
+  let fiber = fiberKey ? btn[fiberKey] : null;
+  for (let depth = 0; depth < 10 && fiber; depth++, fiber = fiber.return) {
+    const props = fiber.memoizedProps;
+    if (props && typeof props.onClick === 'function') {
+      props.onClick({
+        currentTarget: btn,
+        target: btn,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+      return JSON.stringify({ok: true, via: 'react-onClick', depth});
+    }
+  }
+  btn.click();
+  return JSON.stringify({ok: true, via: 'native'});
+})()
+"""
+
+# 「新消息」抽屉「发送给」输入框：填达人 ID/昵称并回车。
+FILL_NEW_MESSAGE_SEARCH_JS_TMPL = r"""
+((value) => {
+  const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
+    /新消息|发送给/.test(m.innerText || '')
+  );
+  if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
+  const input = drawer.querySelector('input.core-input');
+  if (!input) return JSON.stringify({ok: false, reason: 'no-send-to-input'});
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  input.focus();
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  setter.call(input, value);
+  input.dispatchEvent(new Event('input', {bubbles: true}));
+  input.dispatchEvent(new Event('change', {bubbles: true}));
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+  }));
+  input.dispatchEvent(new KeyboardEvent('keyup', {
+    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+  }));
+  return JSON.stringify({ok: true, value: input.value});
+})(%VALUE%)
+"""
+
+# 「新消息」抽屉里的搜索结果行：行内 button 挂 React onClick，点击打开会话。
+CLICK_NEW_MESSAGE_RESULT_JS_TMPL = r"""
+((want) => {
+  const query = String(want || '').trim().toLowerCase();
+  if (!query) return JSON.stringify({ok: false, reason: 'empty-query'});
+  const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
+    /新消息|发送给/.test(m.innerText || '')
+  );
+  if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
+  const row = [...drawer.querySelectorAll('div')].find(el => {
+    const cls = String(el.className || '');
+    return /hover:bg-state-hover/.test(cls)
+      && (el.innerText || '').toLowerCase().includes(query)
+      && el.getBoundingClientRect().width > 0;
+  });
+  if (!row) return JSON.stringify({ok: false, reason: 'no-result-row'});
+  const btn = row.querySelector('button') || row;
+  const fiberKey = Object.keys(btn).find(k =>
+    k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+  );
+  let fiber = fiberKey ? btn[fiberKey] : null;
+  for (let depth = 0; depth < 10 && fiber; depth++, fiber = fiber.return) {
+    const props = fiber.memoizedProps;
+    if (props && typeof props.onClick === 'function') {
+      props.onClick({
+        currentTarget: btn,
+        target: btn,
+        preventDefault() {},
+        stopPropagation() {},
+      });
+      return JSON.stringify({ok: true, via: 'react-onClick', depth});
+    }
+  }
+  btn.click();
+  return JSON.stringify({ok: true, via: 'native'});
+})(%WANT%)
+"""
+
 
 def _js_str(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -364,6 +508,14 @@ def inspect_current_thread(
     return probe
 
 
+def _im_context_ready(probe: dict[str, Any] | None) -> bool:
+    """浏览器里确实处于 IM 会话上下文（/seller/im 或达人详情弹层）。
+
+    聊天数面板/旧会话残留也有 composer，但没有 IM 上下文；不能当成「已经打开」。
+    """
+    return bool(probe and (probe.get("onIm") or probe.get("hasDetailProfile")))
+
+
 def _expand_chat_dock(store_id: str, *, wait: float) -> dict[str, Any]:
     expanded = zclaw_exec(store_id, EXPAND_CHAT_DOCK_JS)
     if not isinstance(expanded, dict):
@@ -371,7 +523,7 @@ def _expand_chat_dock(store_id: str, *, wait: float) -> dict[str, Any]:
     if not expanded.get("already"):
         time.sleep(max(1.0, wait))
     probe = inspect_im(store_id)
-    if composer_ready(probe):
+    if composer_ready(probe) and _im_context_ready(probe):
         return {"ok": True, "via": "overlay-expanded", "im": probe, "expand": expanded}
     return {"ok": False, "expand": expanded, "im": probe}
 
@@ -382,14 +534,23 @@ def open_im_from_detail(store_id: str, *, wait: float = 3.5) -> dict[str, Any]:
     页面内弹层有输入框即成功，不要求跳到 /seller/im。永不点「邀请」。
     """
     probe = inspect_im(store_id)
-    if composer_ready(probe):
+    # 注意：聊天数面板/旧会话残留也会让 hasComposer 为真，但这不是本次点击的结果。
+    # 只有页面真的在 /seller/im 或达人详情弹层（#creator-detail-profile-container）里，
+    # 才算「已经打开」。
+    if composer_ready(probe) and _im_context_ready(probe):
         via = "already-open-im" if probe.get("onIm") else "already-open-overlay"
         return {"ok": True, "via": via, "im": probe, "click": {"ok": True, "already": True}}
     clicked = zclaw_exec(store_id, CLICK_MESSAGE_JS)
     if not isinstance(clicked, dict):
         return {"ok": False, "error": f"click-bad:{clicked!r}"[:200]}
-    if not clicked.get("already"):
-        time.sleep(wait)
+    if clicked.get("already"):
+        probed_after = inspect_im(store_id)
+        if composer_ready(probed_after) and _im_context_ready(probed_after):
+            return {"ok": True, "via": "overlay", "im": probed_after, "click": clicked}
+        return {"ok": False, "error": "already-but-unusable", "click": clicked, "im": probed_after}
+    if not clicked.get("ok"):
+        return {"ok": False, "error": "no-message-btn", "click": clicked, "im": probe}
+    time.sleep(wait)
     opened = clicked.get("opened") or []
     target = ""
     for item in opened:
@@ -402,7 +563,7 @@ def open_im_from_detail(store_id: str, *, wait: float = 3.5) -> dict[str, Any]:
             target = item
             break
     probe = inspect_im(store_id)
-    if composer_ready(probe):
+    if composer_ready(probe) and _im_context_ready(probe):
         via = "navigated" if probe.get("onIm") else "overlay"
         return {"ok": True, "via": via, "im": probe, "click": clicked}
     expanded = _expand_chat_dock(store_id, wait=wait)
@@ -413,7 +574,7 @@ def open_im_from_detail(store_id: str, *, wait: float = 3.5) -> dict[str, Any]:
         visit_page(store_id, target)
         time.sleep(wait)
         probe = inspect_im(store_id)
-        if composer_ready(probe):
+        if composer_ready(probe) and probe.get("onIm"):
             return {"ok": True, "via": "window.open", "im": probe, "url": target}
     return {
         "ok": False,
@@ -434,6 +595,141 @@ def open_im_inbox(store_id: str, *, shop_id: str = "", wait: float = 3.0) -> dic
     if not probe.get("onIm"):
         return {"ok": False, "error": "not-on-im", "im": probe}
     return {"ok": True, "via": "visit", "im": probe}
+
+
+def _try_open_via_new_message(
+    store_id: str,
+    creator_key: str,
+    *,
+    creator_name: str,
+    wait: float,
+) -> dict[str, Any]:
+    name = str(creator_key or "").strip()
+    if not name:
+        return {"ok": False, "error": "empty-creator"}
+    opened_panel = zclaw_exec(store_id, OPEN_CHAT_PANEL_JS)
+    if not isinstance(opened_panel, dict) or not opened_panel.get("ok"):
+        return {"ok": False, "error": "无法打开聊天数面板", "panel": opened_panel}
+    if not opened_panel.get("already"):
+        time.sleep(max(1.0, wait))
+    opened_drawer = zclaw_exec(store_id, CLICK_NEW_MESSAGE_BTN_JS)
+    if not isinstance(opened_drawer, dict) or not opened_drawer.get("ok"):
+        return {"ok": False, "error": "无法打开新消息抽屉", "drawer": opened_drawer}
+    time.sleep(max(1.0, wait))
+    filled = zclaw_exec(
+        store_id,
+        FILL_NEW_MESSAGE_SEARCH_JS_TMPL.replace("%VALUE%", _js_str(name)),
+    )
+    if not isinstance(filled, dict) or not filled.get("ok"):
+        return {"ok": False, "error": "发送给输入失败", "fill": filled}
+    time.sleep(max(1.0, wait))
+    clicked = zclaw_exec(
+        store_id,
+        CLICK_NEW_MESSAGE_RESULT_JS_TMPL.replace("%WANT%", _js_str(name)),
+    )
+    if not isinstance(clicked, dict) or not clicked.get("ok"):
+        return {"ok": False, "error": "结果行未找到或点击失败", "click": clicked}
+    time.sleep(max(1.5, wait))
+    probe = inspect_im(store_id)
+    # 会话右侧若有 composer，但选中的可能仍是上一会话；必须以选中卡/正文命中目标为准。
+    needle = str(creator_name or name or "").strip().lower()
+    selected_preview = str(probe.get("selected_preview") or "").lower()
+    thread_text = str(probe.get("thread_text") or "").lower()
+    verified = bool(needle and (needle in selected_preview or needle in thread_text))
+    if not composer_ready(probe) or not verified:
+        return {
+            "ok": False,
+            "error": "会话未确认打开" if composer_ready(probe) else "会话发送框未出现",
+            "needle": needle,
+            "selected_preview": selected_preview[:120],
+            "click": clicked,
+            "im": probe,
+        }
+    return {
+        "ok": True,
+        "via": "new-message",
+        "panel": opened_panel,
+        "drawer": opened_drawer,
+        "fill": filled,
+        "click": clicked,
+        "im": probe,
+    }
+
+
+def open_conversation_via_new_message(
+    store_id: str,
+    creator_id: str = "",
+    creator_name: str = "",
+    *,
+    wait: float = 2.0,
+) -> dict[str, Any]:
+    """业务页右下角「聊天数」→ 编辑图标「新消息」→ 「发送给」输入达人 ID。
+
+    实测链路（2026-08-28）：entryWrapper 弹面板 → 面板标题旁
+    ``arco-icon-edit`` 按钮开抽屉 → 抽屉 ``input.core-input`` 填达人
+    ID/昵称回车 → 结果行「聊天」按钮（React ``onClick``）打开会话。
+    不跳 /seller/im、不点「聊天数」里的最近联系人。
+
+    先后用 creator_id、creator_name 两个关键词各尝试一次；点击后必须
+    在选中卡/正文里确认命中目标达人，否则重试下一个关键词。
+    """
+    candidates = [key for key in (str(creator_id or "").strip(), str(creator_name or "").strip()) if key]
+    name = str(creator_name or "").strip()
+    if not candidates:
+        return {"ok": False, "error": "empty-creator"}
+    # IM 页（/seller/im）没有聊天数 dock；必须先回样品申请页再走该路径。
+    probe = inspect_im(store_id)
+    if probe.get("onIm"):
+        from urllib.parse import urlparse, parse_qs
+
+        parsed = urlparse(str(probe.get("href") or ""))
+        query = parse_qs(parsed.query)
+        shop_id = str((query.get("shop_id") or [""])[0]).strip()
+        target = (
+            "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request"
+            "?shop_region=US&shop_id=" + quote(shop_id or "")
+        )
+        visit_page(store_id, target)
+        # 跨域回样品页是 SPA 重载：complete 前 execute_script 会阻塞/失败。
+        # 按实测（20-45s 必超时）等待页面稳定，超预算则放弃本次尝试。
+        deadline_monotonic = time.monotonic() + 90.0
+        ready = False
+        while time.monotonic() < deadline_monotonic:
+            time.sleep(3.0)
+            try:
+                settled = zclaw_exec(
+                    store_id,
+                    "(() => JSON.stringify({href: (location.href||''), ready: document.readyState, dock: !!document.querySelector('[class*=\"entryWrapper\"]')}))()",
+                    timeout=25,
+                )
+                if (
+                    isinstance(settled, dict)
+                    and "sample-request" in str(settled.get("href") or "")
+                    and settled.get("ready") == "complete"
+                    and settled.get("dock")
+                ):
+                    ready = True
+                    break
+            except Exception:
+                continue
+        if not ready:
+            return {"ok": False, "error": "样品申请页未就绪", "target": target[:120]}
+    failures: list[dict[str, Any]] = []
+    for candidate in candidates:
+        attempt = _try_open_via_new_message(
+            store_id,
+            candidate,
+            creator_name=name,
+            wait=wait,
+        )
+        if attempt.get("ok"):
+            return attempt
+        failures.append({"key": candidate, "detail": attempt})
+        # 面板/抽屉都打不开时，换关键词也无济于事；只有「搜不到/没点中」
+        # 这类关键词相关失败才换下一个候选。
+        if attempt.get("error") in {"无法打开聊天数面板", "无法打开新消息抽屉"}:
+            break
+    return {"ok": False, "error": "新消息路径未找到会话", "attempts": failures}
 
 
 def search_and_open_conversation(
@@ -517,7 +813,11 @@ def open_target_conversation(
     shop_id: str = "",
     wait: float = 3.5,
 ) -> dict[str, Any]:
-    """优先详情页消息弹层，失败再走 /seller/im 搜索。永不点「邀请」。"""
+    """优先详情页消息弹层，再走「聊天数 → 新消息」输入达人 ID，最后 /seller/im。永不点「邀请」。
+
+    每级失败都继续降级：详情弹层搜索失败不直接抛错，而是落到「新消息」
+    抽屉路径（实测在样品申请类业务页最稳）。
+    """
     name = str(creator_name or "").strip()
     cid = str(creator_id or "").strip()
     from_detail = open_im_from_detail(store_id, wait=wait)
@@ -533,18 +833,20 @@ def open_target_conversation(
                 "detail": from_detail,
                 "click": clicked,
             }
-        return {
-            "ok": False,
-            "error": "私信会话未确认打开",
-            "detail": from_detail,
-            "click": clicked,
-        }
+        # 详情弹层打开成功但没搜到目标会话：继续降级，不直接失败。
+        from_detail = {"ok": False, "error": "detail-search-failed", "detail": from_detail, "click": clicked}
+    new_message = open_conversation_via_new_message(
+        store_id, creator_id=cid, creator_name=name, wait=wait
+    )
+    if new_message.get("ok"):
+        return {"ok": True, "via": "new-message", "new_message": new_message}
     inbox = open_im_inbox(store_id, shop_id=shop_id, wait=wait)
     if not inbox.get("ok"):
         return {
             "ok": False,
             "error": "无法打开私信页",
             "detail": from_detail,
+            "new_message": new_message,
             "inbox": inbox,
         }
     clicked = search_and_open_conversation(

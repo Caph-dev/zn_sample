@@ -25,6 +25,7 @@ from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, zclaw_exec
 
 AFFILIATE_HOST = "affiliate.tiktokshopglobalselling.com"
 SAMPLE_LIST_ENDPOINT = "/api/v1/affiliate/sample/group/list"
+SAMPLE_PERFORMANCE_ENDPOINT = "/api/v1/affiliate/sample/performance"
 CREATOR_PROFILE_ENDPOINT = "/api/v1/oec/affiliate/creator/marketplace/profile"
 SAMPLE_GROUP_ACTION_ENDPOINT = "/api/v1/affiliate/sample/group/action"
 READ_POST_ENDPOINTS = frozenset(
@@ -33,6 +34,7 @@ READ_POST_ENDPOINTS = frozenset(
         CREATOR_PROFILE_ENDPOINT,
     }
 )
+AFFILIATE_READ_GET_ENDPOINTS = frozenset({SAMPLE_PERFORMANCE_ENDPOINT})
 WRITE_POST_ENDPOINTS = frozenset({SAMPLE_GROUP_ACTION_ENDPOINT})
 SELLER_LOGISTICS_ENDPOINT = "/api/v1/fulfillment/na/logistic_detail/list"
 SELLER_READ_GET_ENDPOINTS = frozenset({SELLER_LOGISTICS_ENDPOINT})
@@ -552,6 +554,39 @@ def post_sample_group_action_json(
         poll_interval_seconds=poll_interval_seconds,
         start_exec_retries=0,
         poll_exec_retries=1,
+    )
+
+
+def get_affiliate_read_json(
+    store_id: str,
+    endpoint: str,
+    *,
+    query: dict[str, Any],
+    context: AffiliatePageContext,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    retries: int = 2,
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    """在联盟中心页面执行已登记的只读 GET。"""
+    return _post_page_json(
+        store_id,
+        endpoint,
+        {},
+        context=context,
+        allowed_endpoints=AFFILIATE_READ_GET_ENDPOINTS,
+        operation_label="联盟中心只读",
+        max_response_bytes=max_response_bytes,
+        retries=retries,
+        request_timeout_seconds=request_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        start_exec_retries=1,
+        poll_exec_retries=1,
+        http_method="GET",
+        request_query=query,
+        deadline=deadline,
+        retry_timeout_expired=True,
     )
 
 

@@ -134,7 +134,7 @@ class SampleApiParserTests(unittest.TestCase):
             )
 
         self.assertEqual(rows, [])
-        self.assertEqual(request_bodies[0]["tab"], 50)
+        self.assertEqual(request_bodies[0]["tab"], 100)
         self.assertEqual(request_bodies[0]["search_params"][0]["value"], "alice")
         assert_pending.assert_not_called()
 
