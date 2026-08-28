@@ -545,6 +545,26 @@
     return document.querySelector("[data-task-panel]");
   }
 
+  function bindClearOutputButton() {
+    const panel = getGlobalPanel();
+    const clearButton = panel?.querySelector("[data-task-clear-output]");
+    if (!panel || !clearButton || clearButton.dataset.bound) {
+      return;
+    }
+    clearButton.dataset.bound = "true";
+    clearButton.addEventListener("click", () => {
+      // 仅 UI 层清空：清掉执行过程列表，不动运行结果（数据还在后端）。
+      const events = panel.querySelector("[data-task-events]");
+      if (events) {
+        events.replaceChildren();
+      }
+      const progressMessage = panel.querySelector("[data-task-progress-message]");
+      if (progressMessage) {
+        progressMessage.textContent = "输出已清空";
+      }
+    });
+  }
+
   function renderGlobalPanel(job, monitor) {
     const panel = getGlobalPanel();
     if (!panel || !monitor.useGlobalPanel) {
@@ -559,10 +579,20 @@
     const result = panel.querySelector("[data-task-result]");
     const cancelForm = panel.querySelector("form[data-job-cancel]");
     const cancelButton = cancelForm?.querySelector("button");
+    const clearOutputButton = panel.querySelector("[data-task-clear-output]");
     panel.classList.toggle("task-panel--warning", monitor.hasWarning);
+
+    bindClearOutputButton();
+    if (clearOutputButton) {
+      clearOutputButton.hidden = false;
+    }
 
     if (title) {
       title.textContent = getJobTypeLabel(job.job_type);
+    }
+    const eyebrow = panel.querySelector("[data-task-eyebrow]");
+    if (eyebrow) {
+      eyebrow.textContent = terminalStatuses.has(job.status) ? "最近任务" : "正在处理";
     }
     if (status) {
       status.replaceChildren(createStatusToken(job.status));
@@ -686,6 +716,10 @@
     panel.removeAttribute("data-task-terminal");
     panel.querySelector("[data-task-events]")?.replaceChildren();
     panel.querySelector("[data-task-result]")?.replaceChildren();
+    const clearOutputButton = panel.querySelector("[data-task-clear-output]");
+    if (clearOutputButton) {
+      clearOutputButton.hidden = true;
+    }
     const progressMessage = panel.querySelector("[data-task-progress-message]");
     if (progressMessage) {
       progressMessage.textContent = "任务即将开始";

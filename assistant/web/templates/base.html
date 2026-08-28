@@ -31,14 +31,17 @@
   <main class="content">
     <section class="task-panel" data-task-panel data-task-restore-job="{% if active_job %}{{ active_job.id }}{% endif %}" hidden aria-live="polite">
       <header class="task-panel-header">
-        <p class="eyebrow">正在处理</p>
+        <p class="eyebrow" data-task-eyebrow>正在处理</p>
         <h2 data-task-title>后台任务</h2>
         <span data-task-status class="token token--neutral">
           <span class="status-dot status-dot--neutral"></span>等待执行
         </span>
-        <form method="post" action="/api/jobs/placeholder/cancel" data-job-cancel data-job-id="">
-          <button type="submit" class="button--destructive" hidden>取消</button>
-        </form>
+        <div class="task-panel-actions">
+          <form method="post" action="/api/jobs/placeholder/cancel" data-job-cancel data-job-id="">
+            <button type="submit" class="button--destructive" hidden>取消</button>
+          </form>
+          <button type="button" class="button--secondary task-clear-output" data-task-clear-output hidden>清空输出</button>
+        </div>
       </header>
       <p class="task-progress-message" data-task-progress-message>任务即将开始</p>
       <progress class="task-progress-bar" data-task-progress max="1" value="0" hidden></progress>

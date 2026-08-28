@@ -182,6 +182,48 @@ class JobWorkerTests(JobTestCase):
         finally:
             clear_cancellation(job_id)
 
+    def test_latest_active_job_falls_back_to_recent_terminal(self) -> None:
+        from assistant.web.routes import _latest_active_job
+
+        terminal_job_id = self.add_job(status="succeeded")
+        with self.session_factory() as session:
+            job = session.get(Job, terminal_job_id)
+            job.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.commit()
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=self.session_factory)))
+        restored = _latest_active_job(request)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.id, terminal_job_id)
+
+    def test_latest_active_job_prefers_running_over_terminal(self) -> None:
+        from assistant.web.routes import _latest_active_job
+
+        running_job_id = self.add_job(status="running")
+        terminal_job_id = self.add_job(status="succeeded")
+        with self.session_factory() as session:
+            terminal = session.get(Job, terminal_job_id)
+            terminal.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.commit()
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=self.session_factory)))
+        restored = _latest_active_job(request)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.id, running_job_id)
+
+    def test_latest_active_job_ignores_old_terminal(self) -> None:
+        from assistant.web.routes import _latest_active_job
+
+        old_job_id = self.add_job(status="succeeded")
+        with self.session_factory() as session:
+            job = session.get(Job, old_job_id)
+            job.finished_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+            session.commit()
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=self.session_factory)))
+        restored = _latest_active_job(request)
+        self.assertIsNone(restored)
+
     def test_worker_iteration_error_does_not_kill_daemon(self) -> None:
         first_iteration_started = threading.Event()
         second_iteration_started = threading.Event()

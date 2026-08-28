@@ -57,17 +57,39 @@ templates.env.globals.update(
 
 
 def _latest_active_job(request: Request):
+    """刷新后恢复面板用：优先最近的运行中任务，否则回退到最近的已完成任务。
+
+    终态任务也恢复，才能让「运行结果」不因刷新消失；只取最近 7 天内的终态，
+    避免把很久以前的旧任务重新挂到面板上。
+    """
     session_factory = getattr(request.app.state, "session_factory", None)
     if session_factory is None:
         return None
     try:
         with session_factory() as session:
-            return session.scalar(
+            active_job = session.scalar(
                 select(Job)
                 .where(Job.status.in_(("pending", "running")))
                 .order_by(Job.created_at.desc())
                 .limit(1)
             )
+            if active_job is not None:
+                return active_job
+            # SQLite 的 DateTime 列会剥掉时区（见 assistant/database/types.py），
+            # 所以这里用 Python 过滤最近 7 天，避免字符串比较踩坑。
+            from datetime import datetime, timedelta, timezone
+
+            week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+            latest_finished = session.scalar(
+                select(Job)
+                .where(Job.status.in_(("succeeded", "failed", "cancelled", "interrupted")))
+                .order_by(Job.finished_at.desc())
+                .limit(1)
+            )
+            if latest_finished is not None and latest_finished.finished_at is not None:
+                if latest_finished.finished_at >= week_ago:
+                    return latest_finished
+            return None
     except Exception:
         return None
 
