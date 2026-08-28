@@ -36,6 +36,7 @@
     followup_generate: "跟进待办生成",
     creator_enrich: "补齐达人资料",
     report_export: "报表导出",
+    content_thanks_preview: "预演已完成感谢私信",
     operator_prepare: "打开店铺",
     operator_screen: "只出名单",
     operator_pipeline: "筛查批准写飞书发私信",
@@ -393,6 +394,18 @@
         ["物流变化", `${formatNumber(shipment.changed)} 条已更新`],
         ["处理中样品", `${formatNumber(shipment.processing)} 条`],
         ["新增跟进待办", `${formatNumber(followup.created)} 条`],
+      ];
+    }
+
+    if (job.job_type === "content_thanks_preview") {
+      return [
+        ["候选达人", `${formatNumber(result.candidates)} 位`],
+        ["已发感谢", `${formatNumber(result.already_sent)} 位`],
+        ["待发送", `${formatNumber(result.preview)} 位`],
+        ["需人工确认", `${formatNumber(result.hold)} 位`],
+        ["暂不需要发送", `${formatNumber(result.skip)} 位`],
+        ["实际执行", result.execute ? "已下发" : "未执行（预演）"],
+        ["写回飞书", result.write_feishu ? "已写入" : "未写入（预演）"],
       ];
     }
 
