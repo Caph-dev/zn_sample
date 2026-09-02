@@ -210,11 +210,14 @@ class ContentThanksService:
             )
             content_url = first_content_url(list(inspected.get("links") or []))
             if inspected.get("ok") and content.get("content_type") in {"video", "live"}:
+                creator_id = str(sample_case.creator_id or "") if sample_case else ""
+                if not creator_id:
+                    creator_id = self._completed_creator_id(completed_match)
                 thread_probe = self._preview_thread(
                     store_id=store_id,
-                    shop_id=shop_id,
                     sample_case=sample_case,
                     creator_handle=creator_handle,
+                    creator_id=creator_id,
                 )
                 thread_checked = bool(thread_probe.get("ok"))
                 thread_text = str(thread_probe.get("thread_text") or "")
@@ -476,22 +479,38 @@ class ContentThanksService:
         self,
         *,
         store_id: str,
-        shop_id: str,
         sample_case: SampleCase | None,
         creator_handle: str,
+        creator_id: str = "",
     ) -> dict[str, Any]:
-        from lib.im_dom import im_thread_text, inspect_current_thread, open_target_conversation
+        from lib.im_dom import (
+            im_thread_text,
+            inspect_current_thread,
+            open_conversation_via_new_message,
+        )
 
-        opened = open_target_conversation(
+        opened = open_conversation_via_new_message(
             store_id,
-            creator_handle,
-            creator_id=str(sample_case.creator_id or "") if sample_case else "",
-            shop_id=shop_id,
+            creator_id=creator_id or (str(sample_case.creator_id or "") if sample_case else ""),
+            creator_name=creator_handle,
+            wait=3.5,
         )
         if not opened.get("ok"):
             return {"ok": False, "thread_text": ""}
         probe = inspect_current_thread(store_id, creator_handle)
         return {"ok": True, "thread_text": im_thread_text(probe)}
+
+    @staticmethod
+    def _completed_creator_id(completed_match: dict[str, Any] | None) -> str:
+        """Reuse the completed-list ID when local sample data is unavailable."""
+        if not isinstance(completed_match, dict):
+            return ""
+        creator_ids = {
+            str(row.get("creator_id") or "").strip()
+            for row in completed_match.get("rows") or []
+            if isinstance(row, dict) and str(row.get("creator_id") or "").strip()
+        }
+        return next(iter(creator_ids)) if len(creator_ids) == 1 else ""
 
     def _preview_send(
         self,

@@ -19,7 +19,7 @@ IM_SDK_SEND_STATE_KEY = "__znImSdkSendRequests"
 MAX_MESSAGE_LENGTH = 2000
 
 SEND_TEXT_VIA_SDK_JS_TMPL = r"""
-((requestId, body, expectedCreatorName) => {
+((requestId, body, expectedCreatorName, expectedCreatorId) => {
   const stateKey = '__znImSdkSendRequests';
   const stateMap = window[stateKey] || (window[stateKey] = {});
   const baseState = {
@@ -30,32 +30,63 @@ SEND_TEXT_VIA_SDK_JS_TMPL = r"""
   stateMap[requestId] = baseState;
 
   const composer = document.querySelector('textarea, [placeholder*="发送消息"], [placeholder*="Send a message"]');
-  const onImPage = /\/seller\/im(?:[/?#]|$)/.test(location.pathname);
-  if (!composer && !onImPage) {
-    return JSON.stringify({ok: false, reason: 'not-on-im-page'});
+  if (!composer) {
+    return JSON.stringify({ok: false, reason: 'not-in-new-message-conversation'});
   }
   const want = String(expectedCreatorName || '').trim().toLowerCase();
+  const expectedId = String(expectedCreatorId || '').trim();
   const selectedCard = [...document.querySelectorAll('div')].find(el => {
     const cls = String(el.className || '');
     return /contactCard/.test(cls) && /selected/.test(cls);
   });
   const selectedText = selectedCard ? String(selectedCard.innerText || '').toLowerCase() : '';
-  const pageText = String(document.body && document.body.innerText || '').toLowerCase();
-  if (want) {
-    if (selectedText) {
-      if (!selectedText.includes(want)) {
-        return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+  const identityFromValue = value => {
+    if (!value || typeof value !== 'object') return null;
+    const source = value.userInfo && typeof value.userInfo === 'object'
+      ? value.userInfo
+      : value;
+    const userId = String(source.userId || source.creatorId || source.creator_oecuid || '').trim();
+    const screenName = String(source.screenName || source.handle || source.nickname || '').trim();
+    if (!userId && !screenName) return null;
+    return {userId, screenName};
+  };
+  const fiberKey = Object.keys(composer).find(key =>
+    key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
+  );
+  let fiber = fiberKey ? composer[fiberKey] : null;
+  let currentIdentity = null;
+  for (let depth = 0; depth < 16 && fiber; depth++, fiber = fiber.return) {
+    const props = fiber.memoizedProps || {};
+    for (const candidate of [props.userInfo, props.contact, props.currentUser, props.currentConversation]) {
+      const identity = identityFromValue(candidate);
+      if (identity && (identity.userId || identity.screenName)) {
+        currentIdentity = identity;
+        break;
       }
-    } else if (!pageText.includes(want)) {
+    }
+    if (currentIdentity) break;
+  }
+  const currentUserId = currentIdentity ? currentIdentity.userId : '';
+  const currentScreenName = currentIdentity ? currentIdentity.screenName.toLowerCase() : '';
+  if (expectedId && currentUserId) {
+    if (expectedId !== currentUserId) {
+      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+    }
+  } else if (want && currentScreenName) {
+    if (currentScreenName !== want) {
+      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
+    }
+  } else if (want && (!selectedText || !selectedText.includes(want))) {
+    if (expectedId || !selectedText) {
       return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
     }
   }
 
   const textarea = document.querySelector('textarea');
-  const fiberKey = textarea && Object.keys(textarea).find(key =>
+  const textareaFiberKey = textarea && Object.keys(textarea).find(key =>
     key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
   );
-  let fiber = fiberKey ? textarea[fiberKey] : null;
+  fiber = textareaFiberKey ? textarea[textareaFiberKey] : null;
   let sendProps = null;
   for (let depth = 0; depth < 10 && fiber; depth++, fiber = fiber.return) {
     const props = fiber.memoizedProps;
@@ -94,7 +125,7 @@ SEND_TEXT_VIA_SDK_JS_TMPL = r"""
     baseState.error = String(error);
     return JSON.stringify({ok: false, reason: String(error)});
   }
-})(%REQUEST_ID%, %BODY%, %CREATOR_NAME%)
+})(%REQUEST_ID%, %BODY%, %CREATOR_NAME%, %CREATOR_ID%)
 """
 
 
@@ -126,6 +157,7 @@ def send_message_via_sdk(
         .replace("%REQUEST_ID%", _js_string(request_id))
         .replace("%BODY%", _js_string(normalized_body))
         .replace("%CREATOR_NAME%", _js_string(normalized_name))
+        .replace("%CREATOR_ID%", _js_string(str(expected_creator_id or "").strip()))
     )
     result = zclaw_exec(store_id, script, retries=0)
     if not isinstance(result, dict):
@@ -155,25 +187,25 @@ def send_direct_message(
     write_source: str = "api",
     already_sent_predicate: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
-    """Open the creator IM thread, then optionally send one text message.
+    """从样品申请页新消息路径打开会话，再可选发送一条文本。
 
     Default is dry-run: open the conversation and inspect it, but never call
     the IM SDK or click the send button. ``execute=True`` is required to send.
+    ``shop_id`` 仅为兼容既有调用方保留；打开会话不使用它，也不导航到其它页面。
     """
     from .im_dom import (
         fill_or_send_message,
         im_thread_text,
         inspect_current_thread,
-        open_target_conversation,
+        open_conversation_via_new_message,
     )
 
     name = str(creator_name or "").strip()
     normalized_body = str(body or "").strip()
-    opened = open_target_conversation(
+    opened = open_conversation_via_new_message(
         store_id,
-        name,
         creator_id=str(creator_id or ""),
-        shop_id=str(shop_id or ""),
+        creator_name=name,
         wait=wait,
     )
     if not opened.get("ok"):
@@ -183,6 +215,9 @@ def send_direct_message(
             "message": normalized_body,
         }
     clicked = opened.get("click") if isinstance(opened.get("click"), dict) else {}
+    resolved_creator_id = str(
+        creator_id or clicked.get("result_creator_id") or ""
+    ).strip()
     probe = inspect_current_thread(store_id, name, wait=wait)
     thread_text = im_thread_text(probe)
     if already_sent_predicate is not None and already_sent_predicate(thread_text):
@@ -198,7 +233,7 @@ def send_direct_message(
             store_id,
             normalized_body,
             expected_creator_name=name,
-            expected_creator_id=str(creator_id or ""),
+            expected_creator_id=resolved_creator_id,
             conversation_id=str((click_detail or {}).get("conversation_id") or ""),
         )
         if not sent.get("ok"):

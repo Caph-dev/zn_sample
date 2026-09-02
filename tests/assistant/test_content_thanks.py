@@ -81,6 +81,32 @@ class ContentThanksDecisionTests(unittest.TestCase):
         )
         self.assertEqual(matched["status"], "ambiguous")
 
+    def test_completed_creator_id_is_reused_when_local_case_is_missing(self) -> None:
+        self.assertEqual(
+            ContentThanksService._completed_creator_id(
+                {
+                    "status": "unique",
+                    "rows": [
+                        {"creator_id": "creator-1", "creator_name": "alice"},
+                        {"creator_id": "creator-1", "creator_name": "alice"},
+                    ],
+                }
+            ),
+            "creator-1",
+        )
+        self.assertEqual(
+            ContentThanksService._completed_creator_id(
+                {
+                    "status": "ambiguous",
+                    "rows": [
+                        {"creator_id": "creator-1"},
+                        {"creator_id": "creator-2"},
+                    ],
+                }
+            ),
+            "",
+        )
+
     def test_sop_thanks_fingerprint_is_already_sent(self) -> None:
         self.assertTrue(
             looks_like_content_thanks(

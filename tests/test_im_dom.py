@@ -9,13 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.im_dom import (  # noqa: E402
+    CLICK_NEW_MESSAGE_RESULT_JS_TMPL,
     composer_ready,
     conversation_matches,
+    INSPECT_IM_JS,
     im_thread_text,
     inspect_current_thread,
     open_conversation_via_new_message,
-    open_im_from_detail,
-    open_target_conversation,
     thread_has_named_intro,
     thread_looks_stale,
 )
@@ -107,184 +107,67 @@ class ImOpenPathTests(unittest.TestCase):
             conversation_matches(probe, "informateymas0721", "7495187564109793532")
         )
 
-    @patch("lib.im_dom.inspect_im")
-    @patch("lib.im_dom.zclaw_exec")
-    def test_open_im_from_detail_accepts_existing_overlay(self, execute, inspect) -> None:
-        inspect.return_value = {
+    def test_conversation_matches_current_composer_identity(self) -> None:
+        probe = {
             "hasComposer": True,
-            "onIm": False,
-            "hasDetailProfile": True,
-            "href": "https://example/creator/detail",
+            "current_user_id": "7493993174308326234",
+            "current_conversation_id": "7657571010698543373",
+            "current_screen_name": "ana_abeilleugc0",
         }
+        self.assertTrue(
+            conversation_matches(probe, "different-name", "7493993174308326234")
+        )
+        self.assertTrue(
+            conversation_matches(probe, "ana_abeilleugc0", "unknown-id")
+        )
 
-        result = open_im_from_detail("store-test")
+    def test_conversation_matches_never_uses_thread_text_as_identity(self) -> None:
+        probe = {
+            "hasComposer": True,
+            "thread_text": "ana_abeilleugc0 你好！你的样品已送达。",
+            "current_user_id": "7495628628007553405",
+            "current_screen_name": "daimarismendoza20",
+        }
+        self.assertFalse(
+            conversation_matches(probe, "ana_abeilleugc0", "7493993174308326234")
+        )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "already-open-overlay")
-        execute.assert_not_called()
+    def test_new_message_scripts_capture_result_and_current_identities(self) -> None:
+        self.assertIn("dataSource", CLICK_NEW_MESSAGE_RESULT_JS_TMPL)
+        self.assertIn("result_creator_id", CLICK_NEW_MESSAGE_RESULT_JS_TMPL)
+        self.assertIn("current_user_id", INSPECT_IM_JS)
+        self.assertIn("current_conversation_id", INSPECT_IM_JS)
+        self.assertIn("current_screen_name", INSPECT_IM_JS)
 
     @patch("lib.im_dom.inspect_im")
-    @patch("lib.im_dom.zclaw_exec")
-    def test_open_im_from_detail_rejects_leftover_composer_without_context(
-        self, execute, inspect
-    ) -> None:
-        # 聊天数面板/旧会话残留：有 composer 但没有 /seller/im 或详情弹层上下文。
-        inspect.return_value = {
-            "hasComposer": True,
-            "onIm": False,
-            "hasDetailProfile": False,
-            "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
-        }
-        execute.return_value = {"ok": False, "reason": "no-message-btn"}
-
-        result = open_im_from_detail("store-test")
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "no-message-btn")
-        execute.assert_called_once()
-
     @patch("lib.im_dom.time.sleep", return_value=None)
-    @patch("lib.im_dom.inspect_im")
     @patch("lib.im_dom.zclaw_exec")
-    def test_open_im_from_detail_uses_handleclick_then_overlay(
-        self, execute, inspect, _sleep
+    def test_open_conversation_via_new_message_uses_sample_page_path(
+        self, execute, _sleep, inspect
     ) -> None:
         inspect.side_effect = [
-            {"hasComposer": False, "onIm": False, "hasDock": True},
-            {"hasComposer": True, "onIm": False, "hasDock": True, "hasDetailProfile": True},
-        ]
-        execute.return_value = {"ok": True, "via": "handleClick", "opened": []}
-
-        result = open_im_from_detail("store-test")
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "overlay")
-        execute.assert_called_once()
-        self.assertIn("handleClick", execute.call_args.args[1])
-
-    @patch("lib.im_dom.time.sleep", return_value=None)
-    @patch("lib.im_dom.inspect_im")
-    @patch("lib.im_dom.zclaw_exec")
-    def test_open_im_from_detail_expands_dock_only_after_message_click(
-        self, execute, inspect, _sleep
-    ) -> None:
-        inspect.side_effect = [
-            {"hasComposer": False, "onIm": False, "hasDock": True},
-            {"hasComposer": False, "onIm": False, "hasDock": True},
-            {"hasComposer": True, "onIm": False, "hasDock": True, "hasDetailProfile": True},
+            # 初次检查：已经在样品申请页。
+            {"onIm": False, "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=7496019476093176674"},
+            # 第一次轮询仍是旧会话。
+            {
+                "onIm": False,
+                "hasComposer": True,
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                "current_user_id": "old-user",
+                "current_screen_name": "old-creator",
+                "thread_text": "旧会话正文中偶然出现 alice",
+            },
+            # 后续轮询才看到新消息路径切换后的 composer identity。
+            {
+                "onIm": False,
+                "hasComposer": True,
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                "current_user_id": "alice-id",
+                "current_conversation_id": "conversation-alice",
+                "current_screen_name": "alice",
+            },
         ]
         execute.side_effect = [
-            {"ok": True, "via": "handleClick", "opened": []},
-            {"ok": True, "via": "react-onClick"},
-        ]
-
-        result = open_im_from_detail("store-test")
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "overlay-expanded")
-        self.assertEqual(execute.call_count, 2)
-        self.assertIn("handleClick", execute.call_args_list[0].args[1])
-        self.assertIn("entryWrapper", execute.call_args_list[1].args[1])
-
-    @patch("lib.im_dom.search_and_open_conversation")
-    @patch("lib.im_dom.open_im_inbox")
-    @patch("lib.im_dom.open_im_from_detail")
-    def test_open_target_conversation_uses_detail_overlay(
-        self, from_detail, inbox, search
-    ) -> None:
-        from_detail.return_value = {"ok": True, "via": "overlay"}
-        search.return_value = {
-            "ok": True,
-            "via": "already-selected",
-            "click": {"ok": True, "conversation_id": "conv-1"},
-        }
-
-        result = open_target_conversation(
-            "store-test",
-            "informateymas0721",
-            creator_id="7495187564109793532",
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "detail-direct")
-        inbox.assert_not_called()
-
-    @patch("lib.im_dom.search_and_open_conversation")
-    @patch("lib.im_dom.open_im_inbox")
-    @patch("lib.im_dom.open_im_from_detail")
-    @patch("lib.im_dom.open_conversation_via_new_message")
-    def test_open_target_conversation_falls_back_to_new_message_after_detail_search_fails(
-        self, new_message, from_detail, inbox, search
-    ) -> None:
-        from_detail.return_value = {"ok": True, "via": "overlay"}
-        search.return_value = {"ok": False, "error": "conv-not-found"}
-        new_message.return_value = {
-            "ok": True,
-            "via": "new-message",
-            "click": {"ok": True},
-        }
-
-        result = open_target_conversation(
-            "store-test",
-            "informateymas0721",
-            creator_id="7495187564109793532",
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "new-message")
-        inbox.assert_not_called()
-        new_message.assert_called_once()
-        self.assertEqual(
-            new_message.call_args.kwargs["creator_id"], "7495187564109793532"
-        )
-        self.assertEqual(
-            new_message.call_args.kwargs["creator_name"], "informateymas0721"
-        )
-
-    @patch("lib.im_dom.search_and_open_conversation")
-    @patch("lib.im_dom.open_im_inbox")
-    @patch("lib.im_dom.open_im_from_detail")
-    @patch("lib.im_dom.open_conversation_via_new_message")
-    def test_open_target_conversation_falls_back_to_inbox_when_all_fail(
-        self, new_message, from_detail, inbox, search
-    ) -> None:
-        from_detail.return_value = {"ok": False, "error": "no-message-btn"}
-        new_message.return_value = {"ok": False, "error": "新消息路径未找到会话"}
-        inbox.return_value = {"ok": True, "via": "visit"}
-        search.return_value = {
-            "ok": True,
-            "via": "already-selected",
-            "click": {"ok": True, "conversation_id": "conv-9"},
-        }
-
-        result = open_target_conversation(
-            "store-test",
-            "informateymas0721",
-            creator_id="7495187564109793532",
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["via"], "inbox-search")
-        inbox.assert_called_once()
-        new_message.assert_called_once()
-
-
-    @patch("lib.im_dom.inspect_im")
-    @patch("lib.im_dom.visit_page")
-    @patch("lib.im_dom.time.sleep", return_value=None)
-    @patch("lib.im_dom.zclaw_exec")
-    def test_open_conversation_via_new_message_returns_to_sample_page_from_im(
-        self, execute, _sleep, visit, inspect
-    ) -> None:
-        inspect.side_effect = [
-            # 初次检查：在 /seller/im（需要回样品页）
-            {"onIm": True, "href": "https://affiliate.tiktokshopglobalselling.com/seller/im?shop_id=7496019476093176674"},
-            # _try 内最终校验：composer ready + 选中命中
-            {"onIm": False, "hasComposer": True, "hasDock": True, "selected_preview": "alice\nHi"},
-        ]
-        execute.side_effect = [
-            # 就绪轮询：href sample-request + complete + dock
-            {"href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=7496019476093176674", "ready": "complete", "dock": True},
             # OPEN_CHAT_PANEL_JS
             {"ok": True, "already": True},
             # CLICK_NEW_MESSAGE_BTN_JS
@@ -301,37 +184,66 @@ class ImOpenPathTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["via"], "new-message")
-        visit.assert_called_once()
-        self.assertIn(
-            "sample-request",
-            visit.call_args.args[1],
-        )
+        self.assertEqual(execute.call_count, 4)
+        self.assertEqual(inspect.call_count, 3)
+        self.assertEqual(result["confirmation"]["poll_count"], 2)
 
     @patch("lib.im_dom.inspect_im")
-    @patch("lib.im_dom.visit_page")
     @patch("lib.im_dom.time.sleep", return_value=None)
-    @patch("lib.im_dom.time.monotonic", side_effect=[0.0, 5.0, 6.0, 60.0, 91.0])
     @patch("lib.im_dom.zclaw_exec")
-    def test_open_conversation_via_new_message_fails_when_sample_page_not_ready(
-        self, execute, monotonic, _sleep, visit, inspect
+    def test_open_conversation_falls_back_to_handle_within_new_message_path(
+        self, execute, _sleep, inspect
+    ) -> None:
+        inspect.side_effect = [
+            {
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+            },
+            {
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                "hasComposer": True,
+                "current_user_id": "creator-id",
+                "current_screen_name": "creator_handle",
+            },
+        ]
+        execute.side_effect = [
+            {"ok": True, "already": True},
+            {"ok": True},
+            {"ok": True, "value": "creator-id"},
+            {"ok": False, "reason": "no-result-row"},
+            {"ok": True, "already": True},
+            {"ok": True},
+            {"ok": True, "value": "creator_handle"},
+            {
+                "ok": True,
+                "via": "react-onClick",
+                "result_creator_id": "creator-id",
+            },
+        ]
+
+        result = open_conversation_via_new_message(
+            "store-test",
+            creator_id="creator-id",
+            creator_name="creator_handle",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(execute.call_count, 8)
+        self.assertEqual(inspect.call_count, 2)
+
+    @patch("lib.im_dom.inspect_im")
+    def test_open_conversation_via_new_message_rejects_non_sample_page(
+        self, inspect
     ) -> None:
         inspect.side_effect = [
             {"onIm": True, "href": "https://affiliate.tiktokshopglobalselling.com/seller/im?shop_id=7496019476093176674"},
         ]
-        execute.return_value = {
-            "href": "https://affiliate.tiktokshopglobalselling.com/seller/im?shop_id=7496019476093176674",
-            "ready": "loading",
-            "dock": False,
-        }
 
         result = open_conversation_via_new_message(
             "store-test", creator_id="", creator_name="alice"
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"], "样品申请页未就绪")
-        visit.assert_called_once()
-        self.assertGreaterEqual(execute.call_count, 2)
+        self.assertEqual(result["error"], "必须停在样品申请页")
 
 
 if __name__ == "__main__":

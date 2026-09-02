@@ -21,7 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.app_config import load_bitable_settings, load_dotenv  # noqa: E402
-from lib.creator_detail import extract_creator_detail, open_creator_detail_by_url  # noqa: E402
+from lib.creator_detail import (  # noqa: E402
+    extract_creator_detail,
+    go_back_to_list,
+    open_creator_detail_by_url,
+)
 from lib.detect_lang import detect_creator_lang  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import set_verbose  # noqa: E402
@@ -115,7 +119,9 @@ def _detect_lang(
     if not opened.get("ok"):
         return detect_creator_lang("")
     detail = extract_creator_detail(store_id)
-    return detect_creator_lang(str(detail.get("bio") or ""))
+    detected = detect_creator_lang(str(detail.get("bio") or ""))
+    go_back_to_list(store_id, wait=wait)
+    return detected
 
 
 def _send_tracking_dm(
@@ -490,6 +496,7 @@ def main() -> int:
             if args.execute and not unlimited_send and sent >= limit:
                 out["send_status"] = "skipped-limit"
             else:
+                ensure_sample_page_loaded(store_id, page_wait=args.page_wait)
                 dm = _send_tracking_dm(
                     store_id,
                     row,

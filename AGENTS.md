@@ -56,7 +56,7 @@
 | 初筛+复筛 | `--with-detail --require-detail` | 不能把仅列表结果当正式名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
 | 写达人关系 | 写接口接受后 + `--write-feishu`；`--confirm-export` 可**补写** | 不是主推表；写结果未知时不先写 |
-| 第 6 / 9 步私信 | 独立脚本；详情页消息按钮 `handleClick` 开弹层，默认 IM SDK | 批准后不自动发；不要求跳到 `/seller/im`；不要先点「聊天数」 |
+| 第 6 / 9 步私信 | 独立脚本；严格走样品申请页「聊天数」→「发送消息」→输入达人 ID→「聊天」的新路径，默认 IM SDK | 批准后不自动发；不打开详情消息弹层、不跳到 `/seller/im`、不点「聊天数」里的最近联系人 |
 | 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
@@ -147,8 +147,8 @@
 
 - 列表：静默读 fiber `record`，勿点名称旁易弹剪贴板的控件。批准只走列表「同意」，不在详情页点同意。
 - 详情：直链 `cid=` 或点头像；抽完回列表。
-- 私信：详情「邀请」旁 `.alliance-icon-Message` 的 `handleClick`（带 `creatorId`）。成功=弹层有输入框且选中 `contactCard` 对得上人。**不要先点「聊天数」**。不要因 URL 不是 `/seller/im` 判失败。发送默认 `onSendText`，不点发送钮（除非 `--write-source dom`）。
-- 可点：待审核/已发货 tab、翻页、头像/详情、返回、详情消息按钮。execute 还可点列表同意、确认弹窗。永不点邀请。
+- 私信：只从样品申请页右下角「聊天数」进入，点击「发送消息」，在「发送给」输入达人 ID 后点击结果行右侧「聊天」。成功=选中 `contactCard` 对得上人且有输入框。**不要打开详情消息弹层、不要跳到 `/seller/im`、不要点最近联系人**。发送默认 `onSendText`，不点发送钮（除非 `--write-source dom`）。
+- 可点：待审核/已发货 tab、翻页、头像/详情、返回，以及样品申请页聊天数面板中的「发送消息」、达人 ID 搜索结果「聊天」。execute 还可点列表同意、确认弹窗。永不点邀请。
 - 进出商家订单页：异步 `location.replace` + 短轮询，禁止阻塞 `visit_page` 回样品申请。从订单等 SPA 子页出发时先 replace 掉历史，避免弹回订单页。
 - storeId：显式 > running 精确店名 > running 唯一 > 测试默认 1 号店。ZClaw Bridge `9481` ≠ WebDriver `16851`。
 - 跟进/物流私信语言：飞书「使用语言」优先；否则详情简介 `detect_creator_lang`（LLM JSON）；空简介默认英语。已有会话语言不改判。密钥只放 `.env`，勿提交、勿进聊天。

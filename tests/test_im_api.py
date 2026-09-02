@@ -46,9 +46,13 @@ class ImSdkSendTests(unittest.TestCase):
         self.assertIn("onSendText", script)
         self.assertIn("contactCard", script)
         self.assertIn("selectedText", script)
+        self.assertIn("expectedCreatorId", script)
+        self.assertIn("currentUserId", script)
+        self.assertIn("currentScreenName", script)
         self.assertNotIn(".click()", script)
         self.assertNotIn("document.cookie", script.lower())
-        self.assertLess(script.index("composer"), script.index("not-on-im-page"))
+        self.assertIn("not-in-new-message-conversation", script)
+        self.assertNotIn("onImPage", script)
 
     @patch("lib.im_api.zclaw_exec")
     def test_rejects_message_longer_than_platform_limit(self, execute) -> None:
@@ -66,7 +70,7 @@ class ImSdkSendTests(unittest.TestCase):
     @patch("lib.im_dom.fill_or_send_message")
     @patch("lib.im_dom.inspect_current_thread", return_value={"thread_text": ""})
     @patch(
-        "lib.im_dom.open_target_conversation",
+        "lib.im_dom.open_conversation_via_new_message",
         return_value={"ok": True, "click": {"conversation_id": "conv"}},
     )
     def test_send_direct_message_defaults_to_dry_run(
@@ -90,6 +94,41 @@ class ImSdkSendTests(unittest.TestCase):
         inspect_thread.assert_called_once()
         send_via_sdk.assert_not_called()
         fill_or_send.assert_not_called()
+
+    @patch("lib.im_api.time.sleep", return_value=None)
+    @patch("lib.im_api.send_message_via_sdk")
+    @patch("lib.im_dom.inspect_current_thread", return_value={"thread_text": ""})
+    @patch(
+        "lib.im_dom.open_conversation_via_new_message",
+        return_value={
+            "ok": True,
+            "click": {"result_creator_id": "result-creator-id"},
+        },
+    )
+    def test_send_direct_message_reuses_result_creator_id(
+        self,
+        open_conversation,
+        inspect_thread,
+        send_via_sdk,
+        _sleep,
+    ) -> None:
+        send_via_sdk.return_value = {"ok": True, "state": "sdk-send-started"}
+
+        result = send_direct_message(
+            "store-test",
+            "SOP follow-up copy",
+            creator_name="creator_test",
+            execute=True,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "sent")
+        open_conversation.assert_called_once()
+        self.assertEqual(
+            send_via_sdk.call_args.kwargs["expected_creator_id"],
+            "result-creator-id",
+        )
+        inspect_thread.assert_called()
 
 
 if __name__ == "__main__":

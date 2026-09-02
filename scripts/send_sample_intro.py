@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""SOP 第 6 步：打开达人私信，发送介绍话术。
+"""SOP 第 6 步：从样品申请页打开达人私信，发送介绍话术。
 
 默认只读预演（抽简介、判语言、生成话术，不发送）。
 真正发送须 --execute --yes。默认 limit=1。
 语言只认英语 / 西班牙语，来源：达人详情页简介。
+打开会话严格走样品申请页「聊天数」→「发送消息」→输入达人 ID→「聊天」路径。
 真实发送默认调用页面内 IM SDK API；需要时可显式使用 DOM 备用路径。
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.creator_detail import (  # noqa: E402
     extract_creator_detail,
+    go_back_to_list,
     open_creator_detail_by_url,
 )
 from lib.app_config import load_dotenv  # noqa: E402
@@ -43,7 +45,7 @@ from lib.feishu_bitable import (  # noqa: E402
 from lib.im_dom import (  # noqa: E402
     fill_or_send_message,
     inspect_current_thread,
-    open_target_conversation,
+    open_conversation_via_new_message,
     thread_has_named_intro,
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
@@ -175,6 +177,9 @@ def _detect_from_detail(store_id: str, row: dict[str, Any], *, wait: float) -> d
     detail = extract_creator_detail(store_id)
     bio = str(detail.get("bio") or "")
     detected = detect_creator_lang(bio)
+    restored = go_back_to_list(store_id, wait=wait)
+    if not restored.get("ok"):
+        return {"ok": False, "error": "详情读取后无法回到样品申请页", "restored": restored}
     detected["ok"] = True
     detected["detail_href"] = detail.get("href") or ""
     return detected
@@ -211,10 +216,10 @@ def _write_feishu_lang(
 
 
 def _open_conversation(store_id: str, row: dict[str, Any], *, wait: float) -> dict[str, Any]:
-    return open_target_conversation(
+    return open_conversation_via_new_message(
         store_id,
-        str(row.get("creator_name") or ""),
         creator_id=str(row.get("creator_id") or ""),
+        creator_name=str(row.get("creator_name") or ""),
         wait=wait,
     )
 
