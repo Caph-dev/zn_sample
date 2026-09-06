@@ -43,6 +43,7 @@ from lib.feishu_bitable import (  # noqa: E402
     update_record_fields,
 )
 from lib.im_dom import (  # noqa: E402
+    composer_identity_matches,
     fill_or_send_message,
     inspect_current_thread,
     open_conversation_via_new_message,
@@ -404,12 +405,22 @@ def main() -> int:
             logger.info("    DRY-RUN 不发送")
         else:
             out["send_source"] = args.write_source
+            resolved_creator_id = str(
+                row.get("creator_id") or click_detail.get("result_creator_id") or ""
+            ).strip()
+            probe = inspect_current_thread(store_id, name, wait=args.page_wait)
+            if not composer_identity_matches(probe, name, resolved_creator_id):
+                out["send_status"] = "send-failed"
+                out["error"] = "target-conversation-not-visible"
+                logger.info("    发送前身份核对失败: target-conversation-not-visible")
+                results.append(out)
+                continue
             if args.write_source == "api":
                 sent_ret = send_message_via_sdk(
                     store_id,
                     body,
                     expected_creator_name=name,
-                    expected_creator_id=str(row.get("creator_id") or ""),
+                    expected_creator_id=resolved_creator_id,
                     conversation_id=str(click_detail.get("conversation_id") or ""),
                 )
                 if sent_ret.get("ok"):

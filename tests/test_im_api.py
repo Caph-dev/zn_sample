@@ -44,11 +44,15 @@ class ImSdkSendTests(unittest.TestCase):
         self.assertEqual(execute.call_args.kwargs["retries"], 0)
         script = execute.call_args.args[1]
         self.assertIn("onSendText", script)
-        self.assertIn("contactCard", script)
-        self.assertIn("selectedText", script)
         self.assertIn("expectedCreatorId", script)
         self.assertIn("currentUserId", script)
         self.assertIn("currentScreenName", script)
+        self.assertIn("idMatched", script)
+        self.assertIn("nameMatched", script)
+        self.assertIn("if (!idMatched && !nameMatched)", script)
+        self.assertNotIn("selectedText", script)
+        self.assertNotIn("contactCard", script)
+        self.assertNotIn(".includes(", script)
         self.assertNotIn(".click()", script)
         self.assertNotIn("document.cookie", script.lower())
         self.assertIn("not-in-new-message-conversation", script)
@@ -97,7 +101,14 @@ class ImSdkSendTests(unittest.TestCase):
 
     @patch("lib.im_api.time.sleep", return_value=None)
     @patch("lib.im_api.send_message_via_sdk")
-    @patch("lib.im_dom.inspect_current_thread", return_value={"thread_text": ""})
+    @patch(
+        "lib.im_dom.inspect_current_thread",
+        return_value={
+            "thread_text": "",
+            "current_user_id": "result-creator-id",
+            "current_screen_name": "creator_test",
+        },
+    )
     @patch(
         "lib.im_dom.open_conversation_via_new_message",
         return_value={
@@ -129,6 +140,44 @@ class ImSdkSendTests(unittest.TestCase):
             "result-creator-id",
         )
         inspect_thread.assert_called()
+
+    @patch("lib.im_api.send_message_via_sdk")
+    @patch("lib.im_dom.fill_or_send_message")
+    @patch(
+        "lib.im_dom.inspect_current_thread",
+        return_value={
+            "thread_text": "Hi creator_test, thanks for requesting our sample!",
+            "selected_preview": "creator_test\nHi creator_test, thanks",
+            "selected_user_id": "result-creator-id",
+        },
+    )
+    @patch(
+        "lib.im_dom.open_conversation_via_new_message",
+        return_value={
+            "ok": True,
+            "click": {"result_creator_id": "result-creator-id"},
+        },
+    )
+    def test_send_direct_message_refuses_when_composer_identity_missing(
+        self,
+        open_conversation,
+        inspect_thread,
+        fill_or_send,
+        send_via_sdk,
+    ) -> None:
+        result = send_direct_message(
+            "store-test",
+            "SOP follow-up copy",
+            creator_name="creator_test",
+            execute=True,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "target-conversation-not-visible")
+        open_conversation.assert_called_once()
+        inspect_thread.assert_called()
+        send_via_sdk.assert_not_called()
+        fill_or_send.assert_not_called()
 
 
 if __name__ == "__main__":

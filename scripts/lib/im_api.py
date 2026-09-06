@@ -35,11 +35,6 @@ SEND_TEXT_VIA_SDK_JS_TMPL = r"""
   }
   const want = String(expectedCreatorName || '').trim().toLowerCase();
   const expectedId = String(expectedCreatorId || '').trim();
-  const selectedCard = [...document.querySelectorAll('div')].find(el => {
-    const cls = String(el.className || '');
-    return /contactCard/.test(cls) && /selected/.test(cls);
-  });
-  const selectedText = selectedCard ? String(selectedCard.innerText || '').toLowerCase() : '';
   const identityFromValue = value => {
     if (!value || typeof value !== 'object') return null;
     const source = value.userInfo && typeof value.userInfo === 'object'
@@ -68,18 +63,12 @@ SEND_TEXT_VIA_SDK_JS_TMPL = r"""
   }
   const currentUserId = currentIdentity ? currentIdentity.userId : '';
   const currentScreenName = currentIdentity ? currentIdentity.screenName.toLowerCase() : '';
-  if (expectedId && currentUserId) {
-    if (expectedId !== currentUserId) {
-      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
-    }
-  } else if (want && currentScreenName) {
-    if (currentScreenName !== want) {
-      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
-    }
-  } else if (want && (!selectedText || !selectedText.includes(want))) {
-    if (expectedId || !selectedText) {
-      return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
-    }
+  // 与 composer_identity_matches 对齐：只认输入框 fiber 身份。
+  // ID 精确或 handle 精确；读不到身份就拒发，不用选中卡/正文子串。
+  const idMatched = !!(expectedId && currentUserId && expectedId === currentUserId);
+  const nameMatched = !!(want && currentScreenName && currentScreenName === want);
+  if (!idMatched && !nameMatched) {
+    return JSON.stringify({ok: false, reason: 'target-conversation-not-visible'});
   }
 
   const textarea = document.querySelector('textarea');
@@ -194,6 +183,7 @@ def send_direct_message(
     ``shop_id`` 仅为兼容既有调用方保留；打开会话不使用它，也不导航到其它页面。
     """
     from .im_dom import (
+        composer_identity_matches,
         fill_or_send_message,
         im_thread_text,
         inspect_current_thread,
@@ -224,6 +214,13 @@ def send_direct_message(
         return {"ok": True, "status": "already-sent", "message": normalized_body}
     if not execute:
         return {"ok": True, "status": "dry-run", "message": normalized_body}
+
+    if not composer_identity_matches(probe, name, resolved_creator_id):
+        return {
+            "ok": False,
+            "error": "target-conversation-not-visible",
+            "message": normalized_body,
+        }
 
     if write_source == "api":
         click_detail = (

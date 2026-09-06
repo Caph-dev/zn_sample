@@ -365,25 +365,44 @@ def composer_ready(probe: dict[str, Any] | None) -> bool:
     return bool(isinstance(probe, dict) and probe.get("hasComposer"))
 
 
-def conversation_matches(
+def composer_identity_matches(
     probe: dict[str, Any] | None,
     creator_name: str,
     creator_id: str = "",
 ) -> bool:
-    """用当前 composer/选中会话身份核对达人，不用整页正文。"""
+    """发送前只核对 composer 身份：ID 精确或 handle 精确。
+
+    读不到 composer 身份就失败。不要用选中卡、会话正文或整页文字做子串兜底；
+    那些位置可能出现目标名字，但输入框仍停在上一个会话。
+    """
     if not isinstance(probe, dict):
         return False
     name = (creator_name or "").strip().lower()
     cid = str(creator_id or "").strip()
     current_id = str(probe.get("current_user_id") or "").strip()
     current_name = str(probe.get("current_screen_name") or "").strip().lower()
-    selected_id = str(probe.get("selected_user_id") or "").strip()
-    selected_preview = str(probe.get("selected_preview") or "").lower()
-    selected_name = next(iter(selected_preview.splitlines()), "").strip()
     if cid and current_id and cid == current_id:
         return True
     if name and current_name == name:
         return True
+    return False
+
+
+def conversation_matches(
+    probe: dict[str, Any] | None,
+    creator_name: str,
+    creator_id: str = "",
+) -> bool:
+    """用当前 composer/选中会话身份核对达人，不用整页正文。"""
+    if composer_identity_matches(probe, creator_name, creator_id):
+        return True
+    if not isinstance(probe, dict):
+        return False
+    name = (creator_name or "").strip().lower()
+    cid = str(creator_id or "").strip()
+    selected_id = str(probe.get("selected_user_id") or "").strip()
+    selected_preview = str(probe.get("selected_preview") or "").lower()
+    selected_name = next(iter(selected_preview.splitlines()), "").strip()
     if cid and selected_id and cid == selected_id:
         return True
     if name and selected_name == name:

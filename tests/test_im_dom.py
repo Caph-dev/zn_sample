@@ -10,6 +10,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.im_dom import (  # noqa: E402
     CLICK_NEW_MESSAGE_RESULT_JS_TMPL,
+    composer_identity_matches,
     composer_ready,
     conversation_matches,
     INSPECT_IM_JS,
@@ -130,6 +131,41 @@ class ImOpenPathTests(unittest.TestCase):
         }
         self.assertFalse(
             conversation_matches(probe, "ana_abeilleugc0", "7493993174308326234")
+        )
+
+    def test_composer_identity_matches_id_or_handle_and_refuses_card_substring(
+        self,
+    ) -> None:
+        composer = {
+            "hasComposer": True,
+            "current_user_id": "7493993174308326234",
+            "current_screen_name": "ana_abeilleugc0",
+        }
+        self.assertTrue(
+            composer_identity_matches(
+                composer, "different-name", "7493993174308326234"
+            )
+        )
+        self.assertTrue(
+            composer_identity_matches(composer, "ana_abeilleugc0", "unknown-id")
+        )
+        card_only = {
+            "hasComposer": True,
+            "selected_preview": "ana_abeilleugc0\nHi ana_abeilleugc0, thanks",
+            "selected_user_id": "7493993174308326234",
+            "thread_text": "Hi ana_abeilleugc0, thanks for requesting our sample!",
+        }
+        self.assertFalse(
+            composer_identity_matches(
+                card_only, "ana_abeilleugc0", "7493993174308326234"
+            )
+        )
+        self.assertTrue(
+            conversation_matches(card_only, "ana_abeilleugc0", "7493993174308326234")
+        )
+        missing = {"hasComposer": True, "thread_text": "", "selected_preview": ""}
+        self.assertFalse(
+            composer_identity_matches(missing, "ana_abeilleugc0", "7493993174308326234")
         )
 
     def test_new_message_scripts_capture_result_and_current_identities(self) -> None:
