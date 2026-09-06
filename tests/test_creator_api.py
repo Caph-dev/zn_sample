@@ -18,8 +18,10 @@ from lib.creator_api import (  # noqa: E402
 from lib.page_api import (  # noqa: E402
     CREATOR_PROFILE_ENDPOINT,
     AffiliatePageContext,
+    PageApiBusinessError,
     PageApiSchemaError,
 )
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "creator_profile_types.json"
 
@@ -194,6 +196,47 @@ class CreatorProfileClientTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(requested_types, list(PROFILE_TYPES))
         self.assertEqual(result["opened"]["via"], "api")
+
+    def test_business_failure_is_classified_without_becoming_empty_metrics(self) -> None:
+        def request_json(*_args, **_kwargs) -> dict:
+            raise PageApiBusinessError(
+                CREATOR_PROFILE_ENDPOINT,
+                100000,
+                "",
+            )
+
+        result = fetch_creator_detail_api(
+            "store-test",
+            {"creator_id": "creator-test-001"},
+            request_json=request_json,
+            context=AffiliatePageContext(
+                href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                shop_id="shop-test",
+                shop_region="US",
+            ),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["read_status"], "failed")
+        self.assertEqual(result["error_type"], "profile-business-error")
+        self.assertEqual(result["business_code"], 100000)
+        self.assertIn("code=100000", result["error"])
+
+    def test_cancellation_is_not_converted_to_profile_failure(self) -> None:
+        def request_json(*_args, **_kwargs) -> dict:
+            raise OperationCancelled("test cancellation")
+
+        with self.assertRaises(OperationCancelled):
+            fetch_creator_detail_api(
+                "store-test",
+                {"creator_id": "creator-test-001"},
+                request_json=request_json,
+                context=AffiliatePageContext(
+                    href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                    shop_id="shop-test",
+                    shop_region="US",
+                ),
+            )
 
 
 if __name__ == "__main__":

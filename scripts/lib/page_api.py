@@ -12,9 +12,10 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .console import verbose_print
+from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .sync_errors import LogisticsRequestTimeout
 from .time_budget import (
     deadline_from_timeout,
@@ -49,6 +50,18 @@ class PageApiError(RuntimeError):
     """页面上下文 API 请求失败。"""
 
 
+class PageApiBusinessError(PageApiError):
+    """页面请求成功到达服务端，但服务端返回了业务错误码。"""
+
+    def __init__(self, endpoint: str, business_code: Any, message: str) -> None:
+        self.endpoint = endpoint
+        self.business_code = business_code
+        self.business_message = message
+        super().__init__(
+            f"{endpoint} 业务失败 code={business_code} message={message[:160]}"
+        )
+
+
 class PageApiSchemaError(PageApiError):
     """API 响应结构不符合已验证契约。"""
 
@@ -68,8 +81,13 @@ class SellerPageContext:
     page_query: dict[str, str] = field(default_factory=dict)
 
 
-def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
+def get_affiliate_page_context(
+    store_id: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+) -> AffiliatePageContext:
     """读取当前页面 URL 中 API 所需的店铺上下文，不读取会话信息。"""
+    raise_if_cancelled(cancel_check)
     result = zclaw_exec(
         store_id,
         "(() => JSON.stringify({href: location.href || ''}))()",
@@ -79,6 +97,7 @@ def get_affiliate_page_context(store_id: str) -> AffiliatePageContext:
         retry_timeout_expired=True,
         operation="affiliate_context_read",
     )
+    raise_if_cancelled(cancel_check)
     if not isinstance(result, dict):
         raise PageApiError(f"无法读取当前页面 URL: {result!r}"[:300])
 
@@ -295,6 +314,7 @@ def _post_page_json(
     request_query: dict[str, Any] | None = None,
     deadline: float | None = None,
     retry_timeout_expired: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """在页面上下文执行一个已登记的异步 POST。
 
@@ -321,6 +341,7 @@ def _post_page_json(
     )
     last_error: PageApiError | None = None
     for attempt in range(attempts):
+        raise_if_cancelled(cancel_check)
         request_id = uuid.uuid4().hex
         start_script = f"""
 (() => {{
@@ -396,6 +417,7 @@ def _post_page_json(
 """
         started_at = time.monotonic()
         try:
+            raise_if_cancelled(cancel_check)
             start_result = zclaw_exec(
                 store_id,
                 start_script,
@@ -411,6 +433,7 @@ def _post_page_json(
                     f"{endpoint} 无法启动页面异步请求: {start_result!r}"[:400]
                 )
 
+            raise_if_cancelled(cancel_check)
             poll_script = f"""
 (() => {{
   const requestId = {json.dumps(request_id)};
@@ -430,10 +453,12 @@ def _post_page_json(
             )
             result: dict[str, Any] | None = None
             while remaining_seconds(poll_deadline) > 0:
+                raise_if_cancelled(cancel_check)
                 if not sleep_until_next_probe(
                     poll_deadline, max(0.1, poll_interval_seconds)
                 ):
                     break
+                raise_if_cancelled(cancel_check)
                 poll_timeout = max(
                     1,
                     min(30, int(remaining_seconds(poll_deadline))),
@@ -452,6 +477,7 @@ def _post_page_json(
                     raise PageApiError(
                         f"{endpoint} 轮询返回未知类型: {type(poll_result).__name__}"
                     )
+                raise_if_cancelled(cancel_check)
                 if poll_result.get("done"):
                     result = poll_result
                     break
@@ -461,6 +487,8 @@ def _post_page_json(
                         f"{endpoint} 页面异步请求耗尽总 deadline"
                     )
                 raise PageApiError(f"{endpoint} 页面异步请求轮询超时")
+        except OperationCancelled:
+            raise
         except Exception as error:
             last_error = (
                 error
@@ -482,9 +510,10 @@ def _post_page_json(
                     )
                 business_code = payload.get("code")
                 if business_code != 0:
-                    raise PageApiError(
-                        f"{endpoint} 业务失败 code={business_code} "
-                        f"message={str(payload.get('message') or '')[:160]}"
+                    raise PageApiBusinessError(
+                        endpoint,
+                        business_code,
+                        str(payload.get("message") or ""),
                     )
                 verbose_print(
                     f"[页面API] {operation_label} {http_method.upper()} {endpoint} "
@@ -495,6 +524,7 @@ def _post_page_json(
                 return payload
 
         if attempt + 1 < attempts:
+            raise_if_cancelled(cancel_check)
             if not sleep_until_next_probe(resolved_deadline, 0.8 * (attempt + 1)):
                 last_error = LogisticsRequestTimeout(
                     f"{endpoint} 重试退避耗尽总 deadline"
@@ -515,6 +545,7 @@ def post_read_json(
     retries: int = 2,
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """在当前页面中执行已登记的查询型 POST，并返回业务 payload。"""
     return _post_page_json(
@@ -530,6 +561,7 @@ def post_read_json(
         poll_interval_seconds=poll_interval_seconds,
         start_exec_retries=1,
         poll_exec_retries=1,
+        cancel_check=cancel_check,
     )
 
 

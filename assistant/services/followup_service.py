@@ -616,6 +616,7 @@ class FollowupService:
             sample_case,
             store_id=self.store_id,
             warning=self.warning,
+            cancel_check=self.cancel_check,
         )
 
     def _hydrate_from_latest_export(self) -> None:

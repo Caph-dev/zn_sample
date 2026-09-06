@@ -3,8 +3,9 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
@@ -15,8 +16,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, SampleCase, Store
+from assistant.jobs.registry import JobCancelled
 from assistant.services.creator_enrich_service import (
+    CreatorReadOutcome,
     CreatorEnrichService,
+    MAX_CONSECUTIVE_PROFILE_READ_FAILURES,
     is_missing_creator_type,
     is_missing_language,
 )
@@ -112,6 +116,223 @@ class CreatorEnrichTests(unittest.TestCase):
             updated = session.get(SampleCase, case.id)
             self.assertEqual(updated.is_video_creator, "是")
             self.assertEqual(updated.is_live_creator, "")
+
+    def test_empty_profile_metrics_are_not_reported_as_read_failures(self) -> None:
+        self.add_case(
+            apply_id="empty-profile",
+            creator_id="creator-empty-profile",
+            language="en",
+        )
+        warnings = []
+        with (
+            patch(
+                "lib.creator_api.fetch_creator_detail_api",
+                return_value={
+                    "ok": True,
+                    "detail": {"video_gpm_n": None, "live_gpm_n": None},
+                },
+            ),
+            patch(
+                "lib.sample_navigation.ensure_sample_request_context",
+                return_value={"ok": True, "already": True},
+            ),
+        ):
+            result = CreatorEnrichService(
+                self.session_factory,
+                warning=warnings.append,
+                store_id="store-test",
+            ).enrich()
+
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["type_filled"], 0)
+        self.assertFalse(result["stopped_early"])
+        self.assertFalse(any("两侧都没有可用数据" in message for message in warnings))
+
+    def test_stops_after_consecutive_profile_read_failures(self) -> None:
+        for index in range(MAX_CONSECUTIVE_PROFILE_READ_FAILURES + 2):
+            self.add_case(
+                apply_id=f"profile-failure-{index}",
+                creator_id=f"creator-profile-failure-{index}",
+                language="en",
+            )
+        fetch_api = Mock(
+            return_value={
+                "ok": False,
+                "error_type": "profile-business-error",
+                "error": "业务失败 code=100000 message=",
+            }
+        )
+        with (
+            patch("lib.creator_api.fetch_creator_detail_api", fetch_api),
+            patch(
+                "lib.sample_navigation.ensure_sample_request_context",
+                return_value={"ok": True, "already": True},
+            ),
+        ):
+            result = CreatorEnrichService(
+                self.session_factory,
+                store_id="store-test",
+            ).enrich()
+
+        self.assertEqual(fetch_api.call_count, MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
+        self.assertEqual(result["type_failures"], MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
+        self.assertTrue(result["stopped_early"])
+        self.assertEqual(
+            result["unprocessed"],
+            2,
+        )
+
+    def test_duplicate_creator_does_not_consume_another_breaker_slot(self) -> None:
+        for apply_id, creator_id in (
+            ("duplicate-a-1", "creator-duplicate"),
+            ("duplicate-a-2", "creator-duplicate"),
+            ("duplicate-b", "creator-b"),
+            ("duplicate-c", "creator-c"),
+            ("duplicate-d", "creator-d"),
+        ):
+            self.add_case(
+                apply_id=apply_id,
+                creator_id=creator_id,
+                language="en",
+            )
+        fetch_api = Mock(
+            return_value={
+                "ok": False,
+                "error_type": "profile-business-error",
+                "error": "业务失败 code=100000 message=",
+            }
+        )
+        with (
+            patch("lib.creator_api.fetch_creator_detail_api", fetch_api),
+            patch(
+                "lib.sample_navigation.ensure_sample_request_context",
+                return_value={"ok": True, "already": True},
+            ),
+        ):
+            result = CreatorEnrichService(
+                self.session_factory,
+                store_id="store-test",
+            ).enrich()
+
+        self.assertEqual(fetch_api.call_count, 4)
+        self.assertTrue(result["stopped_early"])
+        self.assertEqual(result["unprocessed"], 1)
+
+    def test_mixed_profile_error_types_still_trip_the_same_breaker(self) -> None:
+        # 不同具体错误码（业务失败/结构失败/传输失败）都属于同一次资料服务
+        # 故障，必须连续计数，不能因为错误码变化而绕过熔断。
+        error_types = [
+            "profile-business-error",
+            "profile-schema-error",
+            "profile-read-error",
+        ]
+        for index, error_type in enumerate(error_types):
+            self.add_case(
+                apply_id=f"mixed-failure-{index}",
+                creator_id=f"creator-mixed-failure-{index}",
+                language="en",
+            )
+        fetch_api = Mock(
+            side_effect=[
+                {"ok": False, "error_type": error_type, "error": error_type}
+                for error_type in error_types
+            ]
+        )
+        with (
+            patch("lib.creator_api.fetch_creator_detail_api", fetch_api),
+            patch(
+                "lib.sample_navigation.ensure_sample_request_context",
+                return_value={"ok": True, "already": True},
+            ),
+        ):
+            result = CreatorEnrichService(
+                self.session_factory,
+                store_id="store-test",
+            ).enrich()
+
+        self.assertEqual(fetch_api.call_count, MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
+        self.assertTrue(result["stopped_early"])
+
+    def test_detail_page_load_failure_is_not_empty_metrics(self) -> None:
+        case = self.add_case(
+            apply_id="detail-load-failure",
+            creator_id="creator-detail-load-failure",
+            is_video_creator="是",
+        )
+        warnings = []
+        with (
+            patch("lib.app_config.load_bitable_settings", return_value={}),
+            patch(
+                "lib.creator_detail.extract_creator_detail",
+                return_value={
+                    "detail_read_status": "page-data-unavailable",
+                    "detail_error_type": "page-data-unavailable",
+                    "detail_error_message": "数据加载失败，请稍后刷新",
+                    "bio": "",
+                },
+            ),
+            patch("lib.sample_navigation.navigate_to_url"),
+        ):
+            from assistant.services.creator_enrich_service import fill_from_creator_detail_page
+
+            outcome = fill_from_creator_detail_page(
+                case,
+                store_id="store-test",
+                warning=warnings.append,
+            )
+
+        self.assertIsInstance(outcome, CreatorReadOutcome)
+        self.assertFalse(outcome.read_ok)
+        self.assertEqual(outcome.error_type, "page-data-unavailable")
+        self.assertTrue(any("未将空 GPM 判定为无数据" in message for message in warnings))
+
+    def test_cancellation_keeps_completed_creator_checkpoint(self) -> None:
+        first_case = self.add_case(
+            apply_id="checkpoint-first",
+            creator_id="creator-checkpoint-first",
+            language="en",
+        )
+        second_case = self.add_case(
+            apply_id="checkpoint-second",
+            creator_id="creator-checkpoint-second",
+            language="en",
+        )
+        cancellation_checks = 0
+
+        def cancel_after_first_creator():
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            if cancellation_checks >= 3:
+                raise JobCancelled("test cancellation")
+
+        with (
+            patch(
+                "lib.creator_api.fetch_creator_detail_api",
+                return_value={
+                    "ok": True,
+                    "detail": {"video_gpm_n": 15.0, "live_gpm_n": None},
+                },
+            ),
+            patch(
+                "lib.sample_navigation.ensure_sample_request_context",
+                return_value={"ok": True, "already": True},
+            ),
+        ):
+            with self.assertRaises(JobCancelled) as raised:
+                CreatorEnrichService(
+                    self.session_factory,
+                    store_id="store-test",
+                    cancel_check=cancel_after_first_creator,
+                ).enrich()
+
+        with self.session_factory() as session:
+            saved_first = session.get(SampleCase, first_case.id)
+            unsaved_second = session.get(SampleCase, second_case.id)
+            self.assertEqual(saved_first.is_video_creator, "是")
+            self.assertEqual(unsaved_second.is_video_creator, "")
+        summary = json.loads(raised.exception.result_summary)
+        self.assertTrue(summary["cancelled"])
+        self.assertEqual(summary["type_filled"], 1)
 
     def test_enrich_fills_language_from_feishu_without_detail_navigation(self) -> None:
         case = self.add_case(

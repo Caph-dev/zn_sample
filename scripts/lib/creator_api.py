@@ -12,10 +12,12 @@ from typing import Any
 from .page_api import (
     CREATOR_PROFILE_ENDPOINT,
     AffiliatePageContext,
+    PageApiBusinessError,
     PageApiSchemaError,
     get_affiliate_page_context,
     post_read_json,
 )
+from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .parse_metrics import parse_count, parse_money
 
 PROFILE_TYPES = (2, 3, 4, 5)
@@ -213,31 +215,84 @@ def fetch_creator_detail_api(
     *,
     request_json: Callable[..., dict[str, Any]] = post_read_json,
     context: AffiliatePageContext | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """从页面同源 profile API 拉取详情，不打开达人详情页。"""
     creator_id = str(row.get("creator_id") or "").strip()
     if not creator_id:
-        return {"ok": False, "error": "missing-creator-id"}
+        return {
+            "ok": False,
+            "read_status": "failed",
+            "error_type": "missing-creator-id",
+            "error": "missing-creator-id",
+        }
 
     try:
-        resolved_context = context or get_affiliate_page_context(store_id)
+        raise_if_cancelled(cancel_check)
+        resolved_context = context or get_affiliate_page_context(
+            store_id,
+            **(
+                {"cancel_check": cancel_check}
+                if cancel_check is not None
+                else {}
+            ),
+        )
         payloads_by_type: dict[int, dict[str, Any]] = {}
         for profile_type in PROFILE_TYPES:
-            payloads_by_type[profile_type] = request_json(
+            raise_if_cancelled(cancel_check)
+            request_kwargs = {"context": resolved_context}
+            if cancel_check is not None:
+                request_kwargs["cancel_check"] = cancel_check
+            response_payload = request_json(
                 store_id,
                 CREATOR_PROFILE_ENDPOINT,
                 build_creator_profile_request(creator_id, profile_type),
-                context=resolved_context,
+                **request_kwargs,
             )
+            if not isinstance(response_payload, dict):
+                raise PageApiSchemaError(
+                    f"profile_type={profile_type} 响应不是对象: "
+                    f"{type(response_payload).__name__}"
+                )
+            business_code = response_payload.get("code")
+            if business_code is not None and business_code != 0:
+                raise PageApiBusinessError(
+                    CREATOR_PROFILE_ENDPOINT,
+                    business_code,
+                    str(response_payload.get("message") or ""),
+                )
+            payloads_by_type[profile_type] = response_payload
+            raise_if_cancelled(cancel_check)
         detail = parse_creator_profile_payloads(payloads_by_type)
+    except OperationCancelled:
+        raise
+    except PageApiBusinessError as error:
+        return {
+            "ok": False,
+            "read_status": "failed",
+            "error_type": "profile-business-error",
+            "business_code": error.business_code,
+            "endpoint": error.endpoint,
+            "error": str(error),
+        }
+    except PageApiSchemaError as error:
+        return {
+            "ok": False,
+            "read_status": "failed",
+            "error_type": "profile-schema-error",
+            "error": str(error),
+        }
     except Exception as error:
         return {
             "ok": False,
+            "read_status": "failed",
+            "error_type": "profile-read-error",
             "error": f"{type(error).__name__}: {error}",
         }
 
     return {
         "ok": True,
+        "read_status": "complete",
         "detail": detail,
         "opened": {"via": "api", "profile_types": list(PROFILE_TYPES)},
     }

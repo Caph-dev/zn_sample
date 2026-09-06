@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .debug_log import debug_log
+from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .sample_dom import assert_on_pending_list
 from .sync_errors import SellerNavigationTimeout, SellerPageReadinessTimeout
 from .time_budget import (
@@ -29,6 +30,24 @@ SAMPLE_REQUEST_URL = (
 )
 # 订单页 SPA 会先闪到样品申请再弹回；连续两次同一 href 才算站住。
 STABLE_DESTINATION_POLLS = 2
+
+
+def _sleep_with_cancel(
+    deadline: float,
+    duration: float,
+    cancel_check: Callable[[], bool] | None,
+) -> bool:
+    """Sleep in short slices so a read-only job can react to cancellation."""
+    if cancel_check is None:
+        return sleep_until_next_probe(deadline, duration)
+    sleep_deadline = min(deadline, time.monotonic() + max(0.0, duration))
+    while True:
+        raise_if_cancelled(cancel_check)
+        remaining = sleep_deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(0.2, remaining))
+
 
 INSPECT_NAVIGATION_PAGE_JS = r"""
 (() => {
@@ -326,6 +345,7 @@ def navigate_to_url(
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
     deadline: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """当前已在目标页则跳过；否则异步 replace 后短轮询 href。
 
@@ -336,6 +356,7 @@ def navigate_to_url(
         deadline if deadline is not None else deadline_from_timeout(timeout)
     )
     current_href = ""
+    raise_if_cancelled(cancel_check)
     try:
         probe_timeout = min(
             HREF_PROBE_TIMEOUT_SECONDS,
@@ -348,8 +369,11 @@ def navigate_to_url(
                 timeout=probe_timeout,
                 deadline=resolved_deadline,
             )
+    except OperationCancelled:
+        raise
     except Exception:
         current_href = ""
+    raise_if_cancelled(cancel_check)
     if href_matches(current_href):
         # region agent log
         debug_log(
@@ -363,6 +387,23 @@ def navigate_to_url(
         return {"ok": True, "href": current_href, "already": True, "target_url": url}
 
     navigator = navigate_page_fn or schedule_page_navigation
+
+    def invoke_navigation() -> dict[str, Any]:
+        if navigator is schedule_page_navigation:
+            return schedule_page_navigation(
+                store_id,
+                url,
+                execute_script_fn=execute_script_fn,
+                deadline=resolved_deadline,
+                cancel_check=cancel_check,
+            )
+        return navigator(
+            store_id,
+            url,
+            execute_script_fn=execute_script_fn,
+        )
+
+    raise_if_cancelled(cancel_check)
     # region agent log
     debug_log(
         "navigate-start",
@@ -374,11 +415,10 @@ def navigate_to_url(
     )
     # endregion
     try:
-        navigator(
-            store_id,
-            url,
-            execute_script_fn=execute_script_fn,
-        )
+        invoke_navigation()
+        raise_if_cancelled(cancel_check)
+    except OperationCancelled:
+        raise
     except Exception as error:
         # 导航调度 TimeoutExpired 不能盲目重放：第一次调用可能已经安排了
         # location.replace。先短 probe 当前页，已到目标页则视为成功。
@@ -397,6 +437,8 @@ def navigate_to_url(
                     timeout=probe_timeout,
                     deadline=resolved_deadline,
                 )
+        except OperationCancelled:
+            raise
         except Exception:
             probed_href = ""
         if href_matches(probed_href):
@@ -411,17 +453,14 @@ def navigate_to_url(
             # endregion
             return {"ok": True, "href": probed_href, "already": False, "target_url": url}
         if remaining_seconds(resolved_deadline) >= 1.0:
-            navigator(
-                store_id,
-                url,
-                execute_script_fn=execute_script_fn,
-            )
+            raise_if_cancelled(cancel_check)
+            invoke_navigation()
         else:
             raise
     # 跨域跳转会卸页；立刻 execute_script 常卡死并把整段等待吃掉。
     # 样品申请 → seller.us 实测约 2.5s 后 href 才变成订单页，先硬等再轮询。
     settle_seconds = max(2.0, min(3.5, poll_interval * 4)) if timeout >= 5 else max(0.2, poll_interval)
-    if not sleep_until_next_probe(resolved_deadline, settle_seconds):
+    if not _sleep_with_cancel(resolved_deadline, settle_seconds, cancel_check):
         raise SellerNavigationTimeout(
             f"页面导航 settle 等待耗尽 deadline: target={url[:180]}"
         )
@@ -432,6 +471,7 @@ def navigate_to_url(
             deadline=resolved_deadline,
             poll_interval=poll_interval,
             execute_script_fn=execute_script_fn,
+            cancel_check=cancel_check,
         )
     except Exception as error:
         # region agent log
@@ -472,6 +512,7 @@ def wait_for_page_href(
     poll_interval: float = 0.5,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     deadline: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> str:
     """短轮询当前 href，直到命中目标页。不使用阻塞 visit_page。
 
@@ -484,6 +525,7 @@ def wait_for_page_href(
     last_href = ""
     last_error = ""
     while True:
+        raise_if_cancelled(cancel_check)
         remaining = remaining_seconds(resolved_deadline)
         if remaining <= 0:
             break
@@ -500,9 +542,14 @@ def wait_for_page_href(
         except Exception as error:
             last_error = str(error)
             last_href = ""
-            if not sleep_until_next_probe(resolved_deadline, max(0.2, poll_interval)):
+            if not _sleep_with_cancel(
+                resolved_deadline,
+                max(0.2, poll_interval),
+                cancel_check,
+            ):
                 break
             continue
+        raise_if_cancelled(cancel_check)
         if is_ziniao_navigation_error_href(last_href):
             raise RuntimeError(
                 "订单页跳转被紫鸟拦截，停在 error.html；"
@@ -510,7 +557,11 @@ def wait_for_page_href(
             )
         if href_matches(last_href):
             return last_href
-        if not sleep_until_next_probe(resolved_deadline, max(0.2, poll_interval)):
+        if not _sleep_with_cancel(
+            resolved_deadline,
+            max(0.2, poll_interval),
+            cancel_check,
+        ):
             break
     raise SellerNavigationTimeout(
         "页面跳转超时。"
@@ -528,6 +579,7 @@ def navigate_to_sample_request(
     poll_interval: float = 0.5,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
     navigate_page_fn: Callable[..., dict[str, Any]] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """已在样品申请页则直接返回；否则异步跳转并短轮询，避免 visit_page 假死。"""
     return navigate_to_url(
@@ -538,6 +590,7 @@ def navigate_to_sample_request(
         poll_interval=poll_interval,
         execute_script_fn=execute_script_fn,
         navigate_page_fn=navigate_page_fn,
+        cancel_check=cancel_check,
     )
 
 
@@ -546,8 +599,11 @@ def schedule_page_navigation(
     url: str,
     *,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
+    deadline: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """先返回执行结果，再异步导航，避免页面销毁导致 Bridge 假 network。"""
+    raise_if_cancelled(cancel_check)
     navigation_script = f"""
 (() => {{
   const targetUrl = {json.dumps(url, ensure_ascii=False)};
@@ -562,12 +618,14 @@ def schedule_page_navigation(
   return JSON.stringify({{ok: true, scheduled: true, target_url: targetUrl}});
 }})()
 """
-    result = execute_script_fn(
-        store_id,
-        navigation_script,
-        timeout=30,
-        retries=1,
-    )
+    timeout = 30
+    if deadline is not None:
+        timeout = max(1, min(timeout, int(remaining_seconds(deadline))))
+    execute_kwargs = {"timeout": timeout, "retries": 1}
+    if deadline is not None:
+        execute_kwargs["deadline"] = deadline
+    result = execute_script_fn(store_id, navigation_script, **execute_kwargs)
+    raise_if_cancelled(cancel_check)
     if not isinstance(result, dict) or not result.get("ok"):
         raise RuntimeError(f"安排页面导航失败: {result!r}"[:300])
     return result
@@ -579,25 +637,35 @@ def _wait_for_sample_request_destination(
     navigation_timeout: float,
     poll_interval: float,
     execute_script_fn: Callable[..., Any],
+    cancel_check: Callable[[], bool] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, str]:
-    deadline = deadline_from_timeout(max(1.0, navigation_timeout))
+    resolved_deadline = deadline or deadline_from_timeout(max(1.0, navigation_timeout))
     destination_state: dict[str, Any] = {}
     last_validation_error = ""
     stable_href = ""
     stable_count = 0
-    while remaining_seconds(deadline) > 0:
+    while remaining_seconds(resolved_deadline) > 0:
+        raise_if_cancelled(cancel_check)
         try:
+            if remaining_seconds(resolved_deadline) < 0.5:
+                break
             candidate_state = execute_script_fn(
                 store_id,
                 INSPECT_NAVIGATION_PAGE_JS,
                 timeout=HREF_PROBE_TIMEOUT_SECONDS,
                 retries=0,
+                deadline=resolved_deadline,
+                operation="sample_request_destination_probe",
             )
+        except OperationCancelled:
+            raise
         except Exception as error:
             candidate_state = None
             last_validation_error = str(error)
             stable_href = ""
             stable_count = 0
+        raise_if_cancelled(cancel_check)
         if isinstance(candidate_state, dict):
             destination_state = candidate_state
             try:
@@ -615,7 +683,11 @@ def _wait_for_sample_request_destination(
                     stable_count = 1
                 if stable_count >= STABLE_DESTINATION_POLLS:
                     return destination_context
-        if not sleep_until_next_probe(deadline, max(0.2, poll_interval)):
+        if not _sleep_with_cancel(
+            resolved_deadline,
+            max(0.2, poll_interval),
+            cancel_check,
+        ):
             break
     raise RuntimeError(
         "自动导航样品申请页超时。"
@@ -632,6 +704,7 @@ def ensure_sample_request_context(
     poll_interval: float = 1.5,
     navigate_page_fn: Callable[[str, str], dict[str, Any]] = schedule_page_navigation,
     execute_script_fn: Callable[..., Any] = zclaw_exec,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """从已登录商家中心任意子页跳到样品申请，并等到 URL 带上 shop_id。
 
@@ -639,12 +712,14 @@ def ensure_sample_request_context(
     实测样品申请页 SPA 加载期 execute_script 可阻塞 5–24s、到 complete 约
     60s，预算必须覆盖加载期（45s 时探测全部超时、连 href 稳定都等不到）。
     """
+    raise_if_cancelled(cancel_check)
     initial_state = execute_script_fn(
         store_id,
         INSPECT_NAVIGATION_PAGE_JS,
         timeout=30,
         retries=1,
     )
+    raise_if_cancelled(cancel_check)
     if not isinstance(initial_state, dict):
         raise RuntimeError(f"无法识别当前店铺页面: {initial_state!r}"[:300])
     initial_page_type = validate_navigation_start(initial_state)
@@ -663,10 +738,24 @@ def ensure_sample_request_context(
 
     # 筛查显式导航始终访问规范 URL，避免上次扫表停在中间分页后从该页续扫。
     navigation_deadline = deadline_from_timeout(max(1.0, navigation_timeout))
-    navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
-    if not sleep_until_next_probe(
+    raise_if_cancelled(cancel_check)
+
+    if navigate_page_fn is schedule_page_navigation:
+        schedule_page_navigation(
+            store_id,
+            SAMPLE_REQUEST_URL,
+            execute_script_fn=execute_script_fn,
+            deadline=navigation_deadline,
+            cancel_check=cancel_check,
+        )
+    else:
+        navigate_page_fn(store_id, SAMPLE_REQUEST_URL)
+
+    raise_if_cancelled(cancel_check)
+    if not _sleep_with_cancel(
         navigation_deadline,
         max(2.0, poll_interval) if force_reload else max(2.0, min(poll_interval, 4.0)),
+        cancel_check,
     ):
         raise RuntimeError("样品申请页导航 settle 等待耗尽 deadline")
     destination_context = _wait_for_sample_request_destination(
@@ -674,6 +763,7 @@ def ensure_sample_request_context(
         navigation_timeout=navigation_timeout,
         poll_interval=poll_interval,
         execute_script_fn=execute_script_fn,
+        cancel_check=cancel_check,
     )
     return {
         "ok": True,

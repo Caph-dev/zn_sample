@@ -422,12 +422,17 @@
     }
 
     if (job.job_type === "creator_enrich") {
-      return [
+      const resultEntries = [
         ["待补齐", `${formatNumber(result.missing)} 位达人`],
         ["类型补齐", `${formatNumber(result.type_filled)} 位`],
         ["语言补齐", `${formatNumber(result.language_filled)} 位`],
         ["补齐失败", `${formatNumber(result.failed)} 位`],
       ];
+      if (result.stopped_early) {
+        resultEntries.push(["提前停止", result.stop_reason || "连续资料读取失败"]);
+        resultEntries.push(["未处理", `${formatNumber(result.unprocessed)} 项`]);
+      }
+      return resultEntries;
     }
 
     if (job.job_type === "environment_check") {

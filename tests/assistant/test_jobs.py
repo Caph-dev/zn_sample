@@ -464,6 +464,27 @@ class JobWorkerTests(JobTestCase):
         job = self.get_job(job_id)
         self.assertEqual(job.status, "cancelled")
 
+    def test_cancelled_job_keeps_partial_result_summary(self) -> None:
+        job_id = self.add_job()
+
+        def cancelled_handler(_job_id: str, _session_factory) -> str:
+            from assistant.jobs.registry import JobCancelled
+
+            raise JobCancelled(
+                "cancelled after checkpoint",
+                result_summary='{"type_filled": 1, "cancelled": true}',
+            )
+
+        with patch.object(worker_module, "get_handler", return_value=cancelled_handler):
+            worker_loop_once(self.session_factory)
+
+        job = self.get_job(job_id)
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(
+            json.loads(job.result_summary),
+            {"type_filled": 1, "cancelled": True},
+        )
+
 
 class JobProgressTests(JobTestCase):
     def test_list_events_after_sequence(self) -> None:

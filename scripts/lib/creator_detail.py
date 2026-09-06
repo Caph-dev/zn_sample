@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
+from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .parse_metrics import parse_count, parse_money, parse_percent
-from .zclaw import visit_page, zclaw_exec
+from .zclaw import HREF_PROBE_TIMEOUT_SECONDS, visit_page, zclaw_exec
 
 # 禁止在详情/列表误点的文案
 FORBIDDEN_CLICK_RE = re.compile(r"同意|批准|Approve|Reject|拒绝|发货|同意申请")
@@ -26,6 +28,19 @@ EXTRACT_DETAIL_JS = r"""
   //   直播 GPM\n$0.00\n直播数\n3\n平均直播播放量\n2570\n直播平均互动率\n115.29%
   // 禁止再用「整段标签之后再取第一个 $」：会把直播区的 $0 误当成视频 GPM。
   const text = ((document.body && document.body.innerText) || '').replace(/\u00a0/g, ' ');
+
+  const loadErrorMatchers = [
+    { pattern: /数据加载失败，请稍后刷新/i, type: 'page-data-unavailable', message: '数据加载失败，请稍后刷新' },
+    { pattern: /data loading failed/i, type: 'page-data-unavailable', message: 'Data loading failed' },
+    { pattern: /server error/i, type: 'page-data-unavailable', message: 'Server error' },
+  ];
+  let loadError = loadErrorMatchers.find(({ pattern }) => pattern.test(text));
+  if (!loadError && /出错了|something went wrong/i.test(text) && /重试|retry/i.test(text)) {
+    loadError = {
+      type: 'page-data-unavailable',
+      message: '详情页显示加载错误并要求重试',
+    };
+  }
 
   const moneyToken = '\\$\\s*[0-9][0-9,]*(?:\\.[0-9]+)?[kKmM]?';
   const countToken = '[0-9][0-9,]*(?:\\.[0-9]+)?[kKmM万]?';
@@ -210,6 +225,9 @@ EXTRACT_DETAIL_JS = r"""
   return JSON.stringify({
     href: location.href,
     title: document.title || '',
+    detail_read_status: loadError ? 'page-data-unavailable' : 'complete',
+    detail_error_type: loadError ? loadError.type : '',
+    detail_error_message: loadError ? loadError.message : '',
     bio: bio || '',
     video_gpm: video_gpm || '',
     live_gpm: live_gpm || '',
@@ -350,15 +368,40 @@ def _normalize_detail_numbers(ret: dict) -> dict:
     return ret
 
 
-def extract_creator_detail(store_id: str, *, retries: int = 2, retry_wait: float = 1.5) -> dict:
+def extract_creator_detail(
+    store_id: str,
+    *,
+    retries: int = 2,
+    retry_wait: float = 1.5,
+    read_timeout: int = HREF_PROBE_TIMEOUT_SECONDS,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict:
     """从当前详情页抽取指标；视频/直播 GPM 为空时短暂重试（卡片懒加载）。"""
     last: dict | None = None
     attempts = max(1, retries + 1)
+    read_deadline = time.monotonic() + max(1.0, float(read_timeout))
     for attempt in range(attempts):
-        ret = zclaw_exec(store_id, EXTRACT_DETAIL_JS, retries=2)
+        raise_if_cancelled(cancel_check)
+        remaining_read_time = read_deadline - time.monotonic()
+        if remaining_read_time <= 0:
+            break
+        ret = zclaw_exec(
+            store_id,
+            EXTRACT_DETAIL_JS,
+            timeout=max(1, min(int(read_timeout), int(remaining_read_time))),
+            retries=2,
+            retry_timeout_expired=True,
+            deadline=read_deadline,
+            operation="creator_detail_extract",
+        )
+        raise_if_cancelled(cancel_check)
         if not isinstance(ret, dict):
             raise RuntimeError(f"extract detail bad: {ret!r}"[:300])
         last = _normalize_detail_numbers(ret)
+        if last.get("detail_read_status") == "page-data-unavailable":
+            # The page has explicitly reported a failed data request. Repeating
+            # the same DOM read cannot turn that response into valid metrics.
+            return last
         has_core = (
             last.get("video_gpm_n") is not None
             or last.get("live_gpm_n") is not None
@@ -371,7 +414,13 @@ def extract_creator_detail(store_id: str, *, retries: int = 2, retry_wait: float
         if has_core and not card_visible:
             return last
         if attempt + 1 < attempts:
-            time.sleep(retry_wait)
+            retry_deadline = min(
+                read_deadline,
+                time.monotonic() + max(0.0, retry_wait),
+            )
+            while time.monotonic() < retry_deadline:
+                raise_if_cancelled(cancel_check)
+                time.sleep(min(0.2, retry_deadline - time.monotonic()))
     assert last is not None
     return last
 
@@ -418,9 +467,25 @@ def fetch_detail_for_row(
 
     try:
         detail = extract_creator_detail(store_id)
+    except OperationCancelled:
+        raise
     except Exception as e:
         go_back_to_list(store_id, list_href)
         return {"ok": False, "error": str(e)}
+
+    if detail.get("detail_read_status") == "page-data-unavailable":
+        go_back_to_list(store_id, list_href)
+        error_message = str(
+            detail.get("detail_error_message") or "详情页资料加载失败"
+        )
+        return {
+            "ok": False,
+            "error_type": str(
+                detail.get("detail_error_type") or "page-data-unavailable"
+            ),
+            "error": f"详情页资料读取失败：{error_message}",
+            "detail": detail,
+        }
 
     # 确认在详情页：URL 含 creator/detail，或已抽出视频/直播/整体 GPM
     href = str(detail.get("href") or "")

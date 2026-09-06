@@ -28,6 +28,7 @@ from lib.sample_navigation import (  # noqa: E402
     validate_sample_request_destination,
 )
 from lib.sync_errors import SellerNavigationTimeout, SellerPageReadinessTimeout  # noqa: E402
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 
 SAMPLE_HREF = (
     "https://affiliate.tiktokshopglobalselling.com/"
@@ -154,6 +155,28 @@ class SampleNavigationValidationTests(unittest.TestCase):
 
 
 class SampleNavigationFlowTests(unittest.TestCase):
+    def test_href_polling_stops_at_cancellation_checkpoint(self) -> None:
+        cancellation_checks = 0
+
+        def cancel_after_probe() -> bool:
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            return cancellation_checks > 1
+
+        execute_script = Mock(return_value={"href": "https://example.com/"})
+
+        with self.assertRaises(OperationCancelled):
+            wait_for_page_href(
+                "store-two",
+                href_matches=lambda _href: False,
+                timeout=1,
+                poll_interval=0.01,
+                execute_script_fn=execute_script,
+                cancel_check=cancel_after_probe,
+            )
+
+        execute_script.assert_called_once()
+
     def test_href_probes_use_measured_timeout_constant(self) -> None:
         from inspect import signature
 

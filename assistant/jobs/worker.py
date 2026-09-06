@@ -193,8 +193,13 @@ def worker_loop_once(session_factory) -> str | None:
     heartbeat_thread.start()
     try:
         result_summary = handler(job_id, session_factory)
-    except JobCancelled:
-        _finish_job(session_factory, job_id, status="cancelled")
+    except JobCancelled as error:
+        _finish_job(
+            session_factory,
+            job_id,
+            status="cancelled",
+            result_summary=error.result_summary,
+        )
         append_event(
             session_factory,
             job_id,

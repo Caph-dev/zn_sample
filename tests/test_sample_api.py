@@ -13,9 +13,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from lib.page_api import (  # noqa: E402
     SAMPLE_LIST_ENDPOINT,
     AffiliatePageContext,
+    PageApiBusinessError,
     PageApiError,
     post_read_json,
 )
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 from lib.sample_api import (  # noqa: E402
     build_pending_list_request,
     check_pending_application_api,
@@ -329,6 +331,57 @@ class PageApiTransportTests(unittest.TestCase):
                     retries=0,
                     poll_interval_seconds=0.01,
                 )
+
+    def test_transport_preserves_business_error_code(self) -> None:
+        with patch(
+            "lib.page_api.zclaw_exec",
+            side_effect=[
+                {"ok": True, "started": True, "request_id": "request-test"},
+                {
+                    "done": True,
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"code": 100000},
+                },
+            ],
+        ):
+            with self.assertRaises(PageApiBusinessError) as raised:
+                post_read_json(
+                    "store-test",
+                    SAMPLE_LIST_ENDPOINT,
+                    build_pending_list_request(1),
+                    context=AffiliatePageContext(
+                        href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                        shop_id="shop-test",
+                        shop_region="US",
+                    ),
+                    retries=0,
+                    poll_interval_seconds=0.01,
+                )
+
+        self.assertEqual(raised.exception.business_code, 100000)
+        self.assertIn("code=100000", str(raised.exception))
+
+    def test_transport_cancellation_is_not_retried_or_reclassified(self) -> None:
+        execute_script = patch(
+            "lib.page_api.zclaw_exec",
+            side_effect=OperationCancelled("test cancellation"),
+        )
+        with execute_script as mocked_execute:
+            with self.assertRaises(OperationCancelled):
+                post_read_json(
+                    "store-test",
+                    SAMPLE_LIST_ENDPOINT,
+                    build_pending_list_request(1),
+                    context=AffiliatePageContext(
+                        href="https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request?shop_id=shop-test&shop_region=US",
+                        shop_id="shop-test",
+                        shop_region="US",
+                    ),
+                    poll_interval_seconds=0.01,
+                )
+
+        mocked_execute.assert_called_once()
 
     def test_transport_rejects_unregistered_endpoint(self) -> None:
         with self.assertRaises(PageApiError):

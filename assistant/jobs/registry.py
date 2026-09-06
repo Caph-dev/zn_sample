@@ -12,6 +12,7 @@ ZINIAO_JOB_TYPES = frozenset(
         "shipment_sync",
         "daily_refresh",
         "content_thanks_preview",
+        "creator_enrich",
         "operator_prepare",
         "operator_screen",
         "operator_pipeline",
@@ -46,6 +47,10 @@ class HandlerFailure(RuntimeError):
 
 class JobCancelled(RuntimeError):
     """Raised at a safe read-only cancellation checkpoint."""
+
+    def __init__(self, message: str = "", *, result_summary: str = "") -> None:
+        super().__init__(message)
+        self.result_summary = result_summary
 
 
 def get_handler(job_type: str) -> JobHandler | None:

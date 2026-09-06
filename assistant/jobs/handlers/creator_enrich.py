@@ -38,7 +38,9 @@ def run_creator_enrich(job_id: str, session_factory) -> str:
     def progress(current: int, total: int, message: str) -> None:
         update_progress(session_factory, job_id, current=current, total=total, message=message)
 
+    cancel_check()
     store_id = resolve_readonly_store(session_factory)
+    cancel_check()
     update_progress(session_factory, job_id, current=0, total=1, message="补齐达人资料")
     result = CreatorEnrichService(
         session_factory,
