@@ -246,7 +246,29 @@ CLICK_NEW_MESSAGE_RESULT_JS_TMPL = r"""
     if (value && typeof value === 'object' && 'value' in value) return value.value;
     return value;
   };
+  const identityFromItem = item => {
+    if (!item || typeof item !== 'object') {
+      return {creatorId: '', handle: '', nickname: ''};
+    }
+    const creatorId = String(unwrapField(item.creator_oecuid) || '').trim();
+    const handle = String(unwrapField(item.handle) || '').trim();
+    const nickname = String(unwrapField(item.nickname) || '').trim();
+    return {creatorId, handle, nickname};
+  };
+  const identityFilled = ident => !!(ident && (ident.creatorId || ident.handle || ident.nickname));
+  // 与 search_result_identity_from_data_source 对齐：多条列表按行第一行绑定，不用 [0]。
+  const rowOwnsItem = (ident, firstLine) => {
+    if (!identityFilled(ident) || !firstLine) return false;
+    const fields = [ident.creatorId, ident.handle, ident.nickname]
+      .map(value => String(value || '').toLowerCase())
+      .filter(Boolean);
+    if (fields.includes(firstLine)) return true;
+    const stripped = firstLine.replace(/\.+$/, '');
+    if (stripped.length < 4 || stripped === firstLine) return false;
+    return fields.some(value => value.startsWith(stripped));
+  };
   const resultIdentity = element => {
+    const firstLine = String(element.innerText || '').toLowerCase().split('\n')[0].trim();
     const fiberKey = Object.keys(element).find(key =>
       key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
     );
@@ -254,14 +276,18 @@ CLICK_NEW_MESSAGE_RESULT_JS_TMPL = r"""
     for (let depth = 0; depth < 16 && fiber; depth++, fiber = fiber.return) {
       const props = fiber.memoizedProps || {};
       const dataSource = props.dataSource;
-      const item = Array.isArray(dataSource) ? dataSource[0] : dataSource;
-      if (!item || typeof item !== 'object') continue;
-      const creatorId = String(unwrapField(item.creator_oecuid) || '').trim();
-      const handle = String(unwrapField(item.handle) || '').trim();
-      const nickname = String(unwrapField(item.nickname) || '').trim();
-      if (creatorId || handle || nickname) {
-        return {creatorId, handle, nickname};
+      let item = null;
+      if (Array.isArray(dataSource)) {
+        if (dataSource.length === 1) {
+          item = dataSource[0];
+        } else {
+          item = dataSource.find(entry => rowOwnsItem(identityFromItem(entry), firstLine)) || null;
+        }
+      } else {
+        item = dataSource;
       }
+      const ident = identityFromItem(item);
+      if (identityFilled(ident)) return ident;
     }
     return {creatorId: '', handle: '', nickname: ''};
   };
@@ -408,6 +434,60 @@ def conversation_matches(
     if name and selected_name == name:
         return True
     return False
+
+
+def search_result_identity_from_data_source(
+    data_source: Any,
+    row_text: str,
+) -> dict[str, str]:
+    """给这一行结果挑 dataSource 项。多条列表禁止默认 [0]。"""
+    empty = {"creatorId": "", "handle": "", "nickname": ""}
+
+    def unwrap(value: Any) -> str:
+        if isinstance(value, dict) and "value" in value:
+            value = value["value"]
+        return str(value or "").strip()
+
+    def from_item(item: Any) -> dict[str, str]:
+        if not isinstance(item, dict):
+            return dict(empty)
+        return {
+            "creatorId": unwrap(item.get("creator_oecuid")),
+            "handle": unwrap(item.get("handle")),
+            "nickname": unwrap(item.get("nickname")),
+        }
+
+    def filled(ident: dict[str, str]) -> bool:
+        return bool(ident["creatorId"] or ident["handle"] or ident["nickname"])
+
+    first_line = next(iter(str(row_text or "").lower().splitlines()), "").strip()
+
+    def row_owns(ident: dict[str, str]) -> bool:
+        if not filled(ident) or not first_line:
+            return False
+        fields = [
+            value.lower()
+            for value in (ident["creatorId"], ident["handle"], ident["nickname"])
+            if value
+        ]
+        if first_line in fields:
+            return True
+        stripped = first_line.rstrip(".")
+        if len(stripped) < 4 or stripped == first_line:
+            return False
+        return any(value.startswith(stripped) for value in fields)
+
+    if isinstance(data_source, list):
+        if len(data_source) == 1:
+            ident = from_item(data_source[0])
+            return ident if filled(ident) else dict(empty)
+        for entry in data_source:
+            ident = from_item(entry)
+            if row_owns(ident):
+                return ident
+        return dict(empty)
+    ident = from_item(data_source)
+    return ident if filled(ident) else dict(empty)
 
 
 def im_thread_text(probe: dict[str, Any] | None) -> str:

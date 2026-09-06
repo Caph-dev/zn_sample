@@ -17,6 +17,7 @@ from lib.im_dom import (  # noqa: E402
     im_thread_text,
     inspect_current_thread,
     open_conversation_via_new_message,
+    search_result_identity_from_data_source,
     thread_has_named_intro,
     thread_looks_stale,
 )
@@ -174,6 +175,51 @@ class ImOpenPathTests(unittest.TestCase):
         self.assertIn("current_user_id", INSPECT_IM_JS)
         self.assertIn("current_conversation_id", INSPECT_IM_JS)
         self.assertIn("current_screen_name", INSPECT_IM_JS)
+
+    def test_new_message_result_identity_binds_array_item_to_row(self) -> None:
+        script = CLICK_NEW_MESSAGE_RESULT_JS_TMPL
+        self.assertNotIn(
+            "Array.isArray(dataSource) ? dataSource[0] : dataSource",
+            script,
+        )
+        self.assertIn("dataSource.length === 1", script)
+        self.assertIn("rowOwnsItem", script)
+        self.assertIn("firstLine", script)
+        self.assertIn("identityFromItem", script)
+        data_source = [
+            {"creator_oecuid": "id-alice", "handle": "alice", "nickname": "Alice"},
+            {"creator_oecuid": "id-bob", "handle": "bob", "nickname": "Bob"},
+        ]
+        self.assertEqual(
+            search_result_identity_from_data_source(
+                data_source, "bob\nHi alice, thanks"
+            )["creatorId"],
+            "id-bob",
+        )
+        self.assertEqual(
+            search_result_identity_from_data_source(
+                data_source, "alice\nLast message"
+            )["creatorId"],
+            "id-alice",
+        )
+        self.assertEqual(
+            search_result_identity_from_data_source(
+                data_source, "nobody\nHi bob"
+            )["creatorId"],
+            "",
+        )
+        self.assertEqual(
+            search_result_identity_from_data_source(
+                [data_source[0]], "bob\nHi"
+            )["creatorId"],
+            "id-alice",
+        )
+        self.assertEqual(
+            search_result_identity_from_data_source(
+                data_source, "alic...\nHola"
+            )["creatorId"],
+            "id-alice",
+        )
 
     @patch("lib.im_dom.inspect_im")
     @patch("lib.im_dom.time.sleep", return_value=None)
