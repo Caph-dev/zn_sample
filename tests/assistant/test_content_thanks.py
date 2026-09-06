@@ -332,6 +332,7 @@ class ContentThanksServiceTests(unittest.TestCase):
         self.assertFalse(result["rows"][0]["send"])
         self.assertEqual(len(sent), 1)
         self.assertFalse(sent[0]["kwargs"]["execute"])
+        self.assertEqual(sent[0]["kwargs"]["creator_id"], "c1")
         self.assertEqual(feishu_writes, [])
 
     def test_handler_and_api_are_registered(self) -> None:

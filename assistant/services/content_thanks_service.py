@@ -192,6 +192,7 @@ class ContentThanksService:
         thread_text = ""
         thread_checked = False
         content_url = ""
+        creator_id = ""
         if completed_match is None and creator_handle:
             completed_match = self._search_completed(store_id, creator_handle, sample_case)
         if completed_match is None:
@@ -252,6 +253,7 @@ class ContentThanksService:
                     shop_id=shop_id,
                     sample_case=sample_case,
                     creator_handle=creator_handle,
+                    creator_id=creator_id,
                     body=str(preview["message"]),
                 )
         row = {
@@ -520,6 +522,7 @@ class ContentThanksService:
         sample_case: SampleCase | None,
         creator_handle: str,
         body: str,
+        creator_id: str = "",
     ) -> dict[str, Any]:
         sender = self.send_message
         if sender is None:
@@ -528,7 +531,7 @@ class ContentThanksService:
             store_id,
             body,
             creator_name=creator_handle,
-            creator_id=str(sample_case.creator_id or "") if sample_case else "",
+            creator_id=creator_id or (str(sample_case.creator_id or "") if sample_case else ""),
             shop_id=shop_id,
             execute=False,
         )
