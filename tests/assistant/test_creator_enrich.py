@@ -20,7 +20,6 @@ from assistant.jobs.registry import JobCancelled
 from assistant.services.creator_enrich_service import (
     CreatorReadOutcome,
     CreatorEnrichService,
-    MAX_CONSECUTIVE_PROFILE_READ_FAILURES,
     is_missing_creator_type,
     is_missing_language,
 )
@@ -145,11 +144,10 @@ class CreatorEnrichTests(unittest.TestCase):
 
         self.assertEqual(result["failed"], 0)
         self.assertEqual(result["type_filled"], 0)
-        self.assertFalse(result["stopped_early"])
         self.assertFalse(any("两侧都没有可用数据" in message for message in warnings))
 
-    def test_stops_after_consecutive_profile_read_failures(self) -> None:
-        for index in range(MAX_CONSECUTIVE_PROFILE_READ_FAILURES + 2):
+    def test_consecutive_profile_read_failures_do_not_stop_the_run(self) -> None:
+        for index in range(5):
             self.add_case(
                 apply_id=f"profile-failure-{index}",
                 creator_id=f"creator-profile-failure-{index}",
@@ -174,53 +172,14 @@ class CreatorEnrichTests(unittest.TestCase):
                 store_id="store-test",
             ).enrich()
 
-        self.assertEqual(fetch_api.call_count, MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
-        self.assertEqual(result["type_failures"], MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
-        self.assertTrue(result["stopped_early"])
-        self.assertEqual(
-            result["unprocessed"],
-            2,
-        )
+        self.assertEqual(fetch_api.call_count, 5)
+        self.assertEqual(result["type_failures"], 5)
+        self.assertEqual(result["failed"], 5)
+        self.assertEqual(result["unprocessed"], 0)
 
-    def test_duplicate_creator_does_not_consume_another_breaker_slot(self) -> None:
-        for apply_id, creator_id in (
-            ("duplicate-a-1", "creator-duplicate"),
-            ("duplicate-a-2", "creator-duplicate"),
-            ("duplicate-b", "creator-b"),
-            ("duplicate-c", "creator-c"),
-            ("duplicate-d", "creator-d"),
-        ):
-            self.add_case(
-                apply_id=apply_id,
-                creator_id=creator_id,
-                language="en",
-            )
-        fetch_api = Mock(
-            return_value={
-                "ok": False,
-                "error_type": "profile-business-error",
-                "error": "业务失败 code=100000 message=",
-            }
-        )
-        with (
-            patch("lib.creator_api.fetch_creator_detail_api", fetch_api),
-            patch(
-                "lib.sample_navigation.ensure_sample_request_context",
-                return_value={"ok": True, "already": True},
-            ),
-        ):
-            result = CreatorEnrichService(
-                self.session_factory,
-                store_id="store-test",
-            ).enrich()
-
-        self.assertEqual(fetch_api.call_count, 4)
-        self.assertTrue(result["stopped_early"])
-        self.assertEqual(result["unprocessed"], 1)
-
-    def test_mixed_profile_error_types_still_trip_the_same_breaker(self) -> None:
+    def test_mixed_profile_error_types_are_all_attempted(self) -> None:
         # 不同具体错误码（业务失败/结构失败/传输失败）都属于同一次资料服务
-        # 故障，必须连续计数，不能因为错误码变化而绕过熔断。
+        # 故障，逐个记失败并继续，不因错误码变化而提前停止。
         error_types = [
             "profile-business-error",
             "profile-schema-error",
@@ -250,8 +209,9 @@ class CreatorEnrichTests(unittest.TestCase):
                 store_id="store-test",
             ).enrich()
 
-        self.assertEqual(fetch_api.call_count, MAX_CONSECUTIVE_PROFILE_READ_FAILURES)
-        self.assertTrue(result["stopped_early"])
+        self.assertEqual(fetch_api.call_count, 3)
+        self.assertEqual(result["type_failures"], 3)
+        self.assertEqual(result["unprocessed"], 0)
 
     def test_detail_page_load_failure_is_not_empty_metrics(self) -> None:
         case = self.add_case(

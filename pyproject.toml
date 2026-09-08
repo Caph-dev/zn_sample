@@ -18,3 +18,8 @@ dependencies = [
     "watchfiles==1.2.0",
     "websockets==17.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

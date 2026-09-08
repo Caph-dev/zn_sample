@@ -1,0 +1,11 @@
+{
+  "source": "TikHub app/v3/fetch_user_post_videos, alelisbeautynails, 2026-09-06; minimized to parsed fields",
+  "video_id": "7679893219106131230",
+  "anchors": [
+    {
+      "type": 35,
+      "component_key": "anchor_complex_shop",
+      "extra": "[{\"type\":33,\"component_key\":\"anchor_shop\",\"id\":\"1729840619138750658\",\"extra\":\"{\\\"product_id\\\":1729840619138750658,\\\"source\\\":\\\"TikTok Shop\\\",\\\"title\\\":\\\"Cider Sequin V-Neck Halter Ruffled Hem Oversized Mini Dress With Scarf\\\",\\\"categories\\\":[{\\\"category_id\\\":601152,\\\"category_name\\\":\\\"Womenswear Underwear\\\",\\\"level\\\":1,\\\"parent_id\\\":0}]}\"}]"
+    }
+  ]
+}

@@ -31,10 +31,14 @@ def build_candidate() -> dict:
         "product_id": "product-test-001",
         "can_be_approved": True,
         "eligible": True,
+        "sales_eligible": True,
     }
 
 
 class ExecuteSafetyTests(unittest.TestCase):
+    # These regressions exercise the downstream platform gates after a valid
+    # content proof; proof rejection itself is covered in test_screen_content_review.
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.check_pending_application_api")
     @patch("screen_sample_requests.click_approve_for_apply_id")
@@ -72,6 +76,7 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(candidate["approve_status"], "skipped")
         self.assertEqual(candidate["action"], "skipped-api-preflight-state")
 
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.ensure_store_exec_ready")
     @patch("screen_sample_requests.check_pending_application_api")
@@ -119,6 +124,7 @@ class ExecuteSafetyTests(unittest.TestCase):
             any("[批准] (1/1)" in message for message in captured_logs.output)
         )
 
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.ensure_store_exec_ready")
     @patch("screen_sample_requests.check_pending_application_api")
@@ -161,6 +167,7 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(candidate["approve_status"], "failed")
         self.assertEqual(candidate["action"], "approve-failed")
 
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.ensure_store_exec_ready")
     @patch("screen_sample_requests.confirm_application_approved_api")
@@ -211,6 +218,7 @@ class ExecuteSafetyTests(unittest.TestCase):
         self.assertEqual(first["approve_status"], "failed")
         self.assertNotIn("approve_status", second)
 
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     @patch("screen_sample_requests.resolve_sample_product_for_row")
     @patch("screen_sample_requests.check_pending_application_api")
     @patch("screen_sample_requests.approve_application_api")
@@ -288,6 +296,7 @@ class ExecuteSafetyTests(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
+    @patch("screen_sample_requests.validate_content_review", new=lambda row: (True, "valid test proof"))
     def test_from_export_skips_approved_and_unknown_rows(self) -> None:
         rows = [
             {"eligible": False, "apply_id": "skip-fail", "creator_name": "a"},
@@ -316,6 +325,8 @@ class ExecuteSafetyTests(unittest.TestCase):
                 "creator_name": "e",
             },
         ]
+        for row in rows:
+            row["sales_eligible"] = row["eligible"]
         candidates = _select_execute_candidates_from_export(rows)
         self.assertEqual(
             [row["apply_id"] for row in candidates],

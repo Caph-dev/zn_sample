@@ -22,3 +22,21 @@ view_id = "vewNtqmTk4"
 # 禁止在表中新增列；去重键：红人ID + 寄样产品
 # 新建记录固定写：人员=王良希（技术）、合作状态=待发货、是否已寄样=否
 # 写入物流单号后：是否已寄样=是，合作状态由待发货改为待发布
+
+# Content review only: this section > project .env > process env > external .env.
+# Shopping anchors use the verified TikTok Shop type-35/33 contract only.
+[content_review]
+enabled = true
+cache_dir = "exports/content_review_cache"
+# external_env_path = "/absolute/path/to/explicit/.env"
+# tikhub_api_key = ""
+# ark_api_key = ""
+ark_model = "doubao-seed-2-1-pro-260628"
+# ffmpeg_path = "/absolute/path/to/ffmpeg"
+# Hard upper bounds; values may only be reduced. No ASR, no retries.
+max_visual_videos = 5
+max_pages = 10
+max_videos = 200
+max_frames = 8
+max_media_bytes = 33554432
+run_timeout_seconds = 600

@@ -45,6 +45,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import is_verbose, set_verbose  # noqa: E402
+from lib.creator_video_review import (  # noqa: E402
+    review_creator_rows,
+    validate_content_review,
+)
 from lib.export_util import (  # noqa: E402
     RECONCILIATION_STAGE_APPROVE,
     RECONCILIATION_STAGE_CONFIRM,
@@ -179,6 +183,82 @@ def _reject_if_not_exact_hero(
     )
 
 
+def _guard_content_review(row: dict[str, Any]) -> bool:
+    """Fail closed at both export selection and the actual approval boundary."""
+    try:
+        valid, reason = validate_content_review(row)
+    except Exception as error:
+        valid, reason = False, f"内容审核证据校验失败: {type(error).__name__}"
+    if row.get("eligible") is not True or row.get("sales_eligible") is not True:
+        valid, reason = False, "销售筛查或最终筛查未通过"
+    if valid:
+        return True
+    row["eligible"] = False
+    row["approve_forbidden"] = True
+    row["approve_status"] = "skipped"
+    row["approve_error"] = reason
+    row["action"] = "skipped-content-review"
+    return False
+
+
+def _review_after_sales(
+    rows: list[dict[str, Any]], *, formal_detail: bool
+) -> list[dict[str, Any]]:
+    """Only pay for review after required detail and sales have passed."""
+    review_targets: list[dict[str, Any]] = []
+    for row in rows:
+        row["sales_eligible"] = row.get("eligible") is True
+        row["sales_reason"] = str(row.get("reason") or "")
+        row["eligible"] = False
+        row["content_review_status"] = "not_run"
+        if not row["sales_eligible"]:
+            row["content_review_reason"] = "销售筛查未通过，不运行内容审核"
+        elif not formal_detail or not row.get("detail_checked"):
+            row["content_review_reason"] = "未完成正式详情复筛，不运行内容审核"
+            row["screening_stage"] = "非正式初筛"
+            row["reason"] = row["content_review_reason"]
+        else:
+            review_targets.append(row)
+
+    if not review_targets:
+        return rows
+    logger.info("[内容审核] 销售及详情复筛通过 %s 行，开始审核近7天视频", len(review_targets))
+    try:
+        reviewed_rows = review_creator_rows([dict(row) for row in review_targets])
+        if len(reviewed_rows) != len(review_targets):
+            raise ValueError("内容审核返回行数不匹配")
+        for original, reviewed in zip(review_targets, reviewed_rows):
+            if any(
+                original.get(field) != reviewed.get(field)
+                for field in ("creator_name", "creator_id", "apply_id", "product_id")
+            ):
+                raise ValueError("内容审核返回身份不匹配")
+        for original, reviewed in zip(review_targets, reviewed_rows):
+            original.update(reviewed)
+            valid, validation_reason = validate_content_review(original)
+            original["eligible"] = bool(
+                original.get("sales_eligible") is True
+                and original.get("eligible") is True
+                and valid
+            )
+            if original["eligible"]:
+                original["screening_stage"] = "终筛通过"
+            else:
+                original["screening_stage"] = "内容审核未通过"
+                original["reason"] = str(
+                    original.get("content_review_reason") or validation_reason
+                )
+    except Exception as error:
+        logger.error("[内容审核] 审核未完成，禁止最终通过: %s", type(error).__name__)
+        for row in review_targets:
+            row["eligible"] = False
+            row["content_review_status"] = "needs_review"
+            row["content_review_reason"] = "内容审核异常，需重新审核"
+            row["reason"] = row["content_review_reason"]
+            row["screening_stage"] = "内容待人工复核"
+    return rows
+
+
 def _select_execute_candidates_from_export(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -191,6 +271,8 @@ def _select_execute_candidates_from_export(
             continue
         approve_status = str(row.get("approve_status") or "").strip()
         if approve_status in ALREADY_EXECUTED_APPROVE_STATUSES:
+            continue
+        if not _guard_content_review(row):
             continue
         candidates.append(row)
     return candidates
@@ -617,6 +699,8 @@ def _run_execute_pipeline(
             row["approve_error"] = f"超过 --execute-limit {limit}"
             continue
 
+        if not _guard_content_review(row):
+            continue
         apply_id = str(row.get("apply_id") or "").strip()
         creator_name = str(row.get("creator_name") or "").strip()
         row["action"] = "execute-pending"
@@ -795,6 +879,9 @@ def _run_execute_pipeline(
                 f"{pending_status.get('state') or 'unknown'}")
             continue
 
+        # The preflight can take time; evidence must still be fresh at the write.
+        if not _guard_content_review(row):
+            continue
         logger.info(
             f"  [批准] ({processed + 1}/{approval_target_count}) {creator_name} "
             f"apply={apply_id} sku={product_resolve.get('sku')} "
@@ -2057,6 +2144,17 @@ def main() -> int:
                 reevaluated_rows.append(reevaluated_row)
             pre = reevaluated_rows
 
+        pre = _review_after_sales(
+            pre,
+            formal_detail=bool(
+                args.with_detail and args.require_detail
+                and not args.skip_hero_check
+            ),
+        )
+
+    if args.from_export and args.execute:
+        # Legacy passes cannot be displayed or exported as final passes either.
+        _select_execute_candidates_from_export(pre)
     passed = [x for x in pre if x.get("eligible")]
     logger.info(
         f"--- 判定: 合计={len(pre)} 通过={len(passed)} "

@@ -23,9 +23,6 @@ from assistant.jobs.registry import JobCancelled
 from lib.operation_cancel import OperationCancelled, raise_if_cancelled
 
 
-MAX_CONSECUTIVE_PROFILE_READ_FAILURES = 3
-
-
 @dataclass(frozen=True)
 class CreatorReadOutcome:
     """Result of one creator read, distinguishing empty data from read failure."""
@@ -400,50 +397,6 @@ class CreatorEnrichService:
         summary["cancelled"] = True
         return json.dumps(summary, ensure_ascii=False, sort_keys=True)
 
-    @staticmethod
-    def _update_failure_streak(
-        previous_failure_category: str,
-        previous_count: int,
-        failed_creator_keys: set[str],
-        creator_key: str,
-        outcome: CreatorReadOutcome,
-    ) -> tuple[str, int, set[str]]:
-        """Count consecutive failures from the same profile or detail service."""
-        if outcome.read_ok:
-            return "", 0, failed_creator_keys
-        failure_category = CreatorEnrichService._failure_category(
-            outcome.error_type
-        )
-        if not failure_category:
-            return "", 0, failed_creator_keys
-        if creator_key in failed_creator_keys:
-            # One creator can appear in both the API and detail phases. It must
-            # not consume another circuit-breaker slot for the same run.
-            return previous_failure_category, previous_count, failed_creator_keys
-        if failure_category == previous_failure_category:
-            return (
-                failure_category,
-                previous_count + 1,
-                failed_creator_keys | {creator_key},
-            )
-        return failure_category, 1, failed_creator_keys | {creator_key}
-
-    @staticmethod
-    def _failure_category(error_type: str) -> str:
-        """Group concrete errors by the service whose outage they represent."""
-        if error_type.startswith("profile-"):
-            return "profile"
-        if error_type in {"detail-read-error", "page-data-unavailable"}:
-            return "detail"
-        return ""
-
-    @staticmethod
-    def _creator_failure_key(sample_case: SampleCase) -> str:
-        creator_id = str(sample_case.creator_id or "").strip()
-        if creator_id:
-            return creator_id
-        return f"sample-case:{sample_case.id}"
-
     def enrich(self) -> dict:
         stats = {
             "missing": 0,
@@ -452,8 +405,6 @@ class CreatorEnrichService:
             "failed": 0,
             "type_failures": 0,
             "detail_failures": 0,
-            "stopped_early": False,
-            "stop_reason": "",
             "unprocessed": 0,
         }
         with self.session_factory() as session:
@@ -496,9 +447,6 @@ class CreatorEnrichService:
                         page_ready = False
                         self.warning(f"导航回样品申请页失败，类型补齐将跳过：{error}")
 
-                consecutive_failures = 0
-                consecutive_failure_category = ""
-                failed_creator_keys: set[str] = set()
                 if not page_ready:
                     stats["unprocessed"] += len(need_type)
                 else:
@@ -523,34 +471,7 @@ class CreatorEnrichService:
                         stats["type_filled"] += int(outcome.type_filled)
                         stats["failed"] += int(not outcome.read_ok)
                         stats["type_failures"] += int(not outcome.read_ok)
-                        if outcome.read_ok:
-                            consecutive_failure_category, consecutive_failures = "", 0
-                        else:
-                            (
-                                consecutive_failure_category,
-                                consecutive_failures,
-                                failed_creator_keys,
-                            ) = self._update_failure_streak(
-                                consecutive_failure_category,
-                                consecutive_failures,
-                                failed_creator_keys,
-                                self._creator_failure_key(sample_case),
-                                outcome,
-                            )
-                            if consecutive_failures >= MAX_CONSECUTIVE_PROFILE_READ_FAILURES:
-                                remaining_count = len(need_type) - index
-                                stats["unprocessed"] += remaining_count
-                                stats["stopped_early"] = True
-                                stats["stop_reason"] = (
-                                    "连续 3 位达人资料读取失败，已停止类型补齐"
-                                )
-                                self.warning(
-                                    f"{stats['stop_reason']}；未将空 GPM 当作无数据"
-                                )
-                                break
 
-                if stats["stopped_early"]:
-                    total = max(1, completed_units + len(need_language))
                 # 阶段 1b：语言先查飞书。
                 for index, sample_case in enumerate(need_language, start=1):
                     self._check_cancellation()
@@ -573,11 +494,6 @@ class CreatorEnrichService:
                     case for case in need_language if is_missing_language(case)
                 ]
                 if not page_ready:
-                    stats["unprocessed"] += len(still_missing_language)
-                    stats["stop_reason"] = (
-                        "样品申请页导航失败，已跳过依赖页面的简介补齐"
-                    )
-                elif stats["stopped_early"]:
                     stats["unprocessed"] += len(still_missing_language)
                 else:
                     total = max(1, completed_units + len(still_missing_language))
@@ -604,29 +520,6 @@ class CreatorEnrichService:
                         stats["language_filled"] += int(outcome.language_filled)
                         stats["failed"] += int(not outcome.read_ok)
                         stats["detail_failures"] += int(not outcome.read_ok)
-                        if outcome.read_ok:
-                            consecutive_failure_category, consecutive_failures = "", 0
-                        else:
-                            (
-                                consecutive_failure_category,
-                                consecutive_failures,
-                                failed_creator_keys,
-                            ) = self._update_failure_streak(
-                                consecutive_failure_category,
-                                consecutive_failures,
-                                failed_creator_keys,
-                                self._creator_failure_key(sample_case),
-                                outcome,
-                            )
-                            if consecutive_failures >= MAX_CONSECUTIVE_PROFILE_READ_FAILURES:
-                                remaining_count = len(still_missing_language) - index
-                                stats["unprocessed"] += remaining_count
-                                stats["stopped_early"] = True
-                                stats["stop_reason"] = (
-                                    "连续 3 位达人详情资料读取失败，已停止简介补齐"
-                                )
-                                self.warning(stats["stop_reason"])
-                                break
 
                 self.progress(
                     max(1, completed_units),

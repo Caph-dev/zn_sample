@@ -14,7 +14,7 @@
 1. **默认禁止写操作**  
    不点：同意 / 批准 / 拒绝 / 发货 / 私信「发送」/「邀请」。  
    默认只读列表、详情、本地判定、导出。  
-   **仅** `--execute --yes` 可对筛查通过行点「同意」（永不拒绝）或发第 6 / 9 步私信。  
+   **仅** `--execute --yes` 可对筛查通过行点「同意」（永不拒绝）或发第 7 / 10 步私信。
    写飞书另加 `--write-feishu`。测试默认不写飞书。  
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
 
@@ -53,11 +53,11 @@
 |---|---|---|
 | 本地网页操作台 | 只读日常更新；另提供固定 0/1/2/3 网页入口并复用 `operator_launch` | 不接受任意命令/参数；2/3 仍须网页明确输入 `y`，3 在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
-| 初筛+复筛 | `--with-detail --require-detail` | 不能把仅列表结果当正式名单 |
+| 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
 | 写达人关系 | 写接口接受后 + `--write-feishu`；`--confirm-export` 可**补写** | 不是主推表；写结果未知时不先写 |
-| 第 6 / 9 步私信 | 独立脚本；严格走样品申请页「聊天数」→「发送消息」→输入达人 ID→「聊天」的新路径，默认 IM SDK | 批准后不自动发；不打开详情消息弹层、不跳到 `/seller/im`、不点「聊天数」里的最近联系人 |
-| 第 7–8 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
+| 第 7 / 10 步私信 | 独立脚本；严格走样品申请页「聊天数」→「发送消息」→输入达人 ID→「聊天」的新路径，默认 IM SDK | 批准后不自动发；不打开详情消息弹层、不跳到 `/seller/im`、不点「聊天数」里的最近联系人 |
+| 第 8–9 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
 
@@ -65,23 +65,23 @@
 
 ## SOP → 脚本停止点
 
-五个入口断开。可复制命令只写 README，这里只写停点和门闩。
+五个入口断开。SOP 新增第 5 步内容审查，0/1/2/3 启动器编号不变。可复制命令只写 README，这里只写停点和门闩。
 
 | SOP | 脚本 | 默认停 | 加开关 | 不会做 |
 |---|---|---|---|---|
 | 开店（带调试口） | `open_sample_store.py --reopen` | 店铺窗口打开 | 无 | 不代登、不进联盟中心、不切其它店 |
 | 开店（不重开） | `open_sample_store.py` | 首页前 | 无 | 已运行不关、不进联盟中心 |
-| 1–4 筛查+名单 | `screen_sample_requests.py` | 导出 | 正式须 `--with-detail --require-detail` | 不批、不发信 |
-| 5 同意/写表 | 同上 | 不写 | `--execute --yes`；再加 `--write-feishu` | 不发第 6 步 |
-| 5 **补写** | 同上 `--confirm-export` | 核对待发货 / 补飞书 / 回填订单号 | 约 10 分钟窗口；不重批 | 不发私信 |
-| 6 介绍 | `send_sample_intro.py` | 预演 | `--execute --yes` | 不批、不查物流 |
-| 7 读物流 | `sync_shipped_tracking.py` | **16:00 前拒绝** | 16:00 后只读；测试 `--force` | `--force` 不写不发 |
-| 8 回写飞书 | 同上 | 不写 | `--write-feishu` | 不发第 9 步 |
-| 9 物流私信 | 同上 | 不发 | `--write-feishu --send-tracking --execute --yes` | 不回头筛/批 |
+| 1–5 筛查+名单 | `screen_sample_requests.py` | 导出 | 正式须 `--with-detail --require-detail`，销售数据和内容审查都通过 | 不批、不发信 |
+| 6 同意/写表 | 同上 | 不写 | `--execute --yes`；再加 `--write-feishu` | 不发第 7 步 |
+| 6 **补写** | 同上 `--confirm-export` | 核对待发货 / 补飞书 / 回填订单号 | 约 10 分钟窗口；不重批 | 不发私信 |
+| 7 介绍 | `send_sample_intro.py` | 预演 | `--execute --yes` | 不批、不查物流 |
+| 8 读物流 | `sync_shipped_tracking.py` | **16:00 前拒绝** | 16:00 后只读；测试 `--force` | `--force` 不写不发 |
+| 9 回写飞书 | 同上 | 不写 | `--write-feishu` | 不发第 10 步 |
+| 10 物流私信 | 同上 | 不发 | `--write-feishu --send-tracking --execute --yes` | 不回头筛/批 |
 
 **补写：** 写接口 `success_count=1` 即算批准成功，不等待发货。列表约 10 分钟后刷新；用 `--confirm-export` 核对并补飞书。原先因「待审核找不到」标成 `skipped` 的已批行也纳入补写。
 
-**订单号回填（同一 confirm 步骤）：** 确认转入待发货后，对飞书已建行的行回填「订单号」列，只写这一列（不联动「是否已寄样」/「合作状态」）。订单号取自待发货 tab 的 `main_order_id`，须非空、非 `0`、符合 15–20 位订单号形态（`is_order_id`）；已有不同订单号不覆盖（`update_record_order_no`）。拿不到有效订单号的行跳过，留待物流步骤兜底；「快递单号」仍只在已发货后由第 7–8 步写。回填与补写共享同一 `--execute-limit` 预算，主流程先行。导出新增 `order_no` / `feishu_order_status` / `feishu_order_error` 列。
+**订单号回填（同一 confirm 步骤）：** 确认转入待发货后，对飞书已建行的行回填「订单号」列，只写这一列（不联动「是否已寄样」/「合作状态」）。订单号取自待发货 tab 的 `main_order_id`，须非空、非 `0`、符合 15–20 位订单号形态（`is_order_id`）；已有不同订单号不覆盖（`update_record_order_no`）。拿不到有效订单号的行跳过，留待物流步骤兜底；「快递单号」仍只在已发货后由第 8–9 步写。回填与补写共享同一 `--execute-limit` 预算，主流程先行。导出新增 `order_no` / `feishu_order_status` / `feishu_order_error` 列。
 
 **16:00：** `sync_shipped_tracking.py` 启动时用 `Asia/Shanghai` 看当前小时，`< 16` 退出。不是 cron，到点不会自动跑。
 
@@ -94,7 +94,7 @@
 | `--data-source` | `dom\|api\|auto\|shadow`。批准推荐 `auto`。`shadow` 禁止 `--execute` |
 | `--write-source` | 批准/私信写路径；默认 `api`；`dom` 须显式。都要 execute 门闩 |
 | `--from-seller-home` | 才允许从已登录商家中心（任意子页）导航；未写 `--store-id` 时须 running 唯一店。失败不重开不切店 |
-| `--from-export` | 跳过扫表/详情。筛查脚本：批准或补写。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
+| `--from-export` | 跳过扫表/详情。筛查脚本：批准必须有第 5 步内容通过证据；旧导出无证据不可批准。历史 `--confirm-export` 补写行为不变。介绍脚本：优先 `approved`，也会带上「通过且有 creator_id」的未批行 → 指定人用 `--creator-id`/`--creator-name` |
 | `--confirm-export` | 只补写/核对/回填订单号，不重批；回填与补写共享 `--execute-limit` |
 | `--with-detail --require-detail` | 正式筛查必须成对；禁止 `--detail-limit`、`--skip-hero-check` |
 | `--all-hero-products` | 恢复批准/筛查全部主推款；默认只过 `1732414717062320994` |
@@ -109,7 +109,7 @@
 网页“运行前准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。
 
 批准：先同意成功再写飞书；去重或货号无法映射 → 不批不写。红人ID=`creator_name`。  
-第 9 步发 **TikTok 物流单号**（有承运商则 `{承运商}, {单号}`），不是订单 ID。已有不同单号默认不覆盖（须 `--overwrite`）。
+第 10 步发 **TikTok 物流单号**（有承运商则 `{承运商}, {单号}`），不是订单 ID。已有不同单号默认不覆盖（须 `--overwrite`）。
 
 ---
 
@@ -134,6 +134,12 @@
 条件 2：`hero_keys` 只含「是否主推=是」的货号+商品ID；只精确匹配这两类字段。禁止标题/描述/TikTok `sku_id`、禁止子串。批准解析同样只认主推行；货号无法映射或不主推 → 不批不写。列表 `product_id` ≠ 货号。
 
 **当前再收窄（只影响批准/筛查）：** 默认只过商品 ID `1732414717062320994`（指定 B005）。其它主推款筛掉、不批。恢复全部主推：`--all-hero-products`（`allowed_product_ids` 为空）。禁止 `--skip-hero-check` 做正式跑。
+
+**第 5 步内容审查（第 4 步销售数据通过后）：** TikTok 最近滚动 7×24 小时内，至少 4 条相关带货视频，且这些视频中至少 1 条明确展示产品穿在身上，或同一画面内露脸并手持产品。相关类目沿用既有 7 类：Beauty & Personal Care、Womenswear & Underwear、Household Appliances、Fashion Accessories、Shoes、Sports & Outdoor、Home Textiles。无需强制 ASR、口播或每日发布配额。
+
+未知、缺失或部分采集且证据不足 → `needs_review`，不得 `eligible`；完整计数少于 4 条 → `failed`。已确认至少 4 条相关带货视频且其中有展示证据时允许短路通过，但计数只能标为已知下界，不得冒充全量总数。仅第 4、5 步均通过才可批准；旧导出缺少内容通过证据不可批准，历史 `--confirm-export` 核对/补写保持不变。
+
+内容能力使用本地 `scripts/lib/tiktok_creator_videos.py` 与 `scripts/lib/creator_video_review.py`，不依赖独立 `video-analysis-api` 项目。外部环境配置只接受显式白名单，不批量导入外部环境文件；保留现有 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，不得被内容配置覆盖。本次实现验证不执行批准、飞书写入或私信发送，不代表已完成实店全链路验收。
 
 **跟进日历（仅免费样品【处理中】`tab=40`；跟进不分商品，全部主推款都跟进）：** D0 / D+3 / D+7 发话术；D+10 只出名单；D+15 飞书合作状态写 **未发布**（业务含义=未履约，不是「待发布」）。刚到货话术分商品：B005 附讲解图，非 B005 只发话术；3/7 天话术通用。达人发视频/直播 → 平台已完成 + 文档原文感谢话术 + 飞书 **已完成**。达人类型用筛查导出「视频达人/直播达人」；视频+直播同时标记时跟进话术按视频达人，不拆两条。类型未知才人工。不要把【已发货】当已送达。不扫买返。
 

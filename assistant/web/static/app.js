@@ -428,8 +428,7 @@
         ["语言补齐", `${formatNumber(result.language_filled)} 位`],
         ["补齐失败", `${formatNumber(result.failed)} 位`],
       ];
-      if (result.stopped_early) {
-        resultEntries.push(["提前停止", result.stop_reason || "连续资料读取失败"]);
+      if (result.unprocessed > 0) {
         resultEntries.push(["未处理", `${formatNumber(result.unprocessed)} 项`]);
       }
       return resultEntries;

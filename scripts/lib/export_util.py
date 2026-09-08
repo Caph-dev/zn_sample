@@ -267,6 +267,20 @@ EXPORT_FIELDS = [
     "order_backfill_status",
     "feishu_order_error",
     "reconcile_next_action",
+    "sales_eligible",
+    "sales_reason",
+    "content_review_status",
+    "content_review_reason",
+    "content_review_handle",
+    "content_review_window_start",
+    "content_review_window_end",
+    "content_review_related_count",
+    "content_review_complete",
+    "content_review_evidence_path",
+    "content_review_version",
+    "content_review_model",
+    "content_review_video_ids",
+    "content_review_reviewed_at",
 ]
 
 # SOP 名单列（中文表头）
@@ -314,6 +328,20 @@ CN_HEADERS = [
     "订单号规范状态",
     "订单号回填错误",
     "对账下一步",
+    "销售筛查通过",
+    "销售筛查原因",
+    "内容审核状态",
+    "内容审核原因",
+    "内容审核达人ID",
+    "内容审核窗口起点",
+    "内容审核窗口终点",
+    "内容审核相关视频数",
+    "内容审核采集完整",
+    "内容审核证据路径",
+    "内容审核版本",
+    "内容审核模型",
+    "内容审核视频ID",
+    "内容审核时间",
 ]
 
 
@@ -501,7 +529,12 @@ def _cell(v: Any) -> Any:
 
 def _export_row_values(row: dict) -> list[Any]:
     prepared = prepare_export_row(row)
-    return [_cell(prepared.get(field_name)) for field_name in EXPORT_FIELDS]
+    return [
+        json.dumps(prepared.get(field_name) or [], ensure_ascii=False)
+        if field_name == "content_review_video_ids"
+        else _cell(prepared.get(field_name))
+        for field_name in EXPORT_FIELDS
+    ]
 
 
 def write_csv(rows: list[dict], path: Path) -> Path:

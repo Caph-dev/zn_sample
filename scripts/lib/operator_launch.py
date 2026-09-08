@@ -145,7 +145,7 @@ MODES: dict[str, LaunchMode] = {
         confirm_message="",
         abort_idle="",
         abort_not_this="",
-        start_message="开始筛查，只会出名单，不会点同意，也不会发私信。",
+        start_message="开始销售及详情筛查，再审核近7天视频内容。只出名单，不会点同意，也不会发私信。",
         report_stem="sample_screen",
     ),
     "pipeline": LaunchMode(
@@ -155,7 +155,7 @@ MODES: dict[str, LaunchMode] = {
         extra_args=(),
         confirm="yesno",
         confirm_message=(
-            "将连续做完：出名单 → 批准并写飞书 → 空等 10 分钟 → "
+            "将连续做完：销售及详情筛查、视频内容审核 → 批准并写飞书 → 空等 10 分钟 → "
             "核对待发货、补写并回填订单号 → 发介绍私信，并写回「使用语言」。\n"
             f"本轮最多批准 / 发信 {OPERATOR_EXECUTE_LIMIT} 条。\n"
             "中间必须空等 10 分钟：TikTok 商家中心的「待发货」刷新慢，"
@@ -709,7 +709,7 @@ def _run_pipeline(
     notify: Callable[[str, str], None],
 ) -> int:
     prefixes = pipeline_prefixes(now=now, base=out_prefix)
-    emit("第 1 步：筛查名单。")
+    emit("第 1 步：筛查名单（销售及详情复筛后，审核近7天视频内容）。")
     screen_code = run_job_fn(
         build_step_argv(
             python=python,

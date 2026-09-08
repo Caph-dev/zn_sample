@@ -266,3 +266,78 @@ def load_bitable_settings(
 def clear_config_cache() -> None:
     """测试用：清空 TOML 缓存。"""
     _cached_toml.cache_clear()
+
+
+def load_content_review_settings() -> dict[str, Any]:
+    """Read review-only settings without mutating os.environ.
+
+    Project TOML/.env precede process env and an explicitly selected external
+    dotenv. For an explicitly selected video service .env, its conventional
+    data/local_settings.json may supply only the legacy doubao_api_key fallback.
+    No sibling project is discovered and no unrelated settings are imported.
+    """
+    def read_values(path: Path, allowed: set[str]) -> dict[str, str]:
+        if not path.is_file():
+            return {}
+        values = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator and key.strip() in allowed:
+                values[key.strip()] = value.strip().strip("\"'")
+        return values
+
+    defaults = {
+        "enabled": True,
+        "cache_dir": str(PROJECT_ROOT / "exports" / "content_review_cache"),
+        "external_env_path": "",
+        "tikhub_api_key": "",
+        "ark_api_key": "",
+        "ark_model": "doubao-seed-2-1-pro-260628",
+        "ffmpeg_path": "",
+        "max_visual_videos": 5,
+        "max_pages": 10,
+        "max_videos": 200,
+        "max_frames": 8,
+        "max_media_bytes": 32 * 1024 * 1024,
+        "run_timeout_seconds": 600,
+    }
+    section = _section(load_raw_config(), "content_review")
+    mapping = {key: "CONTENT_REVIEW_" + key.upper() for key in defaults}
+    mapping.update(tikhub_api_key="TIKHUB_API_KEY", ark_api_key="ARK_API_KEY", ark_model="ARK_MODEL", ffmpeg_path="FFMPEG_PATH")
+    project_env = read_values(DEFAULT_ENV_PATH, set(mapping.values()))
+    external_path = section.get("external_env_path") or project_env.get(mapping["external_env_path"]) or os.environ.get(mapping["external_env_path"])
+    external_values = read_values(Path(external_path).expanduser(), {"TIKHUB_API_KEY", "ARK_API_KEY", "ARK_MODEL"}) if external_path else {}
+    if external_path and not external_values.get("ARK_API_KEY"):
+        external_env = Path(external_path).expanduser()
+        legacy_settings_path = external_env.parent / "data" / "local_settings.json"
+        if external_env.name == ".env" and legacy_settings_path.is_file():
+            import json
+
+            try:
+                with legacy_settings_path.open(encoding="utf-8") as source:
+                    legacy_text = source.read(65537)
+                if len(legacy_text) > 65536:
+                    raise ValueError("external settings too large")
+                legacy_settings = json.loads(legacy_text)
+                legacy_key = legacy_settings.get("doubao_api_key")
+                if isinstance(legacy_key, str) and legacy_key.strip():
+                    external_values["ARK_API_KEY"] = legacy_key.strip()
+            except (OSError, ValueError, AttributeError) as error:
+                raise AppConfigError("Invalid external video model settings") from error
+    result = {}
+    for key, default in defaults.items():
+        env_key = mapping[key]
+        candidates = (section.get(key), project_env.get(env_key), os.environ.get(env_key), external_values.get(env_key))
+        value = next((candidate for candidate in candidates if candidate is not None and candidate != ""), default)
+        if isinstance(default, bool):
+            value = str(value).lower() in {"true", "1", "yes"}
+        elif isinstance(default, int):
+            try:
+                value = int(value)
+            except (ValueError, TypeError) as error:
+                raise AppConfigError("Invalid content review resource limit") from error
+            if not 1 <= value <= default:
+                raise AppConfigError("Content review limits may only be reduced")
+        result[key] = value
+    result["cache_dir"] = str((PROJECT_ROOT / Path(result["cache_dir"]).expanduser()).resolve())
+    return result

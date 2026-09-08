@@ -11,6 +11,43 @@
 
 不点「拒绝」「邀请」。
 
+## 筛查新增：第 5 步内容审查
+
+先通过 SOP 第 4 步销售数据筛查，再审查 TikTok **最近滚动 7×24 小时**的视频，必须同时满足：
+
+- 至少 **4 条相关带货视频**，相关类目仍是既有 7 类：Beauty & Personal Care、Womenswear & Underwear、Household Appliances、Fashion Accessories、Shoes、Sports & Outdoor、Home Textiles。
+- 其中至少 **1 条**明确展示 **产品穿在身上**，或 **同一画面内露脸并手持产品**。
+
+不强制语音转写（ASR）、口播或每日发布条数。未知、缺失或部分采集且证据不足时显示 `needs_review`（待人工复核），不能算 `eligible`（通过）；完整计数少于 4 条则为 `failed`（不通过）。已确认至少 4 条相关带货视频且找到其中的展示证据时可以提前结束，此时数量只是**已知下界**，不是全量总数。
+
+只有销售数据和内容审查都通过才可批准。**旧导出没有内容通过证据，即使显式指定路径也不能用于新批准**，请重新筛查；历史 `--confirm-export` 核对、补写与订单号回填不变。
+
+SOP 后续顺延为：**第 6 步批准/写表 → 第 7 步介绍私信 → 第 8 步读物流 → 第 9 步回写飞书 → 第 10 步物流私信**。0/1/2/3 双击和网页入口编号不变，`--execute --yes` 与既有执行限额不变。
+
+内容采集和审查使用本仓本地模块 `tiktok_creator_videos.py`、`creator_video_review.py`，不需要独立部署 `video-analysis-api`。外部环境配置仅按显式白名单引入，不整份加载外部环境文件；现有 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID` 保持不变。缺少内容服务配置或证据时交人工复核，不放宽批准条件。本次实现验证不执行批准、飞书写入或消息发送，不代表已完成实店全链路验收。
+
+在已被 git 忽略的 `config.toml` 中配置视频审核；外部 `.env` 只复用 `TIKHUB_API_KEY`、`ARK_API_KEY`、`ARK_MODEL`，本项目同名配置优先。不要把密钥复制到命令行或文档。示例中的路径请换成当前电脑的绝对路径：
+
+与源视频项目保持兼容：若显式选择的 `.env` 没有 `ARK_API_KEY`，可从该项目固定的 `data/local_settings.json` 仅读取旧字段 `doubao_api_key`；不会导入管理员令牌或改变本项目语言识别配置。
+
+```toml
+[content_review]
+external_env_path = "/absolute/path/to/video-analysis-api/.env"
+ffmpeg_path = "/absolute/path/to/ffmpeg"
+max_visual_videos = 5
+```
+
+审核串行执行，本轮所有达人合计最多分析 5 支视频；额度或采集预算耗尽时保留待复核，不因此放行。证据和关键帧位于 `exports/content_review_cache/`，不要删除仍需用于批准的证据，也不要将它们提交 git。批准前重新验证账号、七天窗口、模型/规则版本、证据完整性与审核时间；审核超过 24 小时需重新筛查。
+
+若出现 `ffmpeg_unavailable`，配置可运行的 FFmpeg 绝对路径，不修改系统或启动器 PATH。若出现 `non_public_media_address`，检查代理/DNS 是否把媒体域名解析到私网或保留地址；不要关闭公网校验。该问题未解决时，视频审核停在待复核。
+
+本地离线回归（不会调用真实批准、飞书写入或私信）：
+
+```bash
+uv sync --dev
+uv run python -m pytest tests -q
+```
+
 ---
 
 ## 本地网页操作台
@@ -129,6 +166,8 @@ ziniao-cli doctor
 | `runtime.reopen` | 先双击「0-打开店铺」；若仍出现，找技术人员 |
 | `无法解析 storeId` / 多家店 | 只留一家店开着 |
 | 飞书主推表读失败 | 找管理员查 `config.toml` |
+| 内容审查为 `needs_review` / 缺少视频证据 | 不批准；由技术人员检查内容服务配置和采集完整性，补齐证据后重新筛查 |
+| 旧名单无法批准 | 没有第 5 步内容通过证据的旧导出不能新批准；重新筛查，历史核对/补写仍走 `--confirm-export` |
 | 飞书同一达人/产品有多条记录 | 打开本轮 `*_confirm.csv`，按「对账下一步」人工保留正确关系行；脚本不会任选一条写入 |
 | 飞书订单号冲突 / 写后核验不确定 | 核对 TikTok 待发货订单与飞书现有值；默认不覆盖、不自动重试 |
 | 进度条走到一半 | 继续等，不要关窗口。这是商家中心 10 分钟刷新，不是死机 |
@@ -141,7 +180,7 @@ ziniao-cli doctor
 
 ## 技术人员：终端等价命令
 
-五个入口仍然断开。参数**约束**（默认值、门闩、禁止组合）只写在 [AGENTS.md](./AGENTS.md)，这里只给可复制命令。批准时 `--from-export` 不写路径只会选已验证的筛查产物；补写时只会选已验证的批准/补写产物，不再按文件修改时间猜输入。历史 JSON 没有 sidecar manifest 时，仍可**显式写完整路径**兼容使用。未传 `--store-id` 且只开着一家店时，从 running 识别。终端默认只打进度；要看页面 API 明细再加 `--verbose`。筛查导出是 CSV + JSON，不再自动写 xlsx。
+五个入口仍然断开。参数**约束**（默认值、门闩、禁止组合）只写在 [AGENTS.md](./AGENTS.md)，这里只给可复制命令。批准时 `--from-export` 不写路径只会选已验证的筛查产物，且必须有第 5 步内容通过证据；补写时只会选已验证的批准/补写产物，不再按文件修改时间猜输入。历史 JSON 没有 sidecar manifest 时，仍可**显式写完整路径**兼容核对/补写，但不能绕过新批准所需的内容证据。未传 `--store-id` 且只开着一家店时，从 running 识别。终端默认只打进度；要看页面 API 明细再加 `--verbose`。筛查导出是 CSV + JSON，不再自动写 xlsx。
 
 ```bash
 # 0 打开店铺（已开则关掉再开，带 debugPort）
@@ -185,7 +224,7 @@ Windows（cmd / PowerShell）：`python3` 换成 `py -3`。路径一律用正斜
 | `--from-seller-home` | 从已登录商家中心（任意子页）进入待审核 |
 | `--with-detail --require-detail` | 正式筛查必带 |
 | `--all-hero-products` | 批准/筛查恢复全部主推款；默认只过指定 B005（`1732414717062320994`） |
-| `--from-export` | 用 JSON 恢复。批准无路径时选已验证筛查产物；补写无路径时选已验证批准/补写产物；历史文件请显式路径 |
+| `--from-export` | 用 JSON 恢复。批准无路径时选已验证筛查产物，仍须有内容通过证据；补写无路径时选已验证批准/补写产物；历史核对/补写文件请显式路径 |
 | `--confirm-export` | 核对「待发货」、补写飞书并回填订单号，不重新批准；最终看 `*_confirm.csv` 的「对账下一步」 |
 | `--execute --yes` | 批准或发送私信 |
 | `--write-feishu` | 写「达人关系管理(新)」 |
