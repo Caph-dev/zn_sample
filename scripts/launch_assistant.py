@@ -35,6 +35,8 @@ PROTECTED_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "auto_approval_execute",
+        "auto_approval_reconcile",
     }
 )
 STOP_WAIT_SECONDS = 5.0

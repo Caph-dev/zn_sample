@@ -17,6 +17,8 @@
    **仅** `--execute --yes` 可对筛查通过行点「同意」（永不拒绝）或发第 7 / 10 步私信。
    写飞书另加 `--write-feishu`。测试默认不写飞书。  
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
+   唯一隔离例外：「自动审批」子页面走自有任务链（见下文「自动审批子页面」），
+   仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
 
 2. **两阶段导航**  
    `open_sample_store.py` 默认只开店；目标店已运行绝不关闭/重开。  
@@ -60,6 +62,20 @@
 | 第 8–9 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
+
+---
+
+## 自动审批子页面（自定义审核方案）
+
+`/auto-approval` 是独立 React 页（构建产物 `assistant/web/static/auto-approval/`，源码 `frontend/`，构建 `npm run build:auto`；产物被 gitignore）。后端：`assistant/api/auto_approval.py` + `assistant/services/auto_approval_service.py` + `scripts/auto_approval.py`（三种 mode）+ `scripts/lib/auto_approval_rules.py`；任务类型 `auto_approval_preview|execute|reconcile`（已入 ZINIAO_JOB_TYPES 与写任务保护集）。
+
+- **隔离，不是默认**：正式 SOP、`filters.Criteria`、0/1/2/3 入口行为不变。自定义规则只绑定本次任务快照；关闭检查 = not_checked，≠通过。正式入口与旧导出继续严格走 `_guard_content_review()`；本页批准只接受服务器生成的自定义快照（preview 信封 + rule hash + 逐项证据），禁止前端布尔量绕过内容门禁。
+- **规则 schema 严格**（`validate_custom_rule`）：未知字段、非有限数字、非法范围、空条件组合、非主推商品都拒绝。至少启用一项检查；比较符第一版固定 `>`（客单价为区间）；`video_live` 组 either/both，both 须两侧都启用。
+- **第一版后端边界**：执行限量 1–10；预览新鲜度 24 小时；内容组 days 仅 7、min_related 仅 4（与内容审核库一致，前端锁定）；数值上限见 `BASIC_LIMITS`/`VIDEO_LIVE_LIMITS`。
+- **三态语义**：启用指标缺失 → needs_review（不默认通过）；已知违反 → failed；完整满足 → passed。视频/直播任一侧通过即过；AND 组已知失败即失败，其余未决 → needs_review。主推/当前款/`can_be_approved=false`/缺 ID 为**执行拦截**（blocked），不属审核项。
+- **按需采集**：仅 video/live 组启用才拉详情；履约/GPM 列表口径即可（GPM 列表近似标记 source=list-proxy；履约 est_post_rate 优先）。内容审核只跑自定义已通过行，与正式链路同一 `review_creator_rows`/`validate_content_review` 证据。
+- **执行边界**：服务端校验 preview 完成/完整/新鲜 + 候选 ⊆ eligible + 限量 + 键入 `y` + 幂等键（重复点击/重试去重）；脚本内再验信封/店铺/hash、逐行复算结论、hero 重查、产品解析、查重、`check_pending_application_api` 预检后批准（`--write-source api` 固定）；批准未知 → 不写飞书、不自动重试。写飞书默认关，目标仍「达人关系管理(新)」。reconcile 复用正式 confirm 管线（不重批）。
+- **任务与页面**：写任务运行中不提供取消；启动器 `PROTECTED_JOB_TYPES` 含 auto_approval_execute/reconcile。页面网络异常先查任务状态，不重复创建批准任务。改规则立即令旧预览失效。
 
 ---
 
@@ -176,7 +192,7 @@
    - 改完代码必须重启操作台才生效（`launch_assistant.py` 已自动 kill 旧实例；旧进程持单实例锁会让新代码永远不加载）。
 
 <!-- ASTRYX:START -->
-Astryx v0.4.6 · 158 components
+Astryx v0.4.7 · 158 components
 CLI: run every command as `npx astryx <cmd>` (shown below as `astryx ...`).
 
 SETUP (once, in your app entry e.g. main.tsx) — without these, components render unstyled:

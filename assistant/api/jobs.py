@@ -12,6 +12,7 @@ from sqlalchemy import update
 from assistant.database.models import Job
 from assistant.jobs.locks import create_or_get_pending_job, request_cancellation
 from assistant.jobs.progress import list_events
+from assistant.jobs.registry import WRITE_JOB_TYPES
 
 
 router = APIRouter()
@@ -206,7 +207,7 @@ def cancel_job(job_id: str, request: Request) -> dict:
         if job is None:
             raise HTTPException(status_code=404, detail="job-not-found")
         if job.status == "running":
-            if job.job_type in OPERATOR_JOB_TYPES:
+            if job.job_type in OPERATOR_JOB_TYPES or job.job_type in WRITE_JOB_TYPES:
                 raise HTTPException(
                     status_code=409,
                     detail="operator-job-not-cancellable",

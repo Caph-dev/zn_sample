@@ -54,7 +54,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             try:
                 inspector = inspect(engine)
                 expected_model_tables = set(Base.metadata.tables)
-                self.assertEqual(len(expected_model_tables), 9)
+                self.assertEqual(len(expected_model_tables), 13)
                 self.assertEqual(
                     set(inspector.get_table_names()),
                     expected_model_tables | {"alembic_version"},
@@ -63,7 +63,7 @@ class MigrationIntegrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0004_followup_status_model",
+                        "0005_auto_approval",
                     )
 
                 for table_name, model_table in Base.metadata.tables.items():

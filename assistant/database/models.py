@@ -169,6 +169,98 @@ class Job(Base):
     log_path: Mapped[str] = mapped_column(String, default="")
 
 
+class AutoApprovalPreview(Base):
+    """自动审批：规则快照 + 只读筛查批次。"""
+    __tablename__ = "auto_approval_previews"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    store_id: Mapped[str] = mapped_column(String)
+    job_id: Mapped[str] = mapped_column(String, default="")
+    rule_json: Mapped[str] = mapped_column(Text)
+    rule_hash: Mapped[str] = mapped_column(String)
+    rule_summary: Mapped[str] = mapped_column(Text, default="")
+    rules_path: Mapped[str] = mapped_column(String, default="")
+    result_path: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="queued")
+    integrity_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    integrity_notes: Mapped[str] = mapped_column(Text, default="")
+    stats: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str] = mapped_column(String, default="")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AutoApprovalCandidate(Base):
+    """自动审批：筛查候选行（逐项结论与证据来源）。"""
+    __tablename__ = "auto_approval_candidates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    preview_id: Mapped[str] = mapped_column(ForeignKey("auto_approval_previews.id"))
+    apply_id: Mapped[str] = mapped_column(String)
+    creator_id: Mapped[str] = mapped_column(String, default="")
+    creator_name: Mapped[str] = mapped_column(String, default="")
+    product_id: Mapped[str] = mapped_column(String, default="")
+    overall: Mapped[str] = mapped_column(String, default="")
+    content_verdict: Mapped[str] = mapped_column(String, default="")
+    custom_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    checks_json: Mapped[str] = mapped_column(Text, default="")
+    safety_blocks_json: Mapped[str] = mapped_column(Text, default="")
+    metrics_json: Mapped[str] = mapped_column(Text, default="")
+    content_status: Mapped[str] = mapped_column(String, default="")
+    content_reason: Mapped[str] = mapped_column(Text, default="")
+    content_evidence_path: Mapped[str] = mapped_column(Text, default="")
+    content_related_count: Mapped[int] = mapped_column(Integer, default=0)
+    content_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    observed_at: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AutoApprovalExecution(Base):
+    """自动审批：执行批次（确认、限量、幂等键、任务 ID）。"""
+    __tablename__ = "auto_approval_executions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    preview_id: Mapped[str] = mapped_column(ForeignKey("auto_approval_previews.id"))
+    job_id: Mapped[str] = mapped_column(String, default="")
+    idempotency_key: Mapped[str] = mapped_column(String, unique=True)
+    store_id: Mapped[str] = mapped_column(String)
+    rule_hash: Mapped[str] = mapped_column(String)
+    apply_ids_json: Mapped[str] = mapped_column(Text)
+    limit_count: Mapped[int] = mapped_column(Integer, default=1)
+    write_feishu: Mapped[bool] = mapped_column(Boolean, default=False)
+    confirmation_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String, default="queued")
+    result_path: Mapped[str] = mapped_column(String, default="")
+    backup_path: Mapped[str] = mapped_column(String, default="")
+    error_code: Mapped[str] = mapped_column(String, default="")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AutoApprovalExecutionItem(Base):
+    """自动审批：执行明细（批准与飞书分项状态）。"""
+    __tablename__ = "auto_approval_execution_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    execution_id: Mapped[str] = mapped_column(ForeignKey("auto_approval_executions.id"))
+    apply_id: Mapped[str] = mapped_column(String)
+    creator_id: Mapped[str] = mapped_column(String, default="")
+    creator_name: Mapped[str] = mapped_column(String, default="")
+    product_id: Mapped[str] = mapped_column(String, default="")
+    approve_status: Mapped[str] = mapped_column(String, default="")
+    approve_error: Mapped[str] = mapped_column(Text, default="")
+    action: Mapped[str] = mapped_column(String, default="")
+    platform_confirmation_status: Mapped[str] = mapped_column(String, default="")
+    feishu_relation_status: Mapped[str] = mapped_column(String, default="")
+    feishu_record_id: Mapped[str] = mapped_column(String, default="")
+    feishu_error: Mapped[str] = mapped_column(Text, default="")
+    approved_at: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class JobEvent(Base):
     __tablename__ = "job_events"
     __table_args__ = (UniqueConstraint("job_id", "sequence"),)

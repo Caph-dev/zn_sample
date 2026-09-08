@@ -2,13 +2,24 @@
   "scripts": {
     "build:theme": "mkdir -p build/theme && astryx theme build src/themes/geist/geistTheme.ts -o build/theme/geist-theme.css && cp build/theme/geist-theme.css assistant/web/static/geist-theme.css",
     "check:theme": "astryx theme build src/themes/geist/geistTheme.ts -o build/theme/geist-theme.css -c",
-    "build:fonts": "mkdir -p assistant/web/static/fonts && cp node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2 assistant/web/static/fonts/Geist.woff2 && cp node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2 assistant/web/static/fonts/GeistMono.woff2"
+    "build:fonts": "mkdir -p assistant/web/static/fonts && cp node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2 assistant/web/static/fonts/Geist.woff2 && cp node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2 assistant/web/static/fonts/GeistMono.woff2",
+    "build:auto": "tsc -p frontend/tsconfig.json --noEmit && vite build --config frontend/vite.config.ts",
+    "dev:auto": "vite --config frontend/vite.config.ts"
   },
   "dependencies": {
-    "@astryxdesign/cli": "^0.4.6",
-    "@astryxdesign/core": "^0.4.6",
-    "@astryxdesign/theme-neutral": "^0.4.6",
+    "@astryxdesign/cli": "^0.4.7",
+    "@astryxdesign/core": "^0.4.7",
+    "@astryxdesign/theme-neutral": "^0.4.7",
     "@stylexjs/stylex": "^0.19.0",
-    "geist": "^1.7.2"
+    "geist": "^1.7.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
   }
 }

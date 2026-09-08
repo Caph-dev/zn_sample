@@ -180,6 +180,8 @@ class ApplicationSkeletonTests(unittest.TestCase):
         expected_tables = {
             "stores", "sample_cases", "shipments", "shipment_snapshots",
             "followup_tasks", "content_evidences", "jobs", "job_events", "app_settings",
+            "auto_approval_previews", "auto_approval_candidates",
+            "auto_approval_executions", "auto_approval_execution_items",
         }
         self.assertEqual(set(Base.metadata.tables), expected_tables)
         with Session(engine) as session:

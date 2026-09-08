@@ -1,0 +1,214 @@
+/** 规则草稿默认值、前端校验与实时摘要（与后端 lib.auto_approval_rules 对齐）。 */
+
+import type {BasicKey, OptionsPayload, RuleDraft} from './types';
+
+export const BASIC_KEYS: BasicKey[] = [
+  'followers',
+  'gmv',
+  'units',
+  'gpm',
+  'aov',
+  'fulfillment',
+  'female_pct',
+  'categories',
+];
+
+export const BASIC_LABELS: Record<BasicKey, string> = {
+  followers: '粉丝数',
+  gmv: 'GMV',
+  units: '成交件数',
+  gpm: '千次曝光成交/GPM',
+  aov: '客单价',
+  fulfillment: '履约率/预计发布率',
+  female_pct: '女性粉丝占比',
+  categories: '类目',
+};
+
+export const BASIC_UNITS: Partial<Record<BasicKey, string>> = {
+  followers: '人',
+  gmv: 'USD',
+  units: '件',
+  gpm: 'USD',
+  aov: 'USD',
+  fulfillment: '%',
+  female_pct: '%',
+};
+
+export const DEFAULT_ACTIVE_PRODUCT_ID = '1732414717062320994';
+export const DEFAULT_CATEGORIES = [
+  'Beauty & Personal Care',
+  'Womenswear & Underwear',
+  'Household Appliances',
+  'Fashion Accessories',
+  'Shoes',
+  'Sports & Outdoor',
+  'Home Textiles',
+];
+
+export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
+  const basic = {} as RuleDraft['basic'];
+  for (const key of BASIC_KEYS) {
+    if (key === 'aov') {
+      basic[key] = {
+        enabled: true,
+        min: 10,
+        max: 25,
+        values: [],
+      };
+    } else if (key === 'categories') {
+      basic[key] = {enabled: true, values: DEFAULT_CATEGORIES.slice()};
+    } else {
+      const defaults = options?.basic[key];
+      basic[key] = {
+        enabled: true,
+        min: defaults?.default ?? 0,
+        values: [],
+      };
+    }
+  }
+  return {
+    schema_version: 1,
+    mode: 'custom',
+    product_ids: [DEFAULT_ACTIVE_PRODUCT_ID],
+    basic,
+    video_live: {
+      enabled: true,
+      logic: 'either',
+      video: {enabled: true, gpm: 10, avg_views: 300, engagement: 2},
+      live: {enabled: true, gpm: 12, avg_views: 1000},
+    },
+    content: {enabled: true, days: 7, min_related: 4, require_display: true},
+  };
+}
+
+/** 前端校验（服务端仍会再次严格校验）。返回错误消息数组，空数组=通过。 */
+export function validateDraft(rule: RuleDraft, options: OptionsPayload | null): string[] {
+  const errors: string[] = [];
+  if (rule.product_ids.length === 0) {
+    errors.push('至少选择一款主推商品。');
+  }
+  const limits = options?.basic ?? {};
+  const isFiniteNumber = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value);
+  for (const key of BASIC_KEYS) {
+    const draft = rule.basic[key];
+    if (!draft.enabled) {
+      continue;
+    }
+    if (key === 'categories') {
+      if (draft.values.length === 0) {
+        errors.push('类目启用时必须选择至少一个类目。');
+      }
+      continue;
+    }
+    if (key === 'aov') {
+      if (!isFiniteNumber(draft.min) || !isFiniteNumber(draft.max)) {
+        errors.push('客单价启用时必须填写上下限。');
+      } else if (draft.min > draft.max) {
+        errors.push('客单价下限必须 ≤ 上限。');
+      }
+      continue;
+    }
+    if (!isFiniteNumber(draft.min)) {
+      errors.push(`${BASIC_LABELS[key]}启用时必须填写阈值。`);
+      continue;
+    }
+    const range = limits[key];
+    if (range && (draft.min < range.min || draft.min > range.max)) {
+      errors.push(`${BASIC_LABELS[key]}阈值超出范围 [${range.min}, ${range.max}]。`);
+    }
+    if (range?.integer && !Number.isInteger(draft.min)) {
+      errors.push(`${BASIC_LABELS[key]}阈值必须是整数。`);
+    }
+  }
+  const group = rule.video_live;
+  if (group.enabled) {
+    const sideErrors: string[] = [];
+    const checkSide = (
+      sideLabel: string,
+      side: {enabled: boolean; gpm?: number | null; avg_views?: number | null},
+    ) => {
+      if (!side.enabled) {
+        return;
+      }
+      if (!isFiniteNumber(side.gpm)) {
+        sideErrors.push(`${sideLabel} GPM 启用时必须填写阈值。`);
+      }
+      if (!isFiniteNumber(side.avg_views)) {
+        sideErrors.push(`${sideLabel} 均播启用时必须填写阈值。`);
+      }
+    };
+    checkSide('视频', group.video);
+    checkSide('直播', group.live);
+    const enabledSides = [group.video.enabled, group.live.enabled].filter(Boolean).length;
+    if (enabledSides === 0) {
+      errors.push('视频/直播组启用时至少启用一侧。');
+    }
+    if (group.logic === 'both' && enabledSides < 2) {
+      errors.push('「两侧均满足」必须同时启用视频与直播。');
+    }
+    errors.push(...sideErrors);
+  }
+  const anyBasicEnabled = BASIC_KEYS.some((key) => rule.basic[key].enabled);
+  if (!anyBasicEnabled && !group.enabled && !rule.content.enabled) {
+    errors.push('不允许只选商品而关闭全部审核项；请至少启用一项检查。');
+  }
+  return errors;
+}
+
+export function summaryLines(rule: RuleDraft): string[] {
+  const lines: string[] = [];
+  lines.push('模式：自定义（本次临时标准，不代表完整 SOP 通过）');
+  lines.push(`商品：${rule.product_ids.join('、')}`);
+  const enabledParts: string[] = [];
+  const disabledParts: string[] = [];
+  for (const key of BASIC_KEYS) {
+    const draft = rule.basic[key];
+    if (!draft.enabled) {
+      disabledParts.push(BASIC_LABELS[key]);
+      continue;
+    }
+    if (key === 'aov') {
+      enabledParts.push(`${BASIC_LABELS[key]} ${draft.min}–${draft.max} USD`);
+    } else if (key === 'categories') {
+      enabledParts.push(`${BASIC_LABELS[key]}命中：${draft.values.join('、')}`);
+    } else {
+      const unit = BASIC_UNITS[key] ?? '';
+      enabledParts.push(`${BASIC_LABELS[key]} > ${draft.min}${unit}`);
+    }
+  }
+  lines.push(`基础条件（全部 AND）：${enabledParts.length > 0 ? enabledParts.join('；') : '无'}`);
+  if (disabledParts.length > 0) {
+    lines.push(`未检查（not_checked）：${disabledParts.join('、')}`);
+  }
+  const group = rule.video_live;
+  if (group.enabled) {
+    const sideText = (label: string, side: {enabled: boolean; gpm?: number | null; avg_views?: number | null; engagement?: number | null}) => {
+      if (!side.enabled) {
+        return `${label}未启用`;
+      }
+      const parts = [`GPM>${side.gpm}`];
+      if (side.avg_views != null) {
+        parts.push(`均播>${side.avg_views}`);
+      }
+      if (side.engagement != null) {
+        parts.push(`互动>${side.engagement}%`);
+      }
+      return `${label}（${parts.join(' 且 ')}）`;
+    };
+    lines.push(
+      `视频/直播：启用，${group.logic === 'either' ? '任一侧达标' : '两侧均满足'}；${sideText('视频', group.video)}；${sideText('直播', group.live)}`,
+    );
+  } else {
+    lines.push('视频/直播：未检查（not_checked）');
+  }
+  if (rule.content.enabled) {
+    lines.push(
+      `内容审核：启用，最近 ${rule.content.days} 天 ≥ ${rule.content.min_related} 条相关带货视频${rule.content.require_display ? '，至少 1 条明确展示' : '（不要求展示证据）'}`,
+    );
+  } else {
+    lines.push('内容审核：未执行（风险：不核对近期带货内容）');
+  }
+  lines.push('履约口径：详情预计发布率优先，否则列表履约率；GPM 详情官方值优先，列表值为近似');
+  return lines;
+}

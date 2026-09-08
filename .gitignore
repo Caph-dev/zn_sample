@@ -9,6 +9,11 @@ config/config.toml
 node_modules/
 build/
 
+# 自动审批前端构建产物（构建后由静态目录提供，不提交）
+assistant/web/static/auto-approval/
+frontend/.vite/
+frontend/*.tsbuildinfo
+
 # Python
 __pycache__/
 *.py[cod]
@@ -28,7 +33,8 @@ codereview/
 
 # 本地计划与顾问归档（不提交）
 /plan/
-/plans/
+/plans/*
+!/plans/20260908-custom-auto-approval.md
 /advisor-plans/
 
 # 其他

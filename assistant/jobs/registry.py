@@ -17,6 +17,9 @@ ZINIAO_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "auto_approval_preview",
+        "auto_approval_execute",
+        "auto_approval_reconcile",
     }
 )
 REGISTERED_JOB_TYPES = frozenset(
@@ -32,6 +35,18 @@ REGISTERED_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "auto_approval_preview",
+        "auto_approval_execute",
+        "auto_approval_reconcile",
+    }
+)
+# 运行中不可取消的任务：写操作不可撤销，且占用紫鸟通道。
+WRITE_JOB_TYPES = frozenset(
+    {
+        "operator_pipeline",
+        "operator_tracking",
+        "auto_approval_execute",
+        "auto_approval_reconcile",
     }
 )
 
@@ -84,4 +99,11 @@ def get_handler(job_type: str) -> JobHandler | None:
     }:
         from assistant.jobs.handlers.operator import run_operator_job
         return run_operator_job
+    if job_type in {
+        "auto_approval_preview",
+        "auto_approval_execute",
+        "auto_approval_reconcile",
+    }:
+        from assistant.jobs.handlers.auto_approval import run_auto_approval_job
+        return run_auto_approval_job
     return None

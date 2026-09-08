@@ -15,6 +15,7 @@ from assistant.api.exports import router as exports_api_router
 from assistant.api.followups import router as followups_api_router
 from assistant.api.shipments import router as shipments_api_router
 from assistant.api.stores import running_store_summary
+from assistant.api.auto_approval import router as auto_approval_api_router
 from assistant.database.models import FollowupTask, Job, SampleCase, Shipment, Store
 from assistant.domain.followup_labels import (
     FOLLOWUP_LANGUAGE_LABELS,
@@ -42,6 +43,7 @@ router.include_router(dashboard_api_router)
 router.include_router(exports_api_router)
 router.include_router(followups_api_router)
 router.include_router(shipments_api_router)
+router.include_router(auto_approval_api_router)
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
 templates.env.globals.update(
@@ -379,3 +381,17 @@ def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
 @router.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "reports.html", _base_context(request))
+
+
+@router.get("/auto-approval", response_class=HTMLResponse)
+def auto_approval_page(request: Request) -> HTMLResponse:
+    """独立 React 文档壳：不加载旧 app.css，避免样式污染 HTMX 页面。"""
+    return templates.TemplateResponse(
+        request,
+        "auto_approval.html",
+        {
+            "request": request,
+            "app_name": "ZnSampleAssistant",
+            "version": "",
+        },
+    )
