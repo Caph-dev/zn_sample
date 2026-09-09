@@ -200,6 +200,9 @@ def cancel_job(job_id: str, request: Request) -> dict:
         )
         if cancellation_result.rowcount == 1:
             session.commit()
+            from assistant.services.auto_approval_service import mark_job_cancelled
+
+            mark_job_cancelled(session_factory, job_id)
             return {"job_id": job_id, "status": "cancelled"}
 
         session.rollback()

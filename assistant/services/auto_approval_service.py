@@ -714,6 +714,35 @@ def create_reconcile(
     return {"execution_id": execution_id, "job_id": job_id}
 
 
+def mark_job_cancelled(session_factory, job_id: str) -> None:
+    """任务被取消时同步预览/执行批次，避免一直停在 queued。"""
+    with session_factory() as session:
+        preview = session.scalar(
+            select(AutoApprovalPreview).where(AutoApprovalPreview.job_id == job_id)
+        )
+        preview_id = preview.id if preview is not None else ""
+        execution = session.scalar(
+            select(AutoApprovalExecution).where(AutoApprovalExecution.job_id == job_id)
+        )
+        execution_id = execution.id if execution is not None else ""
+    if preview_id:
+        sync_preview_result(
+            session_factory,
+            preview_id,
+            status="cancelled",
+            error_code="cancelled",
+            error_summary="只读筛查已取消。",
+        )
+    if execution_id:
+        sync_execution_result(
+            session_factory,
+            execution_id,
+            status="cancelled",
+            error_code="cancelled",
+            error_summary="执行任务已取消。",
+        )
+
+
 def sync_preview_result(session_factory, preview_id: str, *, status: str, error_code: str = "", error_summary: str = "") -> None:
     """任务完成后同步预览行状态（子进程 handler 调用）。"""
     with session_factory() as session:

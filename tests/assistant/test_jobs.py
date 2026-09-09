@@ -22,7 +22,7 @@ import assistant.api.jobs as jobs_api
 import assistant.jobs.worker as worker_module
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
-from assistant.database.models import Base, Job, Store
+from assistant.database.models import AutoApprovalPreview, Base, Job, Store
 from assistant.jobs.locks import (
     clear_cancellation,
     install_ziniao_busy_guard,
@@ -647,6 +647,125 @@ class JobApiTests(JobTestCase):
             self.assertTrue(is_cancellation_requested(job_id))
         finally:
             clear_cancellation(job_id)
+
+    def test_cancel_pending_preview_marks_preview_cancelled(self) -> None:
+        job_id = self.add_job(job_type="auto_approval_preview")
+        preview_id = "preview-pending-1"
+        with self.session_factory() as session:
+            session.add(
+                AutoApprovalPreview(
+                    id=preview_id,
+                    store_id="store-1",
+                    job_id=job_id,
+                    rule_json="{}",
+                    rule_hash="hash",
+                    status="queued",
+                )
+            )
+            session.commit()
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.get_job(job_id).status, "cancelled")
+        with self.session_factory() as session:
+            preview = session.get(AutoApprovalPreview, preview_id)
+            self.assertIsNotNone(preview)
+            self.assertEqual(preview.status, "cancelled")
+
+    def test_running_auto_approval_preview_can_be_cancelled(self) -> None:
+        job_id = self.add_job(job_type="auto_approval_preview", status="running")
+        try:
+            response = self.post(f"/api/jobs/{job_id}/cancel")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "cancellation-requested")
+            self.assertTrue(is_cancellation_requested(job_id))
+        finally:
+            clear_cancellation(job_id)
+
+    def test_running_auto_approval_execute_cannot_be_cancelled(self) -> None:
+        job_id = self.add_job(job_type="auto_approval_execute", status="running")
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "operator-job-not-cancellable")
+        self.assertFalse(is_cancellation_requested(job_id))
+
+    def test_preview_handler_stops_process_when_cancelled(self) -> None:
+        from assistant.jobs.handlers.auto_approval import run_auto_approval_job
+        from assistant.jobs.registry import JobCancelled
+
+        job_id = self.add_job(job_type="auto_approval_preview", store_id="store-1")
+        preview_id = "preview-cancel-1"
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            job.result_summary = json.dumps(
+                {
+                    "preview_id": preview_id,
+                    "rules_path": str(self.root / "rules.json"),
+                    "result_path": str(self.root / "result.json"),
+                }
+            )
+            session.add(
+                AutoApprovalPreview(
+                    id=preview_id,
+                    store_id="store-1",
+                    job_id=job_id,
+                    rule_json="{}",
+                    rule_hash="hash",
+                    status="queued",
+                )
+            )
+            session.commit()
+        (self.root / "logs").mkdir(exist_ok=True)
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.terminated = False
+                self._alive = True
+
+            def poll(self):
+                return None if self._alive else 0
+
+            def terminate(self) -> None:
+                self.terminated = True
+                self._alive = False
+
+            def kill(self) -> None:
+                self._alive = False
+
+            def wait(self, timeout=None):
+                self._alive = False
+                return 0
+
+        fake_process = FakeProcess()
+
+        def fake_popen(*args, **kwargs):
+            request_cancellation(job_id)
+            return fake_process
+
+        try:
+            with (
+                patch(
+                    "assistant.jobs.handlers.auto_approval.ensure_user_dirs",
+                    return_value=self.root,
+                ),
+                patch(
+                    "assistant.jobs.handlers.auto_approval.subprocess.Popen",
+                    side_effect=fake_popen,
+                ),
+                patch(
+                    "assistant.jobs.handlers.auto_approval.time.sleep",
+                    return_value=None,
+                ),
+            ):
+                with self.assertRaises(JobCancelled):
+                    run_auto_approval_job(job_id, self.session_factory)
+        finally:
+            clear_cancellation(job_id)
+
+        self.assertTrue(fake_process.terminated)
+        with self.session_factory() as session:
+            preview = session.get(AutoApprovalPreview, preview_id)
+            self.assertIsNotNone(preview)
+            self.assertEqual(preview.status, "cancelled")
 
     def test_running_operator_job_cannot_be_cancelled(self) -> None:
         job_id = self.add_job(job_type="operator_pipeline", status="running")

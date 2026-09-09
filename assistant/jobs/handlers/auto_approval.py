@@ -16,8 +16,9 @@ from datetime import datetime
 from pathlib import Path
 
 from assistant.database.models import Job
+from assistant.jobs.locks import is_cancellation_requested
 from assistant.jobs.progress import append_event, update_progress
-from assistant.jobs.registry import HandlerFailure
+from assistant.jobs.registry import HandlerFailure, JobCancelled
 from assistant.paths import ensure_user_dirs
 from assistant.services import auto_approval_service
 
@@ -31,6 +32,7 @@ JOB_TYPE_TO_MODE = {
 }
 
 PROGRESS_POLL_SECONDS = 2.0
+PROCESS_STOP_WAIT_SECONDS = 5.0
 
 
 def _load_request(session_factory, job_id: str) -> tuple[str, dict]:
@@ -162,6 +164,8 @@ def _progress_poller(
     """子进程运行期间轮询日志尾部，刷新进度消息与心跳。"""
     last_message = ""
     while process_handle.poll() is None:
+        if is_cancellation_requested(job_id):
+            return
         message = _tail_log_line(log_path)
         if message and message != last_message:
             last_message = message
@@ -173,6 +177,37 @@ def _progress_poller(
                 message=message,
             )
         time.sleep(PROGRESS_POLL_SECONDS)
+
+
+def _stop_process(process_handle) -> None:
+    """先 SIGTERM，超时再 SIGKILL。只读筛查可停；写任务不会走到这里。"""
+    if process_handle.poll() is not None:
+        return
+    process_handle.terminate()
+    try:
+        process_handle.wait(timeout=PROCESS_STOP_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process_handle.kill()
+        process_handle.wait(timeout=PROCESS_STOP_WAIT_SECONDS)
+
+
+def _mark_cancelled(mode: str, preview_id: str, execution_id: str, session_factory) -> None:
+    if mode == "preview" and preview_id:
+        auto_approval_service.sync_preview_result(
+            session_factory,
+            preview_id,
+            status="cancelled",
+            error_code="cancelled",
+            error_summary="只读筛查已取消。",
+        )
+    elif mode == "execute" and execution_id:
+        auto_approval_service.sync_execution_result(
+            session_factory,
+            execution_id,
+            status="cancelled",
+            error_code="cancelled",
+            error_summary="执行任务已取消。",
+        )
 
 
 def run_auto_approval_job(job_id: str, session_factory) -> str:
@@ -240,10 +275,13 @@ def run_auto_approval_job(job_id: str, session_factory) -> str:
             creationflags=creation_flags,
         )
     _progress_poller(session_factory, job_id, log_path, process_handle)
-    return_code = int(process_handle.wait())
-
     preview_id = str(request_payload.get("preview_id") or "")
     execution_id = str(request_payload.get("execution_id") or "")
+    if is_cancellation_requested(job_id):
+        _stop_process(process_handle)
+        _mark_cancelled(mode, preview_id, execution_id, session_factory)
+        raise JobCancelled("cancelled")
+    return_code = int(process_handle.wait())
     if return_code != 0:
         error_code = f"auto-approval-{mode}-failed"
         error_summary = (
