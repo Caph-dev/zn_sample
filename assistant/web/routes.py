@@ -23,19 +23,13 @@ from assistant.domain.followup_labels import (
     FOLLOWUP_PLATFORM_STATUS_FILTER_LABELS,
     FOLLOWUP_STAGE_LABELS,
     FOLLOWUP_STAGE_LIST_ORDER,
-    FOLLOWUP_STAGE_TONES,
     FOLLOWUP_STATUS_LABELS,
-    FOLLOWUP_STATUS_TONES,
     SUPERSEDED_REASON,
-    followup_action_completed,
-    followup_action_display,
-    followup_action_tone,
-    followup_language_label,
-    followup_status_display,
 )
 from assistant.jobs.locks import request_safe_store_summary
 from assistant.paths import database_path, user_data_dir
 from assistant.security.secret_redaction import redact_text
+from assistant.web import console_pages
 
 
 router = APIRouter()
@@ -47,16 +41,6 @@ router.include_router(shipments_api_router)
 router.include_router(auto_approval_api_router)
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
-templates.env.globals.update(
-    followup_action_completed=followup_action_completed,
-    followup_action_display=followup_action_display,
-    followup_action_tone=followup_action_tone,
-    followup_language_label=followup_language_label,
-    followup_status_display=followup_status_display,
-    FOLLOWUP_STAGE_LABELS=FOLLOWUP_STAGE_LABELS,
-    FOLLOWUP_STAGE_TONES=FOLLOWUP_STAGE_TONES,
-    FOLLOWUP_STATUS_TONES=FOLLOWUP_STATUS_TONES,
-)
 
 
 # 终态任务只在这个窗口内恢复到全局面板：刚跑完刷新还能看到结果，
@@ -107,8 +91,32 @@ def _base_context(request: Request) -> dict:
         "request": request,
         "app_name": "ZnSampleAssistant",
         "version": application_version(),
+        "static_version": _static_version(),
         "active_job": _latest_active_job(request),
     }
+
+
+STATIC_DIRECTORY = Path(__file__).resolve().parent / "static"
+# 静态资源没有 Cache-Control；用产物 mtime 做查询参数，避免浏览器拿旧 JS/CSS。
+_STATIC_VERSION_PATHS = (
+    STATIC_DIRECTORY / "app.js",
+    STATIC_DIRECTORY / "console-shell.css",
+    STATIC_DIRECTORY / "geist-theme.css",
+    STATIC_DIRECTORY / "console" / "assets" / "index.js",
+    STATIC_DIRECTORY / "console" / "assets" / "index.css",
+    STATIC_DIRECTORY / "auto-approval" / "assets" / "index.js",
+    STATIC_DIRECTORY / "auto-approval" / "assets" / "index.css",
+)
+
+
+def _static_version() -> str:
+    newest = 0.0
+    for path in _STATIC_VERSION_PATHS:
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    return str(int(newest))
 
 
 def _request_store_summary(request: Request) -> dict:
@@ -116,6 +124,24 @@ def _request_store_summary(request: Request) -> dict:
     if session_factory is None:
         return running_store_summary()
     return request_safe_store_summary(session_factory)
+
+
+def _console_response(
+    request: Request,
+    *,
+    page: str,
+    page_title: str,
+    data: dict,
+) -> HTMLResponse:
+    """渲染 Astryx React 壳；页面数据只通过 bootstrap JSON 传给前端。"""
+    context = _base_context(request)
+    context.update(
+        {
+            "page_title": page_title,
+            "page_payload": {"page": page, "data": data},
+        }
+    )
+    return templates.TemplateResponse(request, "console.html", context)
 
 
 def _debug_home_jobs(session_factory) -> None:
@@ -168,22 +194,32 @@ def _debug_home_jobs(session_factory) -> None:
 
 
 @router.get("/", response_class=HTMLResponse)
-def home(request: Request) -> HTMLResponse:
-    context = _base_context(request)
+def overview(request: Request) -> HTMLResponse:
+    """总览页：只读计数 + 准备状态摘要，不放任何操作入口。"""
     session_factory = getattr(request.app.state, "session_factory", None)
-    context.update(
-        {
-            "data_directory": redact_text(user_data_dir()),
-            "database_ready": database_path().is_file(),
-            "store_summary": _request_store_summary(request),
-            "dashboard": (
-                dashboard_summary(session_factory) if session_factory else {}
-            ),
-        }
+    store_summary = _request_store_summary(request)
+    dashboard = dashboard_summary(session_factory) if session_factory else {}
+    data = console_pages.overview_data(
+        data_directory=redact_text(user_data_dir()),
+        database_ready=database_path().is_file(),
+        store_summary=store_summary,
+        dashboard=dashboard,
     )
     if session_factory is not None:
         _debug_home_jobs(session_factory)
-    return templates.TemplateResponse(request, "home.html", context)
+    return _console_response(request, page="overview", page_title="总览", data=data)
+
+
+@router.get("/prepare", response_class=HTMLResponse)
+def prepare_page(request: Request) -> HTMLResponse:
+    """运行准备：调试口状态 + 检查环境 + 打开店铺。"""
+    store_summary = _request_store_summary(request)
+    data = console_pages.prepare_data(
+        data_directory=redact_text(user_data_dir()),
+        database_ready=database_path().is_file(),
+        store_summary=store_summary,
+    )
+    return _console_response(request, page="prepare", page_title="运行准备", data=data)
 
 
 @router.get("/diagnostics", response_class=HTMLResponse)
@@ -191,7 +227,6 @@ def diagnostics(request: Request) -> HTMLResponse:
     from lib.app_config import load_raw_config, resolve_config_path
     from lib.zclaw_cli import resolve_ziniao_cli_command
 
-    context = _base_context(request)
     cli_state = "READY"
     try:
         resolve_ziniao_cli_command()
@@ -208,22 +243,19 @@ def diagnostics(request: Request) -> HTMLResponse:
         if store_summary.get("error") == "ziniao-busy"
         else "READY"
     )
-    context.update(
-        {
-            "python_version": sys.version.split()[0],
-            "cli_state": cli_state,
-            "bridge_state": bridge_state,
-            "store_summary": store_summary,
-            "config_exists": bool(config_path),
-            "feishu_configured": bool(isinstance(feishu, dict) and feishu),
-        }
+    data = console_pages.diagnostics_data(
+        python_version=sys.version.split()[0],
+        cli_state=cli_state,
+        bridge_state=bridge_state,
+        config_exists=bool(config_path),
+        feishu_configured=bool(isinstance(feishu, dict) and feishu),
+        store_summary=store_summary,
     )
-    return templates.TemplateResponse(request, "diagnostics.html", context)
+    return _console_response(request, page="diagnostics", page_title="本机诊断", data=data)
 
 
 @router.get("/jobs", response_class=HTMLResponse)
 def jobs_page(request: Request) -> HTMLResponse:
-    context = _base_context(request)
     session_factory = getattr(request.app.state, "session_factory", None)
     jobs = []
     if session_factory is not None:
@@ -231,13 +263,12 @@ def jobs_page(request: Request) -> HTMLResponse:
             jobs = session.scalars(
                 select(Job).order_by(Job.created_at.desc()).limit(100)
             ).all()
-    context["jobs"] = jobs
-    return templates.TemplateResponse(request, "jobs.html", context)
+    data = {"rows": [console_pages.job_row(job) for job in jobs]}
+    return _console_response(request, page="jobs", page_title="任务", data=data)
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
 def job_detail_page(job_id: str, request: Request) -> HTMLResponse:
-    context = _base_context(request)
     session_factory = getattr(request.app.state, "session_factory", None)
     job = None
     if session_factory is not None:
@@ -245,13 +276,13 @@ def job_detail_page(job_id: str, request: Request) -> HTMLResponse:
             job = session.get(Job, job_id)
     if job is None:
         return HTMLResponse("任务不存在", status_code=404)
-    context["job"] = job
-    return templates.TemplateResponse(request, "job_detail.html", context)
+    data = console_pages.job_detail_data(job)
+    return _console_response(request, page="job_detail", page_title="任务详情", data=data)
 
 
 @router.get("/jobs/{job_id}/status", response_class=HTMLResponse)
 def job_status_partial(job_id: str, request: Request) -> HTMLResponse:
-    """HTML partial for the htmx status poll on the job detail page."""
+    """旧版 HTML 片段（保留兼容）；操作台任务详情已改用 React 监控钩子。"""
     context = _base_context(request)
     session_factory = getattr(request.app.state, "session_factory", None)
     job = None
@@ -266,7 +297,6 @@ def job_status_partial(job_id: str, request: Request) -> HTMLResponse:
 
 @router.get("/shipments", response_class=HTMLResponse)
 def shipments_page(request: Request, status: str = "") -> HTMLResponse:
-    context = _base_context(request)
     with request.app.state.session_factory() as session:
         query = select(Shipment, SampleCase).join(
             SampleCase,
@@ -274,22 +304,22 @@ def shipments_page(request: Request, status: str = "") -> HTMLResponse:
         )
         if status:
             query = query.where(Shipment.status_category == status)
-        context["rows"] = session.execute(query).all()
-    context["shipment_filter"] = status
-    return templates.TemplateResponse(request, "shipments.html", context)
+        rows = session.execute(query).all()
+    data = console_pages.shipments_data(rows, status)
+    return _console_response(request, page="shipments", page_title="物流", data=data)
 
 
 @router.get("/shipments/{shipment_id}", response_class=HTMLResponse)
 def shipment_detail_page(shipment_id: int, request: Request) -> HTMLResponse:
-    context = _base_context(request)
     with request.app.state.session_factory() as session:
         row = session.execute(
             select(Shipment, SampleCase).join(SampleCase, Shipment.sample_case_id == SampleCase.id).where(Shipment.id == shipment_id)
         ).first()
     if row is None:
         return HTMLResponse("物流记录不存在", status_code=404)
-    context["shipment"], context["sample_case"] = row
-    return templates.TemplateResponse(request, "shipment_detail.html", context)
+    shipment, sample_case = row
+    data = console_pages.shipment_detail_data(shipment, sample_case)
+    return _console_response(request, page="shipment_detail", page_title="物流详情", data=data)
 
 
 def _followup_filter_options() -> dict[str, list[tuple[str, str]]]:
@@ -322,7 +352,6 @@ def followups_page(
     platform_status: str = "",
     curr_status: int | None = None,
 ) -> HTMLResponse:
-    context = _base_context(request)
     with request.app.state.session_factory() as session:
         query = (
             select(FollowupTask, SampleCase).join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
@@ -347,8 +376,8 @@ def followups_page(
             func.lower(SampleCase.creator_id),
             FollowupTask.id,
         )
-        context["rows"] = session.execute(query).all()
-    context["filters"] = {
+        rows = session.execute(query).all()
+    filters = {
         "stage": stage,
         "status": status,
         "language": language,
@@ -356,13 +385,16 @@ def followups_page(
         "curr_status": curr_status,
         "include_superseded": bool(status),
     }
-    context["filter_options"] = _followup_filter_options()
-    return templates.TemplateResponse(request, "followups.html", context)
+    data = console_pages.followups_data(
+        rows,
+        filters=filters,
+        filter_options=_followup_filter_options(),
+    )
+    return _console_response(request, page="followups", page_title="跟进待办", data=data)
 
 
 @router.get("/followups/{task_id}", response_class=HTMLResponse)
 def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
-    context = _base_context(request)
     with request.app.state.session_factory() as session:
         row = session.execute(
             select(FollowupTask, SampleCase, Shipment, Store)
@@ -373,29 +405,48 @@ def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
         ).first()
     if row is None:
         return HTMLResponse("待办不存在", status_code=404)
-    context["task"], context["sample_case"], context["shipment"], context["store"] = row
-    context["attachment_url"] = (
+    task, sample_case, shipment, _store = row
+    attachment_url = (
         "/static/sop-images/2-查看到货+达人跟进-b05.png"
-        if Path(context["task"].attachment_key).name == "2-查看到货+达人跟进-b05.png" else ""
+        if Path(task.attachment_key).name == "2-查看到货+达人跟进-b05.png" else ""
     )
-    context["scheduled_label"] = "待确认送达日" if context["task"].stage == "confirm_delivery_time" or context["task"].scheduled_for is None else str(context["task"].scheduled_for)
-    return templates.TemplateResponse(request, "followup_detail.html", context)
+    scheduled_label = (
+        "待确认送达日"
+        if task.stage == "confirm_delivery_time" or task.scheduled_for is None
+        else str(task.scheduled_for)
+    )
+    data = console_pages.followup_detail_data(
+        task,
+        sample_case,
+        shipment,
+        attachment_url=attachment_url,
+        scheduled_label=scheduled_label,
+    )
+    return _console_response(request, page="followup_detail", page_title="跟进预览", data=data)
 
 
 @router.get("/reports", response_class=HTMLResponse)
 def reports_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "reports.html", _base_context(request))
+    return _console_response(
+        request,
+        page="reports",
+        page_title="报表",
+        data=console_pages.reports_data(),
+    )
 
 
 @router.get("/auto-approval", response_class=HTMLResponse)
 def auto_approval_page(request: Request) -> HTMLResponse:
-    """独立 React 文档壳：不加载旧 app.css，避免样式污染 HTMX 页面。"""
-    return templates.TemplateResponse(
-        request,
-        "auto_approval.html",
+    """独立 React 文档壳：与操作台各自构建，互不加载对方样式。
+
+    顶部注入标准 SOP 只读名单入口（正式筛查/批准仍只走脚本）；
+    运行准备降级为只读状态条 + 去 /prepare 的链接，本页不再单独探活。
+    """
+    context = _base_context(request)
+    context.update(
         {
-            "request": request,
-            "app_name": "ZnSampleAssistant",
-            "version": "",
-        },
+            "page_title": "自动批准",
+            "page_payload": console_pages.approval_page_data(),
+        }
     )
+    return templates.TemplateResponse(request, "auto_approval.html", context)

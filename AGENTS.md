@@ -17,7 +17,7 @@
    **仅** `--execute --yes` 可对筛查通过行点「同意」（永不拒绝）或发第 7 / 10 步私信。
    写飞书另加 `--write-feishu`。测试默认不写飞书。  
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
-   唯一隔离例外：「自动审批」子页面走自有任务链（见下文「自动审批子页面」），
+   唯一隔离例外：「自动批准」页的自定义规则链走自有任务链（见下文「自动审批子页面」），
    仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
 
 2. **两阶段导航**  
@@ -53,7 +53,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 本地网页操作台 | 只读日常更新；另提供固定 0/1/2/3 网页入口并复用 `operator_launch` | 不接受任意命令/参数；2/3 仍须网页明确输入 `y`，3 在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
+| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）与物流写回/跟进动作，复用 `operator_launch`；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -62,6 +62,23 @@
 | 第 8–9 步物流 | 独立脚本；**北京时间 16:00 前拒绝** | 先飞书近 7×24 小时且合作状态=待发货（主键红人ID+寄样产品），再对已发货。`main_order_id` 不是发给达人的单号；`--force` 只过时间门。物流 GET 对齐订单页 query（`oec_seller_id`/`seller_id`/`aid`）；订单 URL 用 `seller.us`，不用 apex。紫鸟 `error.html` 当跳转失败 |
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
+
+**详情接口系统级故障熔断**：错误串含 `code=100000` 或 `Please remove the plugin` 视为逐行复现的故障（TikTok 反爬判定浏览器环境/插件流量）。连续 3 行（`SYSTEMIC_DETAIL_FAILURE_LIMIT`）即停止逐行 API 与 DOM 回退，剩余行标 `detail-api-systemic-failure` → needs_review，只记一条汇总。禁止把该错误当成单行失败继续刷表；出现后先关插件/换干净 profile 或等平台恢复。实测证据见 `达人资料补齐接口故障排查-20260906.md` 顶部更正。
+
+---
+
+## 操作台页面（Astryx React 壳）
+
+导航固定八项：总览 / 运行准备 / 自动批准 / 达人跟进 / 物流 / 任务 / 报表 / 诊断（含各自详情页）。正文由 React + Astryx 渲染，源码 `frontend/src/console/`，构建 `npm run build:console`（或 `npm run build:web` 同时构建自动批准），产物 `assistant/web/static/console/` 被 gitignore。
+
+- 服务端只渲染 `assistant/web/templates/console.html` 并注入 bootstrap JSON：页面数据在 `assistant/web/console_pages.py`，契约同步 `frontend/src/console/types.ts`。不要新增 Jinja 页面模板或手写页面 CSS。
+- **入口按页归属**（`operator_groups(page)`）：`/prepare` 打开店铺；`/auto-approval` 顶部只出名单（只读筛查）；`/followups` 物流同步 + 物流写回（16:00 门）+ 补齐资料 + 生成待办 + 预演感谢私信。**正式 SOP 的「筛查-批准-写飞书-私信」已从网页移除，只走脚本 1/2**；`/api/jobs/operator/pipeline` 端点保留兼容，不在任何页面暴露。
+- `assistant/web/static/app.js` 仍负责任务面板、确认弹窗与表单提交：表单是 document 级事件委托（`data-job-form` / `data-job-cancel`），React 后挂载也能绑定；任务详情页挂载后派发 `assistant:monitor-job` 启动监控；准备状态由总览 / 运行准备页轮询，自动批准页只显示状态条 + 去准备页链接（不重复探活）。
+- 任务面板与确认弹窗抽到 `_task_panel.html`，`console.html` 与 `auto_approval.html` 共用；两个壳都加载 `app.js` 与 `console-shell.css`。
+- 静态资源按产物 mtime 加 `?v=`（`_static_version()`），避免浏览器缓存旧 JS/CSS。
+- **主题 CSS 必须在组件产物之后加载**（`geist-theme.css` 放 `console/assets/index.css` / `auto-approval/assets/index.css` 之后）。产物里默认主题在 `@layer astryx-base`，主题文件在 `@layer astryx-theme`；layer 顺序按首次出现决定，主题先加载会被默认值压住（表现为 Meta 蓝 `#0064E0` + 系统字体，而不是 Geist 蓝 `#0070f3` + Geist 字体）。主题主色是蓝，勿改回黑。
+- `assistant/web/static/console-shell.css` 只保留 app.js 动态生成 DOM 与任务面板 / 确认弹窗所需类，禁止裸元素选择器，避免污染 Astryx 组件。
+- 页面级测试改断言 bootstrap JSON（`tests/assistant/console_payload.py`），不再匹配已不渲染的 HTML。
 
 ---
 
@@ -120,9 +137,9 @@
 | `--force` | 只绕过 16:00 |
 | `--observe-approve-network` | 仅单条 execute 被动观察；不重放、不登记未确认 endpoint |
 
-网页 0/1/2/3 不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking` 四个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排，不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
+网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking` 四个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排，不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）和 `tracking`（达人跟进页物流写回）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
 
-网页“运行前准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。
+网页“运行准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。探活只在总览 / 运行准备页轮询；自动批准页只显示状态条 + 去准备页链接。
 
 批准：先同意成功再写飞书；去重或货号无法映射 → 不批不写。红人ID=`creator_name`。  
 第 10 步发 **TikTok 物流单号**（有承运商则 `{承运商}, {单号}`），不是订单 ID。已有不同单号默认不覆盖（须 `--overwrite`）。
@@ -153,7 +170,7 @@
 
 **第 5 步内容审查（第 4 步销售数据通过后）：** TikTok 最近滚动 7×24 小时内，至少 4 条相关带货视频，且这些视频中至少 1 条明确展示产品穿在身上，或同一画面内露脸并手持产品。相关类目沿用既有 7 类：Beauty & Personal Care、Womenswear & Underwear、Household Appliances、Fashion Accessories、Shoes、Sports & Outdoor、Home Textiles。无需强制 ASR、口播或每日发布配额。
 
-未知、缺失或部分采集且证据不足 → `needs_review`，不得 `eligible`；完整计数少于 4 条 → `failed`。已确认至少 4 条相关带货视频且其中有展示证据时允许短路通过，但计数只能标为已知下界，不得冒充全量总数。仅第 4、5 步均通过才可批准；旧导出缺少内容通过证据不可批准，历史 `--confirm-export` 核对/补写保持不变。
+未知、缺失或部分采集且证据不足 → `needs_review`，不得 `eligible`；完整计数少于 4 条 → `failed`。解析不了的购物锚点不计入那 4 条，也不单独否决；已确认至少 4 条相关且有展示证据即可通过。未知只在相关还不足 4 条时待复核。已确认至少 4 条相关带货视频且其中有展示证据时允许短路通过，但计数只能标为已知下界，不得冒充全量总数。仅第 4、5 步均通过才可批准；旧导出缺少内容通过证据不可批准，历史 `--confirm-export` 核对/补写保持不变。
 
 内容能力使用本地 `scripts/lib/tiktok_creator_videos.py` 与 `scripts/lib/creator_video_review.py`，不依赖独立 `video-analysis-api` 项目。外部环境配置只接受显式白名单，不批量导入外部环境文件；保留现有 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，不得被内容配置覆盖。本次实现验证不执行批准、飞书写入或私信发送，不代表已完成实店全链路验收。
 

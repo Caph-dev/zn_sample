@@ -1,0 +1,37 @@
+{# 全局面板与确认弹窗：app.js 通过 data-* 驱动，操作台与自动批准页共用。 #}
+  <section class="task-panel" data-task-panel data-task-restore-job="{% if active_job %}{{ active_job.id }}{% endif %}" hidden aria-live="polite">
+    <header class="task-panel-header">
+      <p class="eyebrow" data-task-eyebrow>正在处理</p>
+      <h2 data-task-title>后台任务</h2>
+      <span data-task-status class="token token--neutral">
+        <span class="status-dot status-dot--neutral"></span>等待执行
+      </span>
+      <div class="task-panel-actions">
+        <form method="post" action="/api/jobs/placeholder/cancel" data-job-cancel data-job-id="">
+          <button type="submit" class="button--destructive" hidden>取消</button>
+        </form>
+        <button type="button" class="button--secondary task-clear-output" data-task-clear-output hidden>清空输出</button>
+      </div>
+    </header>
+    <p class="task-progress-message" data-task-progress-message>任务即将开始</p>
+    <progress class="task-progress-bar" data-task-progress max="1" value="0" hidden></progress>
+    <p class="task-progress-text" data-task-progress-text>等待任务开始</p>
+    <ol class="task-events" data-task-events aria-label="任务执行过程"></ol>
+    <section class="task-result" data-task-result aria-live="polite"></section>
+  </section>
+  <dialog class="confirmation-dialog" data-confirm-dialog aria-labelledby="confirmation-dialog-title" aria-describedby="confirmation-dialog-description">
+    <form method="dialog" data-confirm-dialog-form>
+      <p class="eyebrow">需要明确确认</p>
+      <h2 id="confirmation-dialog-title" data-confirm-dialog-title>确认执行</h2>
+      <p data-confirm-dialog-description></p>
+      <label class="confirmation-field">
+        <small>请输入 <strong data-confirm-dialog-token></strong> 继续</small>
+        <input type="text" data-confirm-dialog-input autocomplete="off" spellcheck="false">
+      </label>
+      <p class="confirmation-error" data-confirm-dialog-error hidden>输入内容不正确，操作尚未开始。</p>
+      <menu class="confirmation-actions">
+        <button type="submit" value="cancel" class="button--secondary" formnovalidate>取消</button>
+        <button type="submit" value="confirm" class="button--destructive" data-confirm-dialog-action>确认并开始</button>
+      </menu>
+    </form>
+  </dialog>

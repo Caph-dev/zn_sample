@@ -186,6 +186,7 @@ export function ResultsPanel({
                         candidate.custom_eligible && !candidate.blocked && !previewInvalidated && preview.integrity_complete;
                       return (
                         <CheckboxInput
+                          size="sm"
                           label={`选择 ${candidate.creator_name}`}
                           isLabelHidden
                           value={

@@ -4,7 +4,6 @@ import {Stack} from '@astryxdesign/core/Stack';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 
 import {
-  createEnvironmentCheck,
   createExecution,
   createPreview,
   getExecution,
@@ -22,8 +21,10 @@ import {AppNavigation} from './components/AppNavigation';
 import {ReadinessPanel} from './components/ReadinessPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
-import {buildStandardRule, validateDraft} from './ruleModel';
+import {StandardScreenPanel} from './components/StandardScreenPanel';
+import {buildStandardRule, normalizeRule, validateDraft} from './ruleModel';
 import type {
+  AutoApprovalBootstrap,
   ExecutionPayload,
   OptionsPayload,
   PreviewPayload,
@@ -32,7 +33,6 @@ import type {
 } from './types';
 
 const POLL_INTERVAL_MS = 2000;
-const STORE_POLL_INTERVAL_MS = 5000;
 
 function isJobActive(jobStatus: string | undefined): boolean {
   return jobStatus === 'pending' || jobStatus === 'running';
@@ -49,18 +49,16 @@ function ruleEquals(left: RuleDraft, right: RuleDraft): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function formatSavedAt(value: string): string {
-  if (value === '') {
-    return '上次';
+function notifyJobMonitor(jobId: string | undefined) {
+  if (!jobId) {
+    return;
   }
-  const savedDate = new Date(value);
-  if (Number.isNaN(savedDate.getTime())) {
-    return value;
-  }
-  return savedDate.toLocaleString();
+  document.dispatchEvent(
+    new CustomEvent('assistant:monitor-job', {detail: {jobId}}),
+  );
 }
 
-export function App() {
+export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [options, setOptions] = useState<OptionsPayload | null>(null);
   const [optionsError, setOptionsError] = useState('');
   const [rule, setRule] = useState<RuleDraft>(() => buildStandardRule(null));
@@ -80,12 +78,8 @@ export function App() {
   const [confirmText, setConfirmText] = useState('');
   const [reconcileConfirmText, setReconcileConfirmText] = useState('');
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
-  const [checkingEnvironment, setCheckingEnvironment] = useState(false);
-  const [environmentNote, setEnvironmentNote] = useState('');
-  const [draftNotice, setDraftNotice] = useState('');
 
   const previewPollTimer = useRef<number | null>(null);
-  const storePollTimer = useRef<number | null>(null);
   const restoredPreviewRef = useRef(false);
 
   const busy = storeSummary?.error === 'ziniao-busy';
@@ -138,14 +132,10 @@ export function App() {
         if (!payload.hero.ok) {
           setOptionsError('主推款表不可用，请检查飞书配置。');
         }
-        // 有上次保存的自定义规则就回填（预览恢复优先，避免覆盖当前任务上下文）。
+        // 有上次保存的自定义规则就静默回填（预览恢复优先，避免覆盖当前任务上下文）。
         if (payload.saved_rule !== null && !restoredPreviewRef.current) {
-          setRule(payload.saved_rule.rule);
+          setRule(normalizeRule(payload.saved_rule.rule, payload.categories));
           setDisplayMode('custom');
-          setDraftNotice(
-            `已恢复上次使用的自定义规则（保存于 ${formatSavedAt(payload.saved_rule.saved_at)}）。` +
-              '确认后可直接筛查，或修改后重新筛查。',
-          );
         }
       })
       .catch((error) => setOptionsError(errorMessage(error)));
@@ -159,7 +149,7 @@ export function App() {
             .then((payload) => {
               restoredPreviewRef.current = true;
               setPreview(payload);
-              setRule(payload.rule);
+              setRule(normalizeRule(payload.rule));
               setDisplayMode('custom');
             })
             .catch(() => {});
@@ -171,10 +161,7 @@ export function App() {
         }
       })
       .catch(() => {});
-    const storeTimer = window.setInterval(refreshStore, STORE_POLL_INTERVAL_MS);
-    storePollTimer.current = storeTimer;
     return () => {
-      window.clearInterval(storeTimer);
       if (previewPollTimer.current !== null) {
         window.clearInterval(previewPollTimer.current);
       }
@@ -225,10 +212,26 @@ export function App() {
     return undefined;
   }, [execution, pollExecution]);
 
-  const onRuleChange = useCallback((next: RuleDraft) => {
-    // 修改规则使旧结果失效：由 previewInvalidated 统一判定。
-    setRule(next);
-  }, []);
+  useEffect(() => {
+    if (preview !== null && isJobActive(preview.job?.status)) {
+      notifyJobMonitor(preview.job?.job_id || preview.job_id);
+    }
+  }, [preview]);
+
+  useEffect(() => {
+    if (execution !== null && isJobActive(execution.job?.status)) {
+      notifyJobMonitor(execution.job?.job_id || execution.job_id);
+    }
+  }, [execution]);
+
+  const onRuleChange = useCallback(
+    (next: RuleDraft) => {
+      // 修改规则使旧结果失效：由 previewInvalidated 统一判定。
+      // 组逻辑固定 either、类目固定全选（UI 已移除选择框）。
+      setRule(normalizeRule(next, options?.categories));
+    },
+    [options],
+  );
 
   const onStartPreview = useCallback(async () => {
     if (previewCreating) {
@@ -241,6 +244,7 @@ export function App() {
     setConfirmText('');
     try {
       const created = await createPreview(rule, storeSummary?.store?.storeId ?? null);
+      notifyJobMonitor(created.job_id);
       const payload = await getPreview(created.preview_id);
       setPreview(payload);
     } catch (error) {
@@ -266,6 +270,7 @@ export function App() {
         confirmation: confirmText,
         idempotency_key: idempotencyKey,
       });
+      notifyJobMonitor(created.job_id);
       setExecution(await getExecution(created.execution_id));
       setConfirmText('');
     } catch (error) {
@@ -315,54 +320,16 @@ export function App() {
     }
   }, [execution, reconciling, reconcileConfirmText]);
 
-  const onCheckEnvironment = useCallback(async () => {
-    if (checkingEnvironment) {
-      return;
-    }
-    setCheckingEnvironment(true);
-    setEnvironmentNote('');
-    try {
-      const {job_id} = await createEnvironmentCheck();
-      const poll = async () => {
-        try {
-          const {events} = await getJobEvents(job_id, 0);
-          const last = events[events.length - 1];
-          if (last !== undefined) {
-            setEnvironmentNote(last.message);
-          }
-        } catch {
-          // 检查任务状态轮询失败静默。
-        }
-      };
-      void poll();
-      const timer = window.setInterval(() => {
-        void poll();
-      }, POLL_INTERVAL_MS);
-      window.setTimeout(() => window.clearInterval(timer), 30000);
-    } catch (error) {
-      setEnvironmentNote(`环境检查创建失败：${errorMessage(error)}`);
-    } finally {
-      setCheckingEnvironment(false);
-    }
-  }, [checkingEnvironment]);
-
   return (
     <AppShell
       height="auto"
       variant="section"
       contentPadding={4}
-      sideNav={<AppNavigation />}
+      sideNav={
+        <AppNavigation activePath="/auto-approval" subheading="自动批准 · 自定义审核方案" />
+      }
     >
       <Stack gap={4}>
-        {draftNotice !== '' && (
-          <Banner
-            status="info"
-            title="已记忆上次的自定义规则"
-            description={draftNotice}
-            isDismissable
-            onDismiss={() => setDraftNotice('')}
-          />
-        )}
         {optionsError !== '' && (
           <ReadinessBanner message={optionsError} />
         )}
@@ -373,13 +340,13 @@ export function App() {
             events={previewEvents}
           />
         )}
+        {bootstrap.screen_group !== null && (
+          <StandardScreenPanel group={bootstrap.screen_group} />
+        )}
         <ReadinessPanel
           storeSummary={storeSummary}
           busy={busy}
-          checkingEnvironment={checkingEnvironment}
-          onCheckEnvironment={onCheckEnvironment}
-          onRefreshStore={refreshStore}
-          environmentNote={environmentNote}
+          prepareHref={bootstrap.prepare_href}
         />
         <RuleConfigPanel
           options={options}

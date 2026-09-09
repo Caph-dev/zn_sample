@@ -23,6 +23,7 @@ from assistant.jobs.registry import HandlerFailure
 from lib.page_api import PageApiSchemaError, SellerPageContext
 from assistant.app import create_app
 from assistant.database.models import Shipment, Store
+from tests.assistant.console_payload import console_data
 
 
 class ShipmentSyncTests(unittest.TestCase):
@@ -1175,7 +1176,11 @@ class ShipmentSyncTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             response = client.get("/shipments")
-        self.assertIn("未送达", response.text)
-        self.assertNotIn("待确认送达日", response.text)
+        shipment_data = console_data(response)
+        self.assertEqual(len(shipment_data["rows"]), 1)
+        row = shipment_data["rows"][0]
+        self.assertEqual(row["delivered_at"], "")
+        self.assertFalse(row["needs_delivery_confirmation"])
+        self.assertEqual(row["status_label"], "运输中")
         self.assertIn("order-visible", response.text)
         self.assertIn("tracking-visible", response.text)

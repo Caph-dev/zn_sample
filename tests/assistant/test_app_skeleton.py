@@ -38,7 +38,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertTrue(response.json()["ok"])
         self.assertNotIn("secret", response.text.lower())
 
-    def test_home_renders_without_bootstrap(self) -> None:
+    def test_overview_renders_without_bootstrap(self) -> None:
         with patch("lib.zclaw.list_running_stores", return_value=[]):
             response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
@@ -47,30 +47,106 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertNotIn("推荐操作", response.text)
         self.assertNotIn("单独操作", response.text)
         self.assertNotIn("0–3 脚本", response.text)
-        self.assertIn("运行前准备", response.text)
-        self.assertIn("运行 1–3", response.text)
-        self.assertIn("Part.B: 追踪物流，跟进达人视频发布", response.text)
-        self.assertIn('action="/api/jobs/operator/prepare"', response.text)
-        self.assertIn('href="/auto-approval"', response.text)
-        self.assertIn("data-preparation-status", response.text)
-        self.assertIn("data-store-prepare-button", response.text)
-        self.assertIn('action="/api/jobs/operator/screen"', response.text)
-        self.assertIn('action="/api/jobs/operator/pipeline"', response.text)
-        self.assertIn('action="/api/jobs/operator/tracking"', response.text)
-        self.assertIn('action="/api/jobs/content-thanks-preview"', response.text)
-        self.assertLess(
-            response.text.index('action="/api/jobs/operator/prepare"'),
-            response.text.index("Part.A: 自动批准样品申请"),
-        )
-        self.assertLess(
-            response.text.index('action="/api/jobs/operator/tracking"'),
-            response.text.index('action="/api/jobs/shipment-sync"'),
-        )
-        self.assertIn('<details class="environment-details">', response.text)
-        self.assertNotIn('<details class="environment-details" open>', response.text)
-        self.assertIn('data-confirm-token="y"', response.text)
         self.assertIn("/static/app.js", response.text)
         self.assertIn('data-theme="light"', response.text)
+        # Astryx React 壳：服务端只给 bootstrap JSON 与构建产物入口。
+        self.assertIn('id="console-bootstrap"', response.text)
+        self.assertIn("/static/console/assets/index.js", response.text)
+        self.assertIn("/static/console/assets/index.css", response.text)
+        self.assertIn("data-task-panel", response.text)
+        self.assertIn("data-confirm-dialog", response.text)
+
+        payload = self._console_bootstrap(response)
+        self.assertEqual(payload["page"], "overview")
+        data = payload["data"]
+        # 总览只读：只有计数，不放任何操作入口。
+        self.assertNotIn("operator_groups", data)
+        self.assertEqual(
+            [item["label"] for item in data["queue_items"]],
+            [
+                "等待确认送达或仍在运输",
+                "今日到货提醒",
+                "D+3 跟进",
+                "D+7 跟进",
+                "D+10 待出名单",
+                "D+15 未发布",
+                "需要人工确认",
+                "物流异常",
+                "失败任务",
+            ],
+        )
+        queue_hrefs = [item["href"] for item in data["queue_items"]]
+        self.assertIn("/followups?stage=day_3", queue_hrefs)
+        self.assertIn("/jobs", queue_hrefs)
+
+    def test_prepare_page_exposes_store_entry(self) -> None:
+        with patch("lib.zclaw.list_running_stores", return_value=[]):
+            response = self.client.get("/prepare")
+        self.assertEqual(response.status_code, 200)
+        payload = self._console_bootstrap(response)
+        self.assertEqual(payload["page"], "prepare")
+        groups = payload["data"]["operator_groups"]
+        self.assertEqual([group["key"] for group in groups], ["prepare"])
+        self.assertEqual(groups[0]["heading"], "打开店铺")
+        items = groups[0]["items"]
+        self.assertEqual([item["action"] for item in items], ["/api/jobs/operator/prepare"])
+        self.assertTrue(items[0]["is_prepare"])
+        self.assertIsNone(items[0]["confirm"])
+        # 正式 SOP 的批准入口已从网页移除。
+        self.assertNotIn("/api/jobs/operator/pipeline", response.text)
+
+    def _console_bootstrap(self, response) -> dict:
+        import json
+        import re
+
+        match = re.search(
+            r'<script id="console-bootstrap" type="application/json">(.*?)</script>',
+            response.text,
+            re.S,
+        )
+        self.assertIsNotNone(match, "console-bootstrap script missing")
+        return json.loads(match.group(1))
+
+    def test_auto_approval_page_keeps_its_own_shell(self) -> None:
+        response = self.client.get("/auto-approval")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("/static/auto-approval/assets/index.js", response.text)
+        self.assertNotIn("/static/console/assets/index.js", response.text)
+        # 共用 app.js 任务面板与确认弹窗，但 bootstrap 走自己的 id。
+        self.assertIn("/static/app.js", response.text)
+        self.assertIn("data-task-panel", response.text)
+        self.assertIn('id="auto-approval-bootstrap"', response.text)
+
+        payload = self._auto_approval_bootstrap(response)
+        screen_group = payload["screen_group"]
+        self.assertEqual(screen_group["key"], "standard_screen")
+        self.assertEqual(
+            [item["action"] for item in screen_group["items"]],
+            ["/api/jobs/operator/screen"],
+        )
+        self.assertIsNone(screen_group["items"][0]["confirm"])
+        self.assertEqual(payload["prepare_href"], "/prepare")
+
+        app_js = (PROJECT_ROOT / "assistant" / "web" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("auto_approval_preview", app_js)
+        self.assertIn("assistant:monitor-job", app_js)
+        self.assertIn("useGlobalPanel: true", app_js)
+        self.assertIn("existingMonitor", app_js)
+        self.assertIn("writeJobTypes", app_js)
+
+    def _auto_approval_bootstrap(self, response) -> dict:
+        import json
+        import re
+
+        match = re.search(
+            r'<script id="auto-approval-bootstrap" type="application/json">(.*?)</script>',
+            response.text,
+            re.S,
+        )
+        self.assertIsNotNone(match, "auto-approval-bootstrap script missing")
+        return json.loads(match.group(1))
 
     def test_preparation_status_reports_ready_execute_script_channel(self) -> None:
         store = {"storeId": "store-custom", "storeName": "Custom"}
@@ -154,7 +230,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         ):
             response = self.client.get("/diagnostics")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("<dt>Bridge</dt><dd>READY</dd>", response.text)
+        self.assertIn('"bridge_state": "READY"', response.text)
         self.assertNotIn("must-not-render", response.text)
         self.assertNotIn("app_secret", response.text)
         list_stores.assert_called_once_with()
@@ -170,9 +246,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         ):
             response = self.client.get("/diagnostics")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(
-            "<dt>Bridge</dt><dd>BRIDGE_UNAVAILABLE</dd>", response.text
-        )
+        self.assertIn('"bridge_state": "BRIDGE_UNAVAILABLE"', response.text)
         list_stores.assert_called_once_with()
 
     def test_database_schema_and_sensitive_setting_guard(self) -> None:

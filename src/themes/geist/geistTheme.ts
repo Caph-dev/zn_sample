@@ -1,9 +1,10 @@
 /**
- * Geist Theme — Vercel-style monochrome refit of the neutral theme.
+ * Geist Theme — Vercel-style refit of the neutral theme.
  *
- * The redesign brief: 简约 / Vercel 风格. That means ruthless monochrome:
- * pure black and white, a hairline #eaeaea border, one blue (#0070f3)
- * reserved for links and status, and almost no elevation.
+ * The redesign brief: 简约 / Vercel 风格. Monochrome surfaces, a hairline
+ * #eaeaea border, and one blue (#0070f3) used for every action and status
+ * accent — the black-primary variant was dropped, so buttons, checkboxes,
+ * switches and links all read as the same blue.
  *
  * This theme extends the neutral theme (which owns the OKLCH categorical
  * status ramps and the component overrides), then re-tokens the core —
@@ -14,7 +15,7 @@
  * All free-standing values live here in the theme (per the repo rule that
  * brand/accent belongs in the theme, never in :root overrides).
  * Font files are self-hosted Geist woff2 (see /static/fonts and the
- * @font-face rules in app.css).
+ * @font-face rules in assistant/web/static/console-shell.css).
  */
 
 import {defineTheme} from '@astryxdesign/core/theme';
@@ -67,12 +68,13 @@ export const geistTheme = defineTheme({
     '--color-background-inverted': ['#000000', '#000000'],
 
     // =========================================================================
-    // Accent — black action surfaces, white text. Hover lifts to #333 like
-    // the Vercel primary button; press snaps back to black.
-    '--color-accent': ['#000000', '#ededed'],
-    '--color-accent-hover': ['#333333', '#ffffff'],
-    '--color-accent-pressed': ['#000000', '#e0e0e0'],
-    '--color-accent-muted': ['#f5f5f5', '#262626'],
+    // Accent — 蓝色主色（#0070f3）。原稿是「黑主色 + 蓝色只留给链接/状态」，
+    // 现改为整个主色即主题自带的 Geist 蓝，按钮/勾选/开关/进度条同色。
+    // 三级色阶取自主题已有蓝色：常态 #0070f3 → hover #0060be → pressed #0057ad。
+    '--color-accent': ['#0070f3', '#3291ff'],
+    '--color-accent-hover': ['#0060be', '#5aa7ff'],
+    '--color-accent-pressed': ['#0057ad', '#3291ff'],
+    '--color-accent-muted': ['#e5f1fd', '#9eb7ff3D'],
     '--color-neutral': ['#fafafa', '#FFFFFF1A'],
 
     // Overlays — neutral black/white washes (no more purple tint on hover).
@@ -143,9 +145,6 @@ export const geistTheme = defineTheme({
     },
     statusdot: {
       'variant:accent': {backgroundColor: 'light-dark(#0070f3, #6d9cfe)'},
-    },
-    progressbar: {
-      'variant:accent': {'--color-accent': '#0070f3'},
     },
   },
 });

@@ -94,6 +94,34 @@ export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
   };
 }
 
+/**
+ * UI 固定项归一化：
+ * - 视频/直播组逻辑固定「任一侧达标」（选择框已移除）；旧草稿存 both 会被判为已修改，需重新筛查。
+ * - 类目选择框已移除：启用时固定使用全部白名单类目。
+ */
+export function normalizeRule(
+  rule: RuleDraft,
+  categories: string[] = DEFAULT_CATEGORIES,
+): RuleDraft {
+  const allCategories = categories.length > 0 ? categories : DEFAULT_CATEGORIES;
+  const next: RuleDraft = {
+    ...rule,
+    basic: {
+      ...rule.basic,
+      categories: {
+        ...rule.basic.categories,
+        values: rule.basic.categories.enabled
+          ? allCategories.slice()
+          : rule.basic.categories.values,
+      },
+    },
+  };
+  if (next.video_live.logic === 'either') {
+    return next;
+  }
+  return {...next, video_live: {...next.video_live, logic: 'either'}};
+}
+
 /** 前端校验（服务端仍会再次严格校验）。返回错误消息数组，空数组=通过。 */
 export function validateDraft(rule: RuleDraft, options: OptionsPayload | null): string[] {
   const errors: string[] = [];

@@ -1,22 +1,24 @@
 import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
-import {CheckboxList, CheckboxListItem} from '@astryxdesign/core/CheckboxList';
+import {Divider} from '@astryxdesign/core/Divider';
 import {Grid, GridSpan} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
 import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList';
 import {NumberInput} from '@astryxdesign/core/NumberInput';
 import {Section} from '@astryxdesign/core/Section';
 import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/SegmentedControl';
-import {Stack} from '@astryxdesign/core/Stack';
+import {Stack, StackItem} from '@astryxdesign/core/Stack';
 import {Switch} from '@astryxdesign/core/Switch';
 import {Text} from '@astryxdesign/core/Text';
+import {Fragment} from 'react';
 
 import type {BasicKey, OptionsPayload, RuleDraft, SideDraft} from '../types';
 import {
   BASIC_KEYS,
   BASIC_LABELS,
   BASIC_UNITS,
+  DEFAULT_CATEGORIES,
   summaryRows,
   validateDraft,
 } from '../ruleModel';
@@ -163,24 +165,33 @@ export function RuleConfigPanel({
                 />
               )}
               {heroProducts.length > 0 && (
-                <CheckboxList
-                  label="主推商品"
-                  value={rule.product_ids}
-                  onChange={(values) => onRuleChange({...rule, product_ids: values})}
-                >
-                  {heroProducts.map((product) => (
-                    <CheckboxListItem
-                      key={product.product_id}
-                      value={product.product_id}
-                      label={`${product.sku}（${product.product_id}）`}
-                    />
-                  ))}
-                </CheckboxList>
+                <Grid columns={{minWidth: 300, max: 2}} gap={2}>
+                  {heroProducts.map((product) => {
+                    const productId = product.product_id;
+                    const isChecked = rule.product_ids.includes(productId);
+                    return (
+                      <CheckboxInput
+                        key={productId}
+                        size="sm"
+                        label={`${product.sku}（${productId}）`}
+                        value={isChecked}
+                        onChange={(checked) =>
+                          onRuleChange({
+                            ...rule,
+                            product_ids: checked
+                              ? [...rule.product_ids, productId]
+                              : rule.product_ids.filter((id) => id !== productId),
+                          })
+                        }
+                      />
+                    );
+                  })}
+                </Grid>
               )}
             </Stack>
 
             <Stack gap={2}>
-              <Heading level={3}>基础条件（之间为 AND；不启用 = not_checked）</Heading>
+              <Heading level={3}>基础条件</Heading>
               <Grid columns={{minWidth: 320, max: 2}} gap={3}>
                 {BASIC_KEYS.filter((key) => key !== 'categories' && key !== 'aov').map((key) => {
                   const draft = rule.basic[key];
@@ -195,6 +206,7 @@ export function RuleConfigPanel({
                       hAlign="between"
                     >
                       <CheckboxInput
+                        size="sm"
                         label={BASIC_LABELS[key]}
                         value={draft.enabled}
                         onChange={(checked) => updateBasic(key, {enabled: checked})}
@@ -219,6 +231,7 @@ export function RuleConfigPanel({
                 <GridSpan columns="full">
                   <Stack direction="horizontal" gap={2} vAlign="center">
                     <CheckboxInput
+                      size="sm"
                       label="客单价"
                       value={rule.basic.aov.enabled}
                       onChange={(checked) => updateBasic('aov', {enabled: checked})}
@@ -252,26 +265,21 @@ export function RuleConfigPanel({
               </Grid>
               <Stack gap={1}>
                 <CheckboxInput
-                  label="类目（命中任一项）"
+                  size="sm"
+                  label="类目（命中任一项，默认全部白名单类目）"
                   value={rule.basic.categories.enabled}
-                  onChange={(checked) => updateBasic('categories', {enabled: checked})}
+                  onChange={(checked) =>
+                    updateBasic('categories', {
+                      enabled: checked,
+                      values: (options?.categories ?? DEFAULT_CATEGORIES).slice(),
+                    })
+                  }
                 />
-                {rule.basic.categories.enabled && (
-                  <CheckboxList
-                    label="允许类目"
-                    value={rule.basic.categories.values}
-                    onChange={(values) => updateBasic('categories', {values})}
-                  >
-                    {(options?.categories ?? []).map((category) => (
-                      <CheckboxListItem key={category} value={category} label={category} />
-                    ))}
-                  </CheckboxList>
-                )}
               </Stack>
             </Stack>
 
             <Stack gap={2}>
-              <Heading level={3}>视频/直播（高级组；启用时至少一侧）</Heading>
+              <Heading level={3}>视频/直播数据</Heading>
               <Switch
                 label="启用视频/直播组"
                 value={rule.video_live.enabled}
@@ -283,61 +291,58 @@ export function RuleConfigPanel({
                 }
               />
               {rule.video_live.enabled && (
-                <Stack gap={2}>
-                  <SegmentedControl
-                    label="组逻辑"
-                    value={rule.video_live.logic}
-                    onChange={(value) =>
-                      onRuleChange({
-                        ...rule,
-                        video_live: {...rule.video_live, logic: value as 'either' | 'both'},
-                      })
-                    }
-                  >
-                    <SegmentedControlItem value="either" label="任一侧达标" />
-                    <SegmentedControlItem value="both" label="两侧均满足" />
-                  </SegmentedControl>
+                <Stack direction="horizontal" gap={3} vAlign="stretch">
                   {(
                     [
                       ['video', '视频'],
                       ['live', '直播'],
                     ] as const
-                  ).map(([sideKey, sideLabel]) => {
+                  ).map(([sideKey, sideLabel], index) => {
                     const side = rule.video_live[sideKey];
                     return (
-                      <Stack key={sideKey} gap={1}>
-                        <CheckboxInput
-                          label={`${sideLabel}侧`}
-                          value={side.enabled}
-                          onChange={(checked) => updateSide(sideKey, {enabled: checked})}
-                        />
-                        {side.enabled && (
-                          <Stack direction="horizontal" gap={2}>
-                            {numberInput(
-                              `${sideKey}-gpm`,
-                              `${sideLabel} GPM`,
-                              side.gpm,
-                              (next) => updateSide(sideKey, {gpm: next}),
-                              {disabled: !side.enabled},
-                            )}
-                            {numberInput(
-                              `${sideKey}-views`,
-                              `${sideLabel} 均播`,
-                              side.avg_views,
-                              (next) => updateSide(sideKey, {avg_views: next}),
-                              {disabled: !side.enabled},
-                            )}
-                            {sideKey === 'video' &&
-                              numberInput(
-                                'video-engagement',
-                                '视频互动率（%）',
-                                side.engagement,
-                                (next) => updateSide('video', {engagement: next}),
-                                {disabled: !side.enabled, max: 100},
-                              )}
-                          </Stack>
+                      <Fragment key={sideKey}>
+                        {index > 0 && (
+                          <StackItem size="static" crossAlignSelf="stretch">
+                            <Divider orientation="vertical" />
+                          </StackItem>
                         )}
-                      </Stack>
+                        <StackItem size="fill">
+                          <Stack gap={2}>
+                            <CheckboxInput
+                              size="sm"
+                              label={`${sideLabel}侧`}
+                              value={side.enabled}
+                              onChange={(checked) => updateSide(sideKey, {enabled: checked})}
+                            />
+                            {side.enabled && (
+                              <Stack gap={2}>
+                                {numberInput(
+                                  `${sideKey}-gpm`,
+                                  `${sideLabel} GPM`,
+                                  side.gpm,
+                                  (next) => updateSide(sideKey, {gpm: next}),
+                                  {disabled: !side.enabled},
+                                )}
+                                {numberInput(
+                                  `${sideKey}-views`,
+                                  `${sideLabel} 均播`,
+                                  side.avg_views,
+                                  (next) => updateSide(sideKey, {avg_views: next}),
+                                  {disabled: !side.enabled},
+                                )}
+                                {sideKey === 'video' &&
+                                  numberInput(
+                                    'video-engagement',
+                                    '视频互动率（%）',
+                                    side.engagement,
+                                    (next) => updateSide('video', {engagement: next}),
+                                    {disabled: !side.enabled, max: 100},
+                                  )}
+                              </Stack>
+                            )}
+                          </Stack>
+                        </StackItem>
+                      </Fragment>
                     );
                   })}
                 </Stack>

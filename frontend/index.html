@@ -7,6 +7,32 @@
 </head>
 <body>
   <div id="root"></div>
+  <!-- 开发预览用最小 bootstrap；正式页面由 auto_approval.html 模板注入真实数据。 -->
+  <script id="auto-approval-bootstrap" type="application/json">
+    {
+      "screen_group": {
+        "key": "standard_screen",
+        "heading": "标准 SOP 只读名单",
+        "note": "正式筛查与批准只走脚本（0/1/2/3）；这里只导出待批准名单，不会批准、写飞书或发送私信。",
+        "items": [
+          {
+            "title": "只出\"待批准名单\"（测试用）",
+            "description": "仅导出待批准名单；不会批准、写飞书或发送私信。",
+            "action": "/api/jobs/operator/screen",
+            "job_label": "只出名单",
+            "button_label": "执行",
+            "variant": "secondary",
+            "index": "1",
+            "kind": "只读",
+            "is_prepare": false,
+            "href": "",
+            "confirm": null
+          }
+        ]
+      },
+      "prepare_href": "/prepare"
+    }
+  </script>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

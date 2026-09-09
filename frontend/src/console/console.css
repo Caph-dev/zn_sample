@@ -1,0 +1,11 @@
+/* 操作台文档壳：正文样式全部由 Astryx 组件承担。
+   console-shell.css 只补 app.js 动态 DOM（任务面板 / 确认弹窗）。 */
+html,
+body {
+  background-color: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+#console-root {
+  min-height: 100vh;
+}

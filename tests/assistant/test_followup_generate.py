@@ -19,6 +19,7 @@ from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, FollowupTask, SampleCase, Shipment, Store
 from assistant.services.followup_service import FollowupService
 from assistant.app import create_app
+from tests.assistant.console_payload import console_data
 
 
 class FollowupGenerateTests(unittest.TestCase):
@@ -455,10 +456,11 @@ class FollowupGenerateTests(unittest.TestCase):
             self.assertIn("visible_creator", filtered.text)
             self.assertNotIn("hidden_creator", filtered.text)
             detail = client.get(f"/followups/{task_id}")
-            self.assertIn("This preview is safely longer", detail.text)
-            self.assertIn("set-type", detail.text)
-            self.assertIn("按视频达人跟进", detail.text)
-            self.assertIn("set-lang", detail.text)
+            detail_data = console_data(detail)
+            self.assertEqual(detail_data["creator_name"], "visible_creator")
+            self.assertTrue(detail_data["message_preview"].startswith("This preview is safely longer"))
+            self.assertEqual(detail_data["status"], "needs_review")
+            self.assertEqual(detail_data["stage_label"], "到货当天")
             self.assertNotIn("app_secret", detail.text)
             self.assertNotIn("message-send", detail.text)
             self.assertNotIn(">发送</button>", detail.text)
@@ -524,13 +526,46 @@ class FollowupGenerateTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
-            table_body = listing.text.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
-            self.assertIn("current_creator", listing.text)
+            listing_data = console_data(listing)
+            self.assertEqual(
+                [row["creator_name"] for row in listing_data["rows"]],
+                ["current_creator"],
+            )
+            self.assertEqual(listing_data["rows"][0]["action_label"], "待发跟进私信")
+            self.assertEqual(listing_data["rows"][0]["status_label"], "-")
             self.assertNotIn("superseded_creator", listing.text)
-            self.assertIn("待发跟进私信", listing.text)
-            self.assertNotIn("已由新阶段取代", listing.text)
-            self.assertNotIn("待处理", table_body)
-            self.assertIn('option value="pending"', listing.text)
+            status_values = [
+                option["value"] for option in listing_data["filter_options"]["statuses"]
+            ]
+            self.assertIn("pending", status_values)
+
+    def test_followups_page_owns_logistics_and_creator_entries(self) -> None:
+        app = create_app(port=8765)
+        app.state.session_factory = self.session_factory
+        with TestClient(app, base_url="http://127.0.0.1:8765") as client:
+            listing = client.get("/followups")
+            listing_data = console_data(listing)
+        self.assertEqual(listing.status_code, 200)
+        groups = listing_data["operator_groups"]
+        self.assertEqual([group["key"] for group in groups], ["logistics", "creator"])
+        self.assertEqual(
+            [item["action"] for item in groups[0]["items"]],
+            ["/api/jobs/shipment-sync", "/api/jobs/operator/tracking"],
+        )
+        self.assertEqual(
+            [item["action"] for item in groups[1]["items"]],
+            [
+                "/api/jobs/creator-enrich",
+                "/api/jobs/followup-generate",
+                "/api/jobs/content-thanks-preview",
+            ],
+        )
+        # 确认口令只出现在物流写回上，且保留 16:00 强制门。
+        self.assertIsNone(groups[0]["items"][0]["confirm"])
+        self.assertEqual(groups[0]["items"][1]["confirm"]["token"], "y")
+        self.assertEqual(groups[0]["items"][1]["force_gate"], "tracking")
+        # 正式 SOP 的批准入口已从网页移除，只留脚本。
+        self.assertNotIn("/api/jobs/operator/pipeline", listing.text)
 
     def test_followup_list_orders_by_stage_then_creator_id_and_uses_select_filters(self) -> None:
         with self.session_factory() as session:
@@ -573,6 +608,7 @@ class FollowupGenerateTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
+            listing_data = console_data(listing)
             names = [
                 "Alpha",
                 "beta",
@@ -580,25 +616,34 @@ class FollowupGenerateTests(unittest.TestCase):
                 "alpha-day3",
                 "zeta",
             ]
-            positions = [listing.text.index(name) for name in names]
+            row_names = [row["creator_name"] for row in listing_data["rows"]]
+            positions = [row_names.index(name) for name in names]
             self.assertEqual(positions, sorted(positions))
-            self.assertIn(">序号<", listing.text)
-            self.assertIn('class="table-index">1<', listing.text)
-            self.assertIn('class="table-index">5<', listing.text)
-            self.assertIn("<select name=\"stage\">", listing.text)
-            self.assertIn("<select name=\"status\">", listing.text)
-            self.assertIn("<select name=\"language\">", listing.text)
-            self.assertIn("<select name=\"platform_status\">", listing.text)
-            self.assertIn("到货后第 15 天未履约", listing.text)
-            self.assertIn("需人工确认", listing.text)
-            self.assertIn("英语", listing.text)
-            self.assertIn("处理中", listing.text)
+            stage_labels = [
+                option["label"] for option in listing_data["filter_options"]["stages"]
+            ]
+            status_labels = [
+                option["label"] for option in listing_data["filter_options"]["statuses"]
+            ]
+            language_labels = [
+                option["label"] for option in listing_data["filter_options"]["languages"]
+            ]
+            platform_labels = [
+                option["label"]
+                for option in listing_data["filter_options"]["platform_statuses"]
+            ]
+            self.assertIn("到货后第 15 天未履约", stage_labels)
+            self.assertIn("需人工确认", status_labels)
+            self.assertIn("英语", language_labels)
+            self.assertIn("处理中", platform_labels)
             filtered = client.get("/followups?platform_status=processing&language=en")
-            self.assertIn("Alpha", filtered.text)
-            self.assertIn('option value="en" selected', filtered.text)
-            self.assertIn('action="/api/jobs/report-export"', listing.text)
-            self.assertIn('name="kind" value="day_10_list"', listing.text)
-            self.assertIn("导出到货后第 10 天名单", listing.text)
+            filtered_data = console_data(filtered)
+            self.assertIn(
+                "Alpha",
+                [row["creator_name"] for row in filtered_data["rows"]],
+            )
+            self.assertEqual(filtered_data["filters"]["language"], "en")
+            self.assertEqual(filtered_data["filters"]["platform_status"], "processing")
 
     def test_preview_followup_message_never_sends(self) -> None:
         self.add_case(
@@ -636,8 +681,10 @@ class FollowupGenerateTests(unittest.TestCase):
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             headers = {"Origin": "http://127.0.0.1:8765"}
             detail = client.get(f"/followups/{task_id}")
-            self.assertIn("preview-send", detail.text)
-            self.assertIn("预演跟进私信", detail.text)
+            detail_data = console_data(detail)
+            self.assertTrue(detail_data["can_send"])
+            self.assertFalse(detail_data["action_completed"])
+            self.assertEqual(detail_data["action_kind"], "send_message")
             self.assertNotIn(">发送</button>", detail.text)
             with patch(
                 "lib.im_api.send_direct_message",
@@ -684,9 +731,11 @@ class FollowupGenerateTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
-            self.assertIn("已发跟进私信", listing.text)
+            listing_data = console_data(listing)
+            self.assertEqual(listing_data["rows"][0]["action_label"], "已发跟进私信")
             detail = client.get(f"/followups/{task_id}")
-            self.assertIn("已在本地标记为「已发跟进私信」", detail.text)
+            detail_data = console_data(detail)
+            self.assertTrue(detail_data["action_completed"])
             self.assertNotIn(">发送</button>", detail.text)
 
     def test_mark_listed_is_local_only(self) -> None:
@@ -720,9 +769,12 @@ class FollowupGenerateTests(unittest.TestCase):
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
-            self.assertIn("已出名单给业务", listing.text)
+            listing_data = console_data(listing)
+            self.assertEqual(listing_data["rows"][0]["action_label"], "已出名单给业务")
             detail = client.get(f"/followups/{list_task_id}")
-            self.assertIn("已在本地标记为「已出名单给业务」", detail.text)
+            detail_data = console_data(detail)
+            self.assertTrue(detail_data["action_completed"])
+            self.assertTrue(detail_data["can_list"])
             self.assertNotIn(">发送</button>", detail.text)
 
     def test_generate_keeps_locally_sent_arrival_when_day_3_is_due(self) -> None:

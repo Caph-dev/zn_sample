@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page_title }} · {{ app_name }}</title>
   <link rel="preload" href="/static/fonts/Geist.woff2" as="font" type="font/woff2" crossorigin>
-  <!-- 独立文档壳：与操作台各自构建，共用 app.js 的任务面板与确认弹窗。 -->
-  <link rel="stylesheet" href="/static/auto-approval/assets/index.css?v={{ static_version }}">
+  <!-- Astryx 页面正文样式（构建产物），console-shell.css 只补 app.js 动态 DOM。 -->
+  <link rel="stylesheet" href="/static/console/assets/index.css?v={{ static_version }}">
   <!-- 主题必须在组件样式之后加载：产物里默认主题在 @layer astryx-base，主题文件在 @layer astryx-theme，
        layer 顺序按首次出现决定，先加载主题会被默认值压住。 -->
   <link rel="stylesheet" href="/static/geist-theme.css?v={{ static_version }}">
@@ -14,9 +14,9 @@
   <script src="/static/app.js?v={{ static_version }}" defer></script>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="console-root"></div>
 {% include "_task_panel.html" %}
-  <script id="auto-approval-bootstrap" type="application/json">{{ page_payload | tojson }}</script>
-  <script type="module" src="/static/auto-approval/assets/index.js?v={{ static_version }}"></script>
+  <script id="console-bootstrap" type="application/json">{{ page_payload | tojson }}</script>
+  <script type="module" src="/static/console/assets/index.js?v={{ static_version }}"></script>
 </body>
 </html>

@@ -4,7 +4,10 @@
     "check:theme": "astryx theme build src/themes/geist/geistTheme.ts -o build/theme/geist-theme.css -c",
     "build:fonts": "mkdir -p assistant/web/static/fonts && cp node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2 assistant/web/static/fonts/Geist.woff2 && cp node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2 assistant/web/static/fonts/GeistMono.woff2",
     "build:auto": "tsc -p frontend/tsconfig.json --noEmit && vite build --config frontend/vite.config.ts",
-    "dev:auto": "vite --config frontend/vite.config.ts"
+    "build:console": "tsc -p frontend/tsconfig.json --noEmit && vite build --config frontend/vite.console.config.ts",
+    "build:web": "npm run build:auto && npm run build:console",
+    "dev:auto": "vite --config frontend/vite.config.ts",
+    "dev:console": "vite --config frontend/vite.console.config.ts"
   },
   "dependencies": {
     "@astryxdesign/cli": "^0.4.7",

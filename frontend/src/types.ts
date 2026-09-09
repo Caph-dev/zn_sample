@@ -111,7 +111,7 @@ export interface CandidateRow {
 export interface PreviewPayload {
   preview_id: string;
   store_id: string;
-  status: 'queued' | 'completed' | 'failed';
+  status: 'queued' | 'completed' | 'failed' | 'cancelled';
   job_id: string;
   rule_hash: string;
   rule: RuleDraft;
@@ -188,4 +188,39 @@ export interface StoreSummary {
   stores?: {storeId: string; storeName: string}[];
   debug_ready?: boolean;
   debug_status?: string;
+}
+
+export interface OperatorConfirmPayload {
+  token: string;
+  title: string;
+  description: string;
+  action: string;
+}
+
+export interface OperatorItemPayload {
+  title: string;
+  description: string;
+  action: string;
+  job_label: string;
+  button_label: string;
+  variant: 'primary' | 'secondary';
+  index: string;
+  kind: string;
+  is_prepare: boolean;
+  href: string;
+  confirm: OperatorConfirmPayload | null;
+  force_gate?: string;
+}
+
+export interface OperatorGroupPayload {
+  key: string;
+  heading: string;
+  note: string;
+  items: OperatorItemPayload[];
+}
+
+/** /auto-approval bootstrap：标准 SOP 只读名单入口 + 运行准备页链接。 */
+export interface AutoApprovalBootstrap {
+  screen_group: OperatorGroupPayload | null;
+  prepare_href: string;
 }

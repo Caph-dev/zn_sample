@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
 from assistant.database.models import Base
+from tests.assistant.console_payload import operator_items
 from assistant.domain.content_thanks import (
     classify_completed_content,
     decide_content_thanks_action,
@@ -341,9 +342,16 @@ class ContentThanksServiceTests(unittest.TestCase):
         app = create_app(port=8765)
         app.state.session_factory = self.session_factory
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
-            home = client.get("/")
-            self.assertIn('action="/api/jobs/content-thanks-preview"', home.text)
-            self.assertIn("预演已完成感谢私信", home.text)
+            followups_page = client.get("/followups")
+            items = operator_items(followups_page)
+            self.assertIn(
+                "/api/jobs/content-thanks-preview",
+                [item["action"] for item in items],
+            )
+            self.assertIn(
+                "预演已完成感谢私信（只读）",
+                [item["title"] for item in items],
+            )
             response = client.post(
                 "/api/jobs/content-thanks-preview",
                 headers={"Origin": "http://127.0.0.1:8765"},

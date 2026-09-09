@@ -1,24 +1,31 @@
 import {SideNav, SideNavHeading, SideNavItem} from '@astryxdesign/core/SideNav';
 
-/** 与工作台一致的导航目的地；本页高亮「自动审批」。 */
+/** 操作台各 tab 的导航目的地；自动批准页与操作台页共用。 */
 const NAV_ITEMS = [
-  {href: '/', label: '工作台'},
+  {href: '/', label: '总览'},
+  {href: '/prepare', label: '运行准备'},
+  {href: '/auto-approval', label: '自动批准'},
+  {href: '/followups', label: '达人跟进'},
   {href: '/shipments', label: '物流'},
-  {href: '/followups', label: '跟进'},
-  {href: '/auto-approval', label: '自动审批'},
   {href: '/jobs', label: '任务'},
   {href: '/reports', label: '报表'},
   {href: '/diagnostics', label: '诊断'},
 ];
 
-export function AppNavigation() {
+interface AppNavigationProps {
+  /** 当前高亮的导航路径（详情页传所属列表路径）。 */
+  activePath: string;
+  subheading: string;
+}
+
+export function AppNavigation({activePath, subheading}: AppNavigationProps) {
   return (
     <SideNav
       header={
         <SideNavHeading
           heading="ZnSampleAssistant"
           headingHref="/"
-          subheading="自动审批 · 自定义审核方案"
+          subheading={subheading}
         />
       }
     >
@@ -27,7 +34,7 @@ export function AppNavigation() {
           key={item.href}
           label={item.label}
           href={item.href}
-          isSelected={item.href === '/auto-approval'}
+          isSelected={item.href === activePath}
         />
       ))}
     </SideNav>

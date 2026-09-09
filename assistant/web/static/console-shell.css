@@ -1,0 +1,426 @@
+/* 操作台 React 壳的补充样式。
+
+   只保留 app.js 动态生成 DOM 与任务面板 / 确认弹窗需要的类，
+   页面正文全部交给 Astryx 组件；这里刻意不用裸元素选择器，
+   避免污染 Astryx 组件的默认排版。 */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('/static/fonts/Geist.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/static/fonts/GeistMono.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-body);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- app.js 生成的键值行与状态点 ---- */
+.text-secondary {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+dl.metadata {
+  display: grid;
+  grid-template-columns: 10em minmax(0, 1fr);
+  margin: 0 0 1.25rem;
+}
+
+dl.metadata dt {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 0.5rem 0.75rem 0.5rem 0;
+  margin: 0;
+  font-weight: var(--font-weight-normal);
+}
+
+dl.metadata dd {
+  margin: 0;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--color-border);
+  overflow-wrap: anywhere;
+}
+
+.token {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: var(--radius-full);
+  background: var(--color-icon-gray);
+  flex: none;
+}
+
+.status-dot--success { background: var(--color-icon-green); }
+.status-dot--error { background: var(--color-icon-red); }
+.status-dot--warning { background: var(--color-icon-yellow); }
+.status-dot--info,
+.status-dot--blue { background: var(--color-icon-blue); }
+.status-dot--cyan { background: var(--color-icon-cyan); }
+.status-dot--teal { background: var(--color-icon-teal); }
+.status-dot--purple { background: var(--color-icon-purple); }
+.status-dot--orange { background: var(--color-icon-orange); }
+.status-dot--pink { background: var(--color-icon-pink); }
+
+.token--success { color: var(--color-text-green); }
+.token--error { color: var(--color-text-red); }
+.token--warning { color: var(--color-text-yellow); }
+.token--info,
+.token--blue { color: var(--color-text-blue); }
+.token--cyan { color: var(--color-text-cyan); }
+.token--teal { color: var(--color-text-teal); }
+.token--purple { color: var(--color-text-purple); }
+.token--orange { color: var(--color-text-orange); }
+.token--pink { color: var(--color-text-pink); }
+
+/* ---- 任务实时状态面板 ---- */
+.task-panel {
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 2rem;
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  box-shadow: none;
+}
+
+.task-panel--warning {
+  border-color: var(--color-border-yellow);
+}
+
+.task-panel-header {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.task-panel-header .eyebrow {
+  grid-column: 1 / -1;
+}
+
+.task-panel-header h2 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+}
+
+.task-panel-header form[data-job-cancel] {
+  display: contents;
+}
+
+.task-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.task-panel button,
+.confirmation-dialog button {
+  font: inherit;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  min-height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-element);
+  padding: 0.375rem 0.875rem;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.task-panel button:hover,
+.confirmation-dialog button:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.task-panel button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.task-panel .button--secondary,
+.confirmation-dialog .button--secondary {
+  background: var(--color-background-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.task-panel .button--secondary:hover,
+.confirmation-dialog .button--secondary:hover {
+  background: var(--color-background-muted);
+  border-color: var(--color-border-emphasized);
+  color: var(--color-text-primary);
+}
+
+.task-panel .button--destructive,
+.confirmation-dialog .button--destructive {
+  background: transparent;
+  color: var(--color-text-red);
+  border: 1px solid var(--color-border-red);
+}
+
+.task-panel .button--destructive:hover,
+.confirmation-dialog .button--destructive:hover {
+  background: var(--color-error-muted);
+  border-color: var(--color-text-red);
+  color: var(--color-text-red);
+}
+
+.task-panel-header form[data-job-cancel] button,
+.task-panel-header button[data-task-clear-output] {
+  min-height: 1.75rem;
+  padding: 0 0.625rem;
+  font-size: var(--font-size-sm);
+}
+
+.task-progress-message {
+  margin-bottom: 0.5rem;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.task-progress-bar {
+  width: 100%;
+  height: 0.375rem;
+  margin-bottom: 0.25rem;
+  accent-color: var(--color-accent);
+}
+
+.task-progress-text {
+  margin-bottom: 0.75rem;
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: var(--font-size-sm);
+  text-align: right;
+}
+
+.task-events {
+  max-height: 12rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.task-event {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.375rem 0;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.task-event:last-child {
+  border-bottom: none;
+}
+
+.task-event-time {
+  flex: none;
+  min-width: 7.5rem;
+  color: var(--color-text-disabled);
+  font-family: var(--font-family-code);
+}
+
+.task-event--warning .task-event-message {
+  color: var(--color-text-yellow);
+}
+
+.task-event--error .task-event-message {
+  color: var(--color-text-red);
+}
+
+.task-result {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.task-result:empty {
+  display: none;
+}
+
+.task-result h3 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-family-heading);
+  font-size: var(--font-size-lg);
+}
+
+.result-list {
+  display: grid;
+  grid-template-columns: 10em minmax(0, 1fr);
+  margin: 0 0 0.75rem;
+}
+
+.result-list dt {
+  padding: 0.25rem 0.75rem 0.25rem 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.result-list dd {
+  margin: 0;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-error {
+  color: var(--color-text-red);
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+  margin: 0;
+}
+
+/* ---- app.js 动态生成的结果链接 ---- */
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.875rem;
+  border-radius: var(--radius-element);
+  background: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: var(--color-on-accent);
+  text-decoration: none;
+}
+
+.button-link--secondary {
+  background: var(--color-background-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.button-link--secondary:hover {
+  background: var(--color-background-muted);
+  border-color: var(--color-border-emphasized);
+  color: var(--color-text-primary);
+}
+
+/* ---- 确认弹窗 ---- */
+.eyebrow {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.confirmation-dialog {
+  width: min(34rem, calc(100% - 2rem));
+  padding: 0;
+  color: var(--color-text-primary);
+  background: var(--color-background-popover);
+  border: 1px solid var(--color-border-emphasized);
+  border-radius: var(--radius-container);
+  box-shadow: var(--shadow-med);
+}
+
+.confirmation-dialog::backdrop {
+  background: var(--color-overlay);
+}
+
+.confirmation-dialog form {
+  padding: 1.5rem;
+}
+
+.confirmation-dialog h2 {
+  margin: 0.25rem 0 0.75rem;
+  font-size: var(--font-size-xl);
+}
+
+.confirmation-field {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.confirmation-field strong {
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+}
+
+.confirmation-field input {
+  font: inherit;
+  font-size: var(--font-size-base);
+  color: var(--color-text-primary);
+  background: var(--color-background-surface);
+  border: 1px solid var(--color-border-emphasized);
+  border-radius: var(--radius-element);
+  padding: 0.5rem 0.75rem;
+}
+
+.confirmation-error {
+  margin: 0.5rem 0 0;
+  color: var(--color-text-red);
+  font-size: var(--font-size-sm);
+}
+
+.confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.625rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+}
+
+@media (max-width: 48rem) {
+  .task-panel-header {
+    grid-template-columns: 1fr;
+  }
+
+  .task-event {
+    display: block;
+  }
+
+  .task-event-time {
+    display: block;
+    margin-bottom: 0.125rem;
+  }
+}

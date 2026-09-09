@@ -41,6 +41,9 @@
     operator_screen: "只出名单",
     operator_pipeline: "筛查批准写飞书发私信",
     operator_tracking: "获取物流信息写飞书发单号",
+    auto_approval_preview: "自动审批 · 只读筛查",
+    auto_approval_execute: "自动审批 · 执行批准",
+    auto_approval_reconcile: "自动审批 · 补写核对",
   };
 
   const operatorJobTypes = new Set([
@@ -48,6 +51,13 @@
     "operator_screen",
     "operator_pipeline",
     "operator_tracking",
+  ]);
+
+  const writeJobTypes = new Set([
+    "operator_pipeline",
+    "operator_tracking",
+    "auto_approval_execute",
+    "auto_approval_reconcile",
   ]);
 
   const statusLabels = {
@@ -78,8 +88,6 @@
   ];
 
   const activeMonitors = new Map();
-  let preparationStatusRefreshTimer = null;
-  let preparationStatusRequestInFlight = false;
 
   function getJobTypeLabel(jobType) {
     return jobTypeLabels[jobType] || jobType || "后台任务";
@@ -134,147 +142,6 @@
       element.textContent = textContent;
     }
     return element;
-  }
-
-  function setPreparationButtonState(button, debugReady) {
-    if (!button) {
-      return;
-    }
-    button.classList.remove(
-      "button--primary",
-      "button--secondary",
-      "button--prepare-ready",
-    );
-    if (debugReady) {
-      button.classList.add("button--prepare-ready");
-      button.title = "调试口已就绪；如需重新打开店铺，仍可点击";
-      return;
-    }
-    button.classList.add("button--primary");
-    button.title = "调试口尚未就绪，请点击打开店铺";
-  }
-
-  function formatPreparationStore(payload) {
-    if (payload.ok && payload.store) {
-      const storeName = payload.store.storeName || "未命名店铺";
-      const storeId = payload.store.storeId || "未知 ID";
-      return `${storeName}（${storeId}）`;
-    }
-    if (payload.error === "running-query-failed") {
-      return "暂时无法读取当前店铺";
-    }
-    const runningStores = Array.isArray(payload.stores) ? payload.stores : [];
-    if (runningStores.length === 0) {
-      return "当前没有打开的店铺";
-    }
-    if (runningStores.length > 1) {
-      return `当前打开了 ${runningStores.length} 家店铺，请只保留一家`;
-    }
-    const store = runningStores[0];
-    return `${store.storeName || "未命名店铺"}（${store.storeId || "未知 ID"}）`;
-  }
-
-  function renderPreparationStatus(payload) {
-    const statusPanel = document.querySelector("[data-preparation-status]");
-    const prepareButton = document.querySelector("[data-store-prepare-button]");
-    if (!statusPanel || !prepareButton) {
-      return;
-    }
-
-    const summaryTarget = statusPanel.querySelector("[data-preparation-status-summary]");
-    const storeTarget = statusPanel.querySelector("[data-preparation-store]");
-    const debugTarget = statusPanel.querySelector("[data-preparation-debug]");
-    const hintTarget = statusPanel.querySelector("[data-preparation-status-hint]");
-    const statusDot = statusPanel.querySelector("[data-preparation-status-dot]");
-
-    if (storeTarget) {
-      storeTarget.textContent = formatPreparationStore(payload);
-    }
-
-    if (payload.error === "ziniao-busy") {
-      if (summaryTarget) {
-        summaryTarget.textContent = "店铺任务运行中";
-      }
-      if (debugTarget) {
-        debugTarget.textContent = "任务结束后自动重新检测";
-      }
-      if (hintTarget) {
-        hintTarget.textContent = "当前不会并发探测调试口，避免干扰正在运行的任务。";
-      }
-      if (statusDot) {
-        statusDot.className = "status-dot status-dot--info";
-      }
-      return;
-    }
-
-    const debugReady = payload.ok === true && payload.debug_ready === true;
-    setPreparationButtonState(prepareButton, debugReady);
-    if (debugReady) {
-      if (summaryTarget) {
-        summaryTarget.textContent = "店铺已准备好";
-      }
-      if (debugTarget) {
-        debugTarget.textContent = "已打开，可以进入下一步";
-      }
-      if (hintTarget) {
-        hintTarget.textContent = "当前已满足自动化脚本的运行要求；再次点击“打开店铺”按钮可以重新打开店铺";
-      }
-      if (statusDot) {
-        statusDot.className = "status-dot status-dot--success";
-      }
-      return;
-    }
-
-    if (summaryTarget) {
-      summaryTarget.textContent = "店铺尚未准备好";
-    }
-    if (debugTarget) {
-      debugTarget.textContent = "未打开或尚未就绪";
-    }
-    if (hintTarget) {
-      hintTarget.textContent = payload.error === "running-query-failed"
-        ? "暂时无法读取紫鸟状态，请检查紫鸟 GUI 和 Bridge。"
-        : "请点击高亮的“打开店铺”，等待调试口就绪后再进入下一步。";
-    }
-    if (statusDot) {
-      statusDot.className = "status-dot status-dot--warning";
-    }
-  }
-
-  async function refreshPreparationStatus() {
-    if (
-      !document.querySelector("[data-preparation-status]") ||
-      preparationStatusRequestInFlight
-    ) {
-      return;
-    }
-    preparationStatusRequestInFlight = true;
-    try {
-      const response = await fetch("/api/stores/preparation-status", {
-        credentials: "same-origin",
-        headers: {Accept: "application/json"},
-      });
-      if (!response.ok) {
-        throw new Error(`店铺准备状态读取失败（${response.status}）`);
-      }
-      renderPreparationStatus(await response.json());
-    } catch (_error) {
-      renderPreparationStatus({
-        ok: false,
-        error: "running-query-failed",
-        stores: [],
-        debug_ready: false,
-      });
-    } finally {
-      preparationStatusRequestInFlight = false;
-      if (preparationStatusRefreshTimer) {
-        window.clearTimeout(preparationStatusRefreshTimer);
-      }
-      preparationStatusRefreshTimer = window.setTimeout(
-        refreshPreparationStatus,
-        10000,
-      );
-    }
   }
 
   function requestTypedConfirmation({title, description, token, actionLabel}) {
@@ -603,7 +470,9 @@
     }
     if (cancelForm && cancelButton) {
       const cancellable =
-        !terminalStatuses.has(job.status) && !operatorJobTypes.has(job.job_type);
+        !terminalStatuses.has(job.status)
+        && !operatorJobTypes.has(job.job_type)
+        && !writeJobTypes.has(job.job_type);
       if (cancellable) {
         cancelForm.action = `/api/jobs/${encodeURIComponent(job.id)}/cancel`;
         cancelForm.dataset.jobId = job.id;
@@ -755,6 +624,18 @@
     };
     activeMonitors.set(jobId, monitor);
     resetGlobalPanel(monitor);
+    if (monitor.useGlobalPanel) {
+      const cancelForm = getGlobalPanel()?.querySelector("form[data-job-cancel]");
+      const cancelButton = cancelForm?.querySelector("button");
+      if (cancelForm) {
+        cancelForm.action = `/api/jobs/${encodeURIComponent(jobId)}/cancel`;
+        cancelForm.dataset.jobId = jobId;
+      }
+      if (cancelButton) {
+        cancelButton.hidden = false;
+        cancelButton.disabled = false;
+      }
+    }
 
     const eventTarget = monitorEventTarget(monitor);
 
@@ -922,11 +803,27 @@
         throw new Error(`当前任务无法取消（${response.status}）`);
       }
       const payload = await response.json();
-      startMonitor(payload.job_id || form.dataset.jobId, {
-        statusTarget: document.querySelector("[data-job-monitor]"),
+      const jobId = payload.job_id || form.dataset.jobId;
+      const existingMonitor = activeMonitors.get(jobId);
+      if (existingMonitor) {
+        fetchJob(jobId)
+          .then((job) => handleJobSnapshot(existingMonitor, job))
+          .catch((error) => {
+            showMonitorError(existingMonitor, error);
+            if (submitButton) {
+              submitButton.disabled = false;
+            }
+          });
+        return;
+      }
+      const dedicatedTarget = document.querySelector("[data-job-monitor]");
+      startMonitor(jobId, {
+        statusTarget: dedicatedTarget,
         eventsTarget: document.querySelector("[data-job-events]"),
         resultTarget: document.querySelector("[data-job-result]"),
-        useGlobalPanel: false,
+        useGlobalPanel: dedicatedTarget
+          ? dedicatedTarget.dataset.globalTaskPanel !== "false"
+          : true,
       });
     } catch (error) {
       window.alert(error.message);
@@ -935,6 +832,49 @@
       }
     }
   }
+
+  function startJobMonitorForTarget(target) {
+    if (!target || target.dataset.monitorStarted === "true") {
+      return;
+    }
+    target.dataset.monitorStarted = "true";
+    startMonitor(target.dataset.jobId, {
+      statusTarget: target,
+      eventsTarget: document.querySelector("[data-job-events]"),
+      resultTarget: document.querySelector("[data-job-result]"),
+      useGlobalPanel: target.dataset.globalTaskPanel !== "false",
+    });
+  }
+
+  // 表单走事件委托：React 页面在 DOMContentLoaded 之后才挂载，
+  // 逐节点绑定会漏掉这些表单。
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    if (form.matches("form[data-job-form]")) {
+      submitJobForm(form, event);
+      return;
+    }
+    if (form.matches("form[data-job-cancel]")) {
+      submitCancellationForm(form, event);
+    }
+  });
+
+  // React 挂载后主动通知：任务详情页带 data-job-monitor；自动批准页只传 jobId，
+  // 走全局面板。DOMContentLoaded 时 React 可能还没挂上。
+  document.addEventListener("assistant:monitor-job", (event) => {
+    const dedicatedTarget = document.querySelector("[data-job-monitor]");
+    if (dedicatedTarget) {
+      startJobMonitorForTarget(dedicatedTarget);
+      return;
+    }
+    const jobId = event.detail && event.detail.jobId;
+    if (jobId) {
+      startMonitor(jobId, {useGlobalPanel: true});
+    }
+  });
 
   document.addEventListener("DOMContentLoaded", () => {
     const globalPanel = document.querySelector("[data-task-panel]");
@@ -952,26 +892,6 @@
     if (restoreJobId && !hasDedicatedJobMonitor) {
       startMonitor(restoreJobId, {useGlobalPanel: true});
     }
-    refreshPreparationStatus();
-    document.addEventListener("assistant:job-complete", (event) => {
-      if (event.detail?.job_type === "operator_prepare") {
-        window.setTimeout(refreshPreparationStatus, 500);
-      }
-    });
-    document.querySelectorAll("form[data-job-form]").forEach((form) => {
-      form.addEventListener("submit", (event) => submitJobForm(form, event));
-    });
-    document.querySelectorAll("form[data-job-cancel]").forEach((form) => {
-      form.addEventListener("submit", (event) => submitCancellationForm(form, event));
-    });
-
-    document.querySelectorAll("[data-job-monitor]").forEach((target) => {
-      startMonitor(target.dataset.jobId, {
-        statusTarget: target,
-        eventsTarget: document.querySelector("[data-job-events]"),
-        resultTarget: document.querySelector("[data-job-result]"),
-        useGlobalPanel: target.dataset.globalTaskPanel !== "false",
-      });
-    });
+    document.querySelectorAll("[data-job-monitor]").forEach(startJobMonitorForTarget);
   });
 })();

@@ -1,4 +1,4 @@
-/* 独立文档壳：本页不使用旧 app.css。
+/* 独立文档壳：本页不使用操作台的 console-shell.css。
    Astryx reset 不设置文档背景，这里只用主题 token 补上，其余样式全部由组件承担。 */
 html,
 body {
@@ -8,4 +8,9 @@ body {
 
 #root {
   min-height: 100vh;
+}
+
+/* 「已就绪」状态标签：Token 默认圆角偏小，这里用主题圆角 token 放大。 */
+.readiness-ready-token {
+  border-radius: var(--radius-full);
 }
