@@ -401,9 +401,10 @@ def _review_video(
     if not settings.get("ffmpeg_path") and not shutil.which("ffmpeg"):
         raise ReviewUnavailable("ffmpeg_unavailable")
     fresh_detail = client.detail(video_id, handle, sec_uid)
-    if fresh_detail.get("create_time") != detail["create_time"] or shopping_products(
-        fresh_detail.get("anchors")
-    ) != shopping_products(detail.get("anchors")):
+    # Detail is only for identity + media URL. Shopping SKUs on the same
+    # aweme often differ between the post list and one-video endpoints;
+    # related-category counting already used the list anchors.
+    if fresh_detail.get("create_time") != detail["create_time"]:
         raise ReviewUnavailable("video_metadata_changed")
     video = fresh_detail.get("video") or {}
     urls = []
@@ -415,12 +416,29 @@ def _review_video(
             )
     if not urls:
         raise ReviewUnavailable("media_url_missing")
-    media_bytes = bounded_request(
-        urls[0],
-        deadline=min(deadline, time.monotonic() + 45),
-        max_bytes=settings["max_media_bytes"],
-        redirects=3,
-    )
+    media_bytes = None
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            media_bytes = bounded_request(
+                url,
+                deadline=min(deadline, time.monotonic() + 45),
+                max_bytes=settings["max_media_bytes"],
+                redirects=3,
+            )
+            break
+        except ReviewUnavailable as error:
+            last_error = error
+            if str(error) not in {
+                "non_public_media_address",
+                "dns_resolution_unavailable",
+                "unsafe_media_url",
+                "provider_http_error",
+            }:
+                raise
+            continue
+    if media_bytes is None:
+        raise last_error or ReviewUnavailable("media_url_missing")
     root = Path(settings["cache_dir"])
     work_root = root / REVIEW_VERSION / handle
     work_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -472,7 +490,7 @@ def _proof_verdict(proof: dict, root: Path) -> tuple[str, str, int]:
         try:
             products = related_products(shopping_products(detail.get("anchors")))
         except ReviewUnavailable:
-            # Unknown/unparsed anchors can never prove or disprove a pass.
+            # Unparsed anchors are not related and do not veto a proven pass.
             unknown = True
             continue
         if not products:
@@ -513,8 +531,6 @@ def _proof_verdict(proof: dict, root: Path) -> tuple[str, str, int]:
                     raise ReviewUnavailable("invalid_proof_frames")
             result = validate_visual(visual["result"], products, len(frames))
             positive = positive or has_positive_visual(result)
-    if unknown:
-        return "needs_review", "unknown_shopping_anchor_evidence", related_count
     if related_count >= 4 and positive:
         return (
             "passed",
@@ -522,6 +538,8 @@ def _proof_verdict(proof: dict, root: Path) -> tuple[str, str, int]:
             related_count,
         )
     if related_count < 4:
+        if unknown:
+            return "needs_review", "unknown_shopping_anchor_evidence", related_count
         if proof.get("complete") is True:
             return "failed", "fewer_than_four_related_shopping_videos", related_count
         return "needs_review", "collection_incomplete", related_count
@@ -661,17 +679,15 @@ def _collect_and_review(
     """
     items: list[dict] = []
     related: list[tuple[dict, dict, list[dict]]] = []
-    unknown = False
     positive = False
 
     def on_video(detail: dict, sec_uid: str) -> bool:
-        nonlocal unknown, positive
+        nonlocal positive
         item = {"metadata": _metadata_proof(detail), "visual": None}
         items.append(item)
         try:
             products = related_products(shopping_products(detail.get("anchors")))
         except ReviewUnavailable:
-            unknown = True
             return False
         if not products:
             return False

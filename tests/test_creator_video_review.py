@@ -388,7 +388,7 @@ def test_incomplete_collection_below_four_is_not_failed(settings, monkeypatch):
     assert row["content_review_reason"] == "collection_incomplete"
 
 
-def test_unknown_anchor_shape_needs_review_even_when_complete(settings, monkeypatch):
+def test_unknown_anchor_does_not_count_or_veto_a_proven_pass(settings, monkeypatch):
     unknown = detail(99, age=3, anchors=[{"type": 35, "keyword": "unknown"}])
     patch_provider(
         monkeypatch,
@@ -416,7 +416,30 @@ def test_unknown_anchor_shape_needs_review_even_when_complete(settings, monkeypa
     row = review.review_creator_rows(
         [{"creator_name": "alice", "eligible": True}], now=NOW
     )[0]
+    assert row["content_review_status"] == "passed"
+    assert row["eligible"] is True
+    assert row["content_review_related_count"] == 4
+    assert review.validate_content_review(row, now=NOW)[0]
+
+
+def test_unknown_anchor_does_not_veto_sparse_visual_when_related_enough(
+    settings, monkeypatch
+):
+    unknown = detail(99, age=3, anchors=[{"type": 35, "keyword": "unknown"}])
+    patch_provider(
+        monkeypatch,
+        count=4,
+        positive=False,
+        complete=True,
+        unknown=unknown,
+        unknown_first=True,
+    )
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
     assert row["content_review_status"] == "needs_review"
+    assert row["content_review_reason"] == "sparse_visual_evidence_inconclusive"
+    assert row["content_review_related_count"] == 4
     assert not row["eligible"]
 
 
@@ -524,6 +547,144 @@ def test_frame_entries_timestamps_and_interval(settings, tmp_path):
     ]
     entries = review._frame_entries([first], None)
     assert entries[0]["timestamp_seconds"] == 0.0
+
+
+def test_review_video_skips_non_public_media_urls(settings, monkeypatch, tmp_path):
+    requested = []
+
+    def fake_bounded_request(url, **kwargs):
+        requested.append(url)
+        if "blocked" in url:
+            raise review.ReviewUnavailable("non_public_media_address")
+        return b"mp4"
+
+    def fake_extract(media, directory, current_settings, deadline):
+        frame = directory / "frame_01.jpg"
+        frame.write_bytes(b"frame bytes")
+        return [frame], 10
+
+    monkeypatch.setattr(review, "bounded_request", fake_bounded_request)
+    monkeypatch.setattr(review, "_extract_frames", fake_extract)
+    monkeypatch.setattr(
+        review,
+        "_analyse_frames",
+        lambda frames, products, current_settings, deadline: {
+            "observations": [observation(body_worn=True)],
+            "uncertainties": [],
+        },
+    )
+    monkeypatch.setattr(
+        review.TikHubClient,
+        "detail",
+        lambda self, video_id, handle, sec_uid="": {
+            "aweme_id": video_id,
+            "create_time": int((NOW - timedelta(days=1)).timestamp()),
+            "author": {"unique_id": handle, "sec_uid": "verified-sec"},
+            "anchors": shopping_anchor(PRODUCT),
+            "video": {
+                "play_addr_h264": {
+                    "url_list": [
+                        "https://blocked.example/video.mp4",
+                        "https://cdn.example/video.mp4",
+                    ]
+                }
+            },
+        },
+    )
+    visual = review._review_video(
+        detail(anchors=shopping_anchor(PRODUCT)),
+        [PRODUCT],
+        review.TikHubClient(settings, time.monotonic() + 30),
+        "alice",
+        "verified-sec",
+        settings,
+        time.monotonic() + 30,
+    )
+    assert requested == [
+        "https://blocked.example/video.mp4",
+        "https://cdn.example/video.mp4",
+    ]
+    assert contract.has_positive_visual(visual["result"])
+
+
+def test_review_video_ignores_detail_shopping_sku_mismatch(
+    settings, monkeypatch, tmp_path
+):
+    requested = []
+    list_anchor = shopping_anchor(PRODUCT)
+    detail_anchor = shopping_anchor(
+        {**PRODUCT, "product_id": "1732380858123457363"}
+    )
+
+    def fake_bounded_request(url, **kwargs):
+        requested.append(url)
+        return b"mp4"
+
+    def fake_extract(media, directory, current_settings, deadline):
+        frame = directory / "frame_01.jpg"
+        frame.write_bytes(b"frame bytes")
+        return [frame], 10
+
+    monkeypatch.setattr(review, "bounded_request", fake_bounded_request)
+    monkeypatch.setattr(review, "_extract_frames", fake_extract)
+    monkeypatch.setattr(
+        review,
+        "_analyse_frames",
+        lambda frames, products, current_settings, deadline: {
+            "observations": [observation(body_worn=True)],
+            "uncertainties": [],
+        },
+    )
+    monkeypatch.setattr(
+        review.TikHubClient,
+        "detail",
+        lambda self, video_id, handle, sec_uid="": {
+            "aweme_id": video_id,
+            "create_time": int((NOW - timedelta(days=1)).timestamp()),
+            "author": {"unique_id": handle, "sec_uid": "verified-sec"},
+            "anchors": detail_anchor,
+            "video": {
+                "play_addr_h264": {"url_list": ["https://cdn.example/video.mp4"]}
+            },
+        },
+    )
+    visual = review._review_video(
+        detail(anchors=list_anchor),
+        [PRODUCT],
+        review.TikHubClient(settings, time.monotonic() + 30),
+        "alice",
+        "verified-sec",
+        settings,
+        time.monotonic() + 30,
+    )
+    assert requested == ["https://cdn.example/video.mp4"]
+    assert contract.has_positive_visual(visual["result"])
+
+
+def test_review_video_still_rejects_replaced_create_time(settings, monkeypatch):
+    monkeypatch.setattr(
+        review.TikHubClient,
+        "detail",
+        lambda self, video_id, handle, sec_uid="": {
+            "aweme_id": video_id,
+            "create_time": int((NOW - timedelta(days=2)).timestamp()),
+            "author": {"unique_id": handle, "sec_uid": "verified-sec"},
+            "anchors": shopping_anchor(PRODUCT),
+            "video": {
+                "play_addr_h264": {"url_list": ["https://cdn.example/video.mp4"]}
+            },
+        },
+    )
+    with pytest.raises(review.ReviewUnavailable, match="video_metadata_changed"):
+        review._review_video(
+            detail(anchors=shopping_anchor(PRODUCT)),
+            [PRODUCT],
+            review.TikHubClient(settings, time.monotonic() + 30),
+            "alice",
+            "verified-sec",
+            settings,
+            time.monotonic() + 30,
+        )
 
 
 def test_short_clip_falls_back_to_first_frame(settings, tmp_path, monkeypatch):
