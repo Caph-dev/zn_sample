@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 
 DATA_SOURCE_CHOICES = ("dom", "api", "auto", "shadow")
 
+# 系统级详情接口故障：同一错误会对所有达人复现，逐行回退 DOM 只会白等。
+# 已知触发：TikTok 反爬对详情接口返回裸 {"code":100000}（message 常为空），
+# 或 "Please remove the plugin and try again"（浏览器插件/环境被判成插件流量）。
+SYSTEMIC_DETAIL_FAILURE_LIMIT = 3
+SYSTEMIC_DETAIL_ERROR_MARKERS = ("remove the plugin", "code=100000")
+
+
+def is_systemic_detail_error(reason: Any) -> bool:
+    """是否为会逐行复现的系统级详情接口错误（命中后应停止逐行回退）。"""
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    return any(marker in text for marker in SYSTEMIC_DETAIL_ERROR_MARKERS)
+
 SHADOW_FIELDS = (
     "apply_id",
     "apply_ids",

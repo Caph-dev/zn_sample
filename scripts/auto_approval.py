@@ -74,7 +74,12 @@ from lib.feishu_bitable import (  # noqa: E402
 )
 from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
 from lib.sample_api import check_pending_application_api  # noqa: E402
-from lib.sample_data_source import load_creator_detail, load_pending_rows  # noqa: E402
+from lib.sample_data_source import (  # noqa: E402
+    SYSTEMIC_DETAIL_FAILURE_LIMIT,
+    is_systemic_detail_error,
+    load_creator_detail,
+    load_pending_rows,
+)
 from lib.sample_write_api import approve_application_api  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -242,7 +247,15 @@ def _run_preview(args: argparse.Namespace) -> int:
             row for row in rows if row.get("product_id") in rule.product_ids
         ]
         logger.info(f"视频/直播组启用：拉详情 {len(detail_targets)} 行")
+        systemic_failure_reason = ""
+        consecutive_systemic_failures = 0
+        skipped_detail_rows = 0
         for index, row in enumerate(detail_targets, 1):
+            if systemic_failure_reason:
+                # 已确认系统级故障：不再逐行请求，也不回退 DOM（会白等）。
+                row["detail_error"] = "detail-api-systemic-failure"
+                skipped_detail_rows += 1
+                continue
             logger.info(
                 f"  [{index}/{len(detail_targets)}] {row.get('creator_name')}"
             )
@@ -266,10 +279,36 @@ def _run_preview(args: argparse.Namespace) -> int:
                 integrity_failures.append(
                     f"详情失败 {row.get('creator_name')}: {result.get('error')}"
                 )
+                if is_systemic_detail_error(
+                    detail_result.fallback_reason or result.get("error")
+                ):
+                    consecutive_systemic_failures += 1
+                    if consecutive_systemic_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT:
+                        systemic_failure_reason = str(
+                            detail_result.fallback_reason
+                            or result.get("error")
+                            or "detail-api-systemic-failure"
+                        )
+                else:
+                    consecutive_systemic_failures = 0
                 continue
+            consecutive_systemic_failures = 0
             _overlay_detail_fields(row, result["detail"])
             if args.detail_delay:
                 time.sleep(args.detail_delay)
+        if systemic_failure_reason:
+            logger.error(
+                f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
+                f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
+            )
+            logger.error(
+                f"[详情数据源] 剩余 {skipped_detail_rows} 行未取详情，按 needs_review 处理；"
+                "请关闭浏览器插件或等平台恢复后重试"
+            )
+            integrity_failures.append(
+                f"详情接口系统级故障（{systemic_failure_reason[:120]}）："
+                f"剩余 {skipped_detail_rows} 行未取详情，按待复核处理"
+            )
     else:
         integrity_notes.append(
             "视频/直播组未启用：未拉取达人详情（履约/GPM 按列表口径）"

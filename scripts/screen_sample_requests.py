@@ -103,6 +103,8 @@ from lib.sample_api import (  # noqa: E402
 )
 from lib.sample_data_source import (  # noqa: E402
     DATA_SOURCE_CHOICES,
+    SYSTEMIC_DETAIL_FAILURE_LIMIT,
+    is_systemic_detail_error,
     load_creator_detail,
     load_pending_rows,
 )
@@ -2027,7 +2029,15 @@ def main() -> int:
             by_key = {
                 (x.get("apply_id") or x.get("creator_name")): x for x in pre
             }
+            systemic_failure_reason = ""
+            consecutive_systemic_failures = 0
+            skipped_detail_count = 0
             for i, target in enumerate(detail_targets, 1):
+                if systemic_failure_reason:
+                    # 系统级故障已确认：不再逐行请求，也不回退 DOM（会白等）。
+                    target["detail_error"] = "detail-api-systemic-failure"
+                    skipped_detail_count += 1
+                    continue
                 key = target.get("apply_id") or target.get("creator_name")
                 logger.info(
                     f"  [{i}/{len(detail_targets)}] {target.get('creator_name')}")
@@ -2065,7 +2075,23 @@ def main() -> int:
                     target["detail_error"] = res.get("error")
                     if args.data_source == "api":
                         strict_api_detail_failure_count += 1
+                    if is_systemic_detail_error(
+                        detail_result.fallback_reason or res.get("error")
+                    ):
+                        consecutive_systemic_failures += 1
+                        if (
+                            consecutive_systemic_failures
+                            >= SYSTEMIC_DETAIL_FAILURE_LIMIT
+                        ):
+                            systemic_failure_reason = str(
+                                detail_result.fallback_reason
+                                or res.get("error")
+                                or "detail-api-systemic-failure"
+                            )
+                    else:
+                        consecutive_systemic_failures = 0
                 else:
+                    consecutive_systemic_failures = 0
                     d = res["detail"]
                     if is_verbose():
                         logger.info(
@@ -2114,6 +2140,16 @@ def main() -> int:
                             f"via={d.get('extract_via')}")
                 if args.detail_delay:
                     time.sleep(args.detail_delay)
+
+            if systemic_failure_reason:
+                logger.error(
+                    f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
+                    f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
+                )
+                logger.error(
+                    f"[详情数据源] 剩余 {skipped_detail_count} 行未取详情，按待复核处理；"
+                    "请关闭浏览器插件或等平台恢复后重试"
+                )
 
             # 带详情重判。只有初筛通过者才要求详情指标；初筛淘汰者保留原始原因，
             # 避免导出出现并未获取详情所产生的额外 failure。
