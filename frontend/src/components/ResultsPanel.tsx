@@ -85,7 +85,8 @@ export function ResultsPanel({
   previewInvalidated,
   staleReason,
 }: ResultsPanelProps) {
-  const [filter, setFilter] = useState<FilterTab>('all');
+  // 筛查跑完默认只看符合项；待复核/不符合/拦截仍可切页签查看。
+  const [filter, setFilter] = useState<FilterTab>('eligible');
   const [search, setSearch] = useState('');
   const [selectedApplyId, setSelectedApplyId] = useState<string | null>(null);
 
