@@ -1,7 +1,7 @@
-/* 独立文档壳：本页不使用旧 app.css；仅少量页面级 token 排版。 */
+/* 独立文档壳：本页不使用旧 app.css。
+   Astryx reset 不设置文档背景，这里只用主题 token 补上，其余样式全部由组件承担。 */
 html,
 body {
-  min-height: 100%;
   background-color: var(--color-background-body);
   color: var(--color-text-primary);
 }
@@ -9,60 +9,3 @@ body {
 #root {
   min-height: 100vh;
 }
-
-.section-title {
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-  margin: 0;
-}
-
-.subsection-title {
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-  margin: 0;
-}
-
-.summary-line,
-.hint-text {
-  margin: 0;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-}
-
-.checks-summary {
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-xs, var(--font-size-sm));
-}
-
-.row-link {
-  appearance: none;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  color: var(--color-text-accent);
-  font: inherit;
-  text-align: start;
-}
-
-.row-link:hover {
-  text-decoration: underline;
-}
-
-.row-link:focus-visible {
-  outline: var(--focus-outline-width, 2px) solid var(--focus-outline-color);
-  outline-offset: var(--spacing-0-5, 2px);
-  border-radius: var(--radius-inner);
-}
-
-.selection-list {
-  margin: 0;
-  padding-inline-start: var(--spacing-4, 16px);
-  color: var(--color-text-secondary);
-}
-
-.nav-current {
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-}
-

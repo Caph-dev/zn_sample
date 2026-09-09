@@ -170,6 +170,85 @@ class RuleValidationTests(unittest.TestCase):
         self.assertEqual(CONTENT_ALLOWED_DAYS, (7,))
         self.assertEqual(CONTENT_ALLOWED_MIN_RELATED, (4,))
 
+    def test_to_dict_round_trip_revalidates(self) -> None:
+        """快照必须能被自己校验：预览信封/规则文件都依赖 to_dict() 回读。"""
+        rule = validate_custom_rule(rule_payload(), allowed_product_ids=ALLOWED)
+        again = validate_custom_rule(rule.to_dict(), allowed_product_ids=ALLOWED)
+        self.assertEqual(rule_hash(rule), rule_hash(again))
+
+    def test_to_dict_round_trip_with_all_groups(self) -> None:
+        payload = rule_payload(
+            basic={
+                "followers": {"enabled": True, "min": 2000},
+                "aov": {"enabled": True, "min": 10, "max": 25},
+                "categories": {
+                    "enabled": True,
+                    "values": ["Beauty & Personal Care"],
+                },
+            },
+            video_live={
+                "enabled": True,
+                "logic": "either",
+                "video": {
+                    "enabled": True,
+                    "gpm": 10,
+                    "avg_views": 300,
+                    "engagement": 2,
+                },
+                "live": {"enabled": False},
+            },
+            content={
+                "enabled": True,
+                "days": 7,
+                "min_related": 4,
+                "require_display": True,
+            },
+        )
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        again = validate_custom_rule(rule.to_dict(), allowed_product_ids=ALLOWED)
+        self.assertEqual(rule_hash(rule), rule_hash(again))
+
+    def test_explicit_nulls_in_disabled_sides_are_accepted(self) -> None:
+        """历史快照可能把禁用侧写成 null；必须仍可校验通过。"""
+        payload = rule_payload(
+            video_live={
+                "enabled": False,
+                "logic": "either",
+                "video": {
+                    "enabled": False,
+                    "gpm": None,
+                    "avg_views": None,
+                    "engagement": None,
+                },
+                "live": {
+                    "enabled": False,
+                    "gpm": None,
+                    "avg_views": None,
+                    "engagement": None,
+                },
+            }
+        )
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        self.assertFalse(rule.video_live.enabled)
+
+    def test_enabled_side_with_null_metric_reports_missing_value(self) -> None:
+        payload = rule_payload(
+            basic={},
+            video_live={
+                "enabled": True,
+                "logic": "either",
+                "video": {
+                    "enabled": True,
+                    "gpm": None,
+                    "avg_views": 300,
+                    "engagement": 2,
+                },
+            },
+        )
+        with self.assertRaises(AutoApprovalRuleError) as context:
+            validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        self.assertEqual(context.exception.code, "missing-value")
+
 
 class RuleEvaluationTests(unittest.TestCase):
     def setUp(self) -> None:

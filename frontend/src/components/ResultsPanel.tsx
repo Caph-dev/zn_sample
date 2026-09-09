@@ -1,12 +1,15 @@
 import {Badge} from '@astryxdesign/core/Badge';
 import {Banner} from '@astryxdesign/core/Banner';
 import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
+import {Heading} from '@astryxdesign/core/Heading';
 import {Layout, LayoutContent, LayoutPanel} from '@astryxdesign/core/Layout';
+import {Link} from '@astryxdesign/core/Link';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
 import {StatusDot} from '@astryxdesign/core/StatusDot';
 import {Tab, TabList} from '@astryxdesign/core/TabList';
 import {Table, proportional, pixel} from '@astryxdesign/core/Table';
+import {Text} from '@astryxdesign/core/Text';
 import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
@@ -125,7 +128,7 @@ export function ResultsPanel({
     <Section>
       <Stack gap={3}>
         <Stack direction="horizontal" gap={2} vAlign="center">
-          <h2 className="section-title">3 · 只读结果</h2>
+          <Heading level={2}>3 · 只读结果</Heading>
           <Badge label={`合计 ${stats?.rows ?? 0}`} />
           <Badge label={`符合 ${stats?.eligible ?? 0}`} />
           <Badge label={`待复核 ${stats?.needs_review ?? 0}`} />
@@ -210,13 +213,9 @@ export function ResultsPanel({
                     renderCell: (row) => {
                       const candidate = row as unknown as CandidateRow;
                       return (
-                        <button
-                          type="button"
-                          className="row-link"
-                          onClick={() => setSelectedApplyId(candidate.apply_id)}
-                        >
+                        <Link onClick={() => setSelectedApplyId(candidate.apply_id)}>
                           {candidate.creator_name}
-                        </button>
+                        </Link>
                       );
                     },
                   },
@@ -242,7 +241,7 @@ export function ResultsPanel({
                             variant={rowStatusVariant(candidate)}
                             label={rowStatusLabel(candidate)}
                           />
-                          <span>{rowStatusLabel(candidate)}</span>
+                          <Text>{rowStatusLabel(candidate)}</Text>
                         </Stack>
                       );
                     },
@@ -254,12 +253,12 @@ export function ResultsPanel({
                     renderCell: (row) => {
                       const candidate = row as unknown as CandidateRow;
                       return (
-                        <span className="checks-summary">
+                        <Text type="supporting">
                           {candidate.checks
                             .filter((check) => check.status !== 'not_checked')
                             .map((check) => `${check.label}:${STATUS_LABELS[check.status] ?? check.status}`)
                             .join(' · ')}
-                        </span>
+                        </Text>
                       );
                     },
                   },
@@ -280,7 +279,7 @@ export function ResultsPanel({
                             variant={statusVariant(candidate.content_verdict)}
                             label={label}
                           />
-                          <span>{label}</span>
+                          <Text>{label}</Text>
                         </Stack>
                       );
                     },
@@ -298,37 +297,37 @@ export function ResultsPanel({
             selectedRow !== null ? (
               <LayoutPanel width={360} hasDivider>
                 <Stack gap={2}>
-                  <h3 className="subsection-title">{selectedRow.creator_name}</h3>
-                  <p>申请 ID：{selectedRow.apply_id}</p>
-                  <p>商品：{selectedRow.product_id}</p>
-                  <h4 className="subsection-title">逐项检查</h4>
+                  <Heading level={3}>{selectedRow.creator_name}</Heading>
+                  <Text>申请 ID：{selectedRow.apply_id}</Text>
+                  <Text>商品：{selectedRow.product_id}</Text>
+                  <Heading level={4}>逐项检查</Heading>
                   {selectedRow.checks.map((check) => (
                     <Stack key={check.key} direction="horizontal" gap={2} vAlign="center">
                       <StatusDot
                         variant={statusVariant(check.status)}
                         label={check.label}
                       />
-                      <span>
+                      <Text>
                         {check.label}：{STATUS_LABELS[check.status] ?? check.status}
                         {check.value !== null && check.value !== undefined
                           ? `（值 ${String(check.value)}）`
                           : ''}
                         {check.source !== '' ? ` · 来源 ${check.source}` : ''}
-                      </span>
+                      </Text>
                     </Stack>
                   ))}
                   {selectedRow.safety_blocks.length > 0 && (
                     <Stack gap={1}>
-                      <h4 className="subsection-title">执行拦截</h4>
+                      <Heading level={4}>执行拦截</Heading>
                       {selectedRow.safety_blocks.map((block) => (
-                        <p key={block.code} className="hint-text">
+                        <Text key={block.code} type="supporting">
                           {block.detail}
-                        </p>
+                        </Text>
                       ))}
                     </Stack>
                   )}
                   {selectedRow.content_reason !== '' && (
-                    <p className="hint-text">内容证据：{selectedRow.content_reason}</p>
+                    <Text type="supporting">内容证据：{selectedRow.content_reason}</Text>
                   )}
                 </Stack>
               </LayoutPanel>

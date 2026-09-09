@@ -11,6 +11,30 @@ from assistant.services.creator_enrich_service import CreatorEnrichService
 from assistant.services.followup_service import FollowupService
 
 
+def _format_enrich_result(result: dict) -> str:
+    """把补齐统计转成可读中文，避免把 Python dict 直接写进事件消息。"""
+    def count(key: str) -> int:
+        try:
+            return int(result.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    parts = [
+        f"缺失 {count('missing')}",
+        f"类型补齐 {count('type_filled')}",
+        f"语言补齐 {count('language_filled')}",
+    ]
+    for key, label in (
+        ("failed", "失败"),
+        ("type_failures", "类型失败"),
+        ("detail_failures", "详情失败"),
+        ("unprocessed", "未处理"),
+    ):
+        if count(key):
+            parts.append(f"{label} {count(key)}")
+    return "，".join(parts)
+
+
 def run_followup_generate(job_id: str, session_factory) -> str:
     def warning(message: str) -> None:
         append_event(session_factory, job_id, level="warning", event_type="job.warning", message=message)
@@ -38,7 +62,7 @@ def run_followup_generate(job_id: str, session_factory) -> str:
         job_id,
         level="info",
         event_type="job.stage",
-        message=f"达人资料补齐完成：{enrich_result}",
+        message=f"达人资料补齐完成：{_format_enrich_result(enrich_result)}",
     )
 
     update_progress(session_factory, job_id, current=0, total=1, message="生成跟进待办")

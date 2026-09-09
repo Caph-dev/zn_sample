@@ -52,6 +52,13 @@ export function getOptions(): Promise<OptionsPayload> {
   return fetchJson<OptionsPayload>('/api/auto-approval/options');
 }
 
+export function saveRuleDraft(rule: RuleDraft): Promise<{rule: RuleDraft; saved_at: string}> {
+  return fetchJson<{rule: RuleDraft; saved_at: string}>('/api/auto-approval/rule-draft', {
+    method: 'PUT',
+    body: JSON.stringify({rule}),
+  });
+}
+
 export function getStorePreparation(): Promise<StoreSummary> {
   return fetchJson<StoreSummary>('/api/stores/preparation-status');
 }

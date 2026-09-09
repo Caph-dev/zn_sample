@@ -1,8 +1,10 @@
 import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
+import {Heading} from '@astryxdesign/core/Heading';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
 import {StatusDot} from '@astryxdesign/core/StatusDot';
+import {Text} from '@astryxdesign/core/Text';
 
 import type {StoreSummary} from '../types';
 
@@ -48,13 +50,13 @@ export function ReadinessPanel({
     <Section>
       <Stack gap={2}>
         <Stack direction="horizontal" gap={2} vAlign="center">
-          <h2 className="section-title">1 · 运行准备</h2>
+          <Heading level={2}>1 · 运行准备</Heading>
           <StatusDot variant={statusVariant} label={statusLabel} tooltip={statusLabel} />
-          <span>{statusLabel}</span>
+          <Text>{statusLabel}</Text>
         </Stack>
         <Stack direction="horizontal" gap={3} vAlign="center">
-          <span>店铺：{storeName || '—'}</span>
-          <span>店铺 ID：{storeId || '—'}</span>
+          <Text>店铺：{storeName || '—'}</Text>
+          <Text>店铺 ID：{storeId || '—'}</Text>
           <Button label="重新检测" size="sm" variant="secondary" onClick={onRefreshStore} />
           <Button
             label="检查环境"

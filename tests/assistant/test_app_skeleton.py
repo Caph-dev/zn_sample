@@ -51,6 +51,7 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertIn("运行 1–3", response.text)
         self.assertIn("Part.B: 追踪物流，跟进达人视频发布", response.text)
         self.assertIn('action="/api/jobs/operator/prepare"', response.text)
+        self.assertIn('href="/auto-approval"', response.text)
         self.assertIn("data-preparation-status", response.text)
         self.assertIn("data-store-prepare-button", response.text)
         self.assertIn('action="/api/jobs/operator/screen"', response.text)

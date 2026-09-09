@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -58,11 +59,16 @@ templates.env.globals.update(
 )
 
 
-def _latest_active_job(request: Request):
-    """刷新后恢复面板用：优先最近的运行中任务，否则回退到最近的已完成任务。
+# 终态任务只在这个窗口内恢复到全局面板：刚跑完刷新还能看到结果，
+# 但不会把几天前的旧任务重新挂到每个页面上。
+TERMINAL_PANEL_RESTORE_WINDOW = timedelta(minutes=30)
 
-    终态任务也恢复，才能让「运行结果」不因刷新消失；只取最近 7 天内的终态，
-    避免把很久以前的旧任务重新挂到面板上。
+
+def _latest_active_job(request: Request):
+    """刷新后恢复面板用：优先最近的运行中任务，否则只回退到刚结束的任务。
+
+    终态任务只取最近 30 分钟内结束的，避免打开任意页面都弹出旧任务输出。
+    要看历史任务请走「任务」页。
     """
     session_factory = getattr(request.app.state, "session_factory", None)
     if session_factory is None:
@@ -78,10 +84,8 @@ def _latest_active_job(request: Request):
             if active_job is not None:
                 return active_job
             # SQLite 的 DateTime 列会剥掉时区（见 assistant/database/types.py），
-            # 所以这里用 Python 过滤最近 7 天，避免字符串比较踩坑。
-            from datetime import datetime, timedelta, timezone
-
-            week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+            # 所以这里用 Python 过滤时间窗口，避免字符串比较踩坑。
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - TERMINAL_PANEL_RESTORE_WINDOW
             latest_finished = session.scalar(
                 select(Job)
                 .where(Job.status.in_(("succeeded", "failed", "cancelled", "interrupted")))
@@ -89,7 +93,7 @@ def _latest_active_job(request: Request):
                 .limit(1)
             )
             if latest_finished is not None and latest_finished.finished_at is not None:
-                if latest_finished.finished_at >= week_ago:
+                if latest_finished.finished_at >= cutoff:
                     return latest_finished
             return None
     except Exception:

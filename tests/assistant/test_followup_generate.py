@@ -748,3 +748,51 @@ class FollowupGenerateTests(unittest.TestCase):
             self.assertNotEqual(by_stage["arrival"].status, "suppressed")
             self.assertEqual(by_stage["day_3"].action_kind, "send_message")
             self.assertEqual(by_stage["day_3"].status, "pending")
+
+
+class EnrichResultMessageTests(unittest.TestCase):
+    """补齐阶段消息必须是可读中文，不能把 Python dict 直接写进任务事件。"""
+
+    def test_message_lists_core_counts(self) -> None:
+        from assistant.jobs.handlers.followup_generate import _format_enrich_result
+
+        message = _format_enrich_result(
+            {
+                "missing": 57,
+                "type_filled": 53,
+                "language_filled": 57,
+                "failed": 0,
+                "type_failures": 0,
+                "detail_failures": 0,
+                "unprocessed": 0,
+            }
+        )
+        self.assertIn("缺失 57", message)
+        self.assertIn("类型补齐 53", message)
+        self.assertIn("语言补齐 57", message)
+        self.assertNotIn("{", message)
+        self.assertNotIn("'", message)
+
+    def test_non_zero_problem_counts_are_surfaced(self) -> None:
+        from assistant.jobs.handlers.followup_generate import _format_enrich_result
+
+        message = _format_enrich_result(
+            {
+                "missing": 3,
+                "type_filled": 1,
+                "language_filled": 2,
+                "failed": 1,
+                "detail_failures": 2,
+                "unprocessed": 1,
+            }
+        )
+        self.assertIn("失败 1", message)
+        self.assertIn("详情失败 2", message)
+        self.assertIn("未处理 1", message)
+
+    def test_missing_or_invalid_values_default_to_zero(self) -> None:
+        from assistant.jobs.handlers.followup_generate import _format_enrich_result
+
+        message = _format_enrich_result({"missing": None, "type_filled": "bad"})
+        self.assertIn("缺失 0", message)
+        self.assertIn("类型补齐 0", message)

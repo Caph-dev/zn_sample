@@ -33,6 +33,9 @@ EXECUTE_LIMIT_DEFAULT = 1
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 CONFIRMATION_ANSWERS = frozenset({"y", "yes"})
 
+# 自定义规则草稿的记忆键（AppSetting 非敏感键；仅用于页面回填，不作为执行授权）。
+RULE_DRAFT_SETTING_KEY = "auto_approval_rule_draft"
+
 # 主推款选项缓存：飞书网络读取有成本，短 TTL 缓存。
 _hero_cache_lock = threading.Lock()
 _hero_cache: dict[str, Any] = {"fetched_at": 0.0, "data": None, "error": None}
@@ -126,8 +129,8 @@ def load_hero_products(*, force: bool = False) -> dict[str, Any]:
     return payload
 
 
-def options_payload() -> dict[str, Any]:
-    """GET /api/auto-approval/options 的载荷：条件范围、默认值与主推商品。"""
+def options_payload(session_factory=None) -> dict[str, Any]:
+    """GET /api/auto-approval/options 的载荷：条件范围、默认值、主推商品与上次草稿。"""
     from lib.auto_approval_rules import (
         ALLOWED_CATEGORIES,
         BASIC_LIMITS,
@@ -140,6 +143,11 @@ def options_payload() -> dict[str, Any]:
     )
 
     hero = load_hero_products()
+    saved_rule = (
+        load_rule_draft(session_factory, hero=hero)
+        if session_factory is not None
+        else None
+    )
     return {
         "schema_version": 1,
         "mode": "custom",
@@ -156,7 +164,92 @@ def options_payload() -> dict[str, Any]:
             "preview_freshness_seconds": PREVIEW_FRESHNESS_SECONDS,
         },
         "hero": hero,
+        "saved_rule": saved_rule,
     }
+
+
+def load_rule_draft(
+    session_factory,
+    *,
+    hero: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """读取上次保存的自定义规则草稿；不合法（含商品已不在主推）则忽略。"""
+    from assistant.database.models import AppSetting
+    from lib.auto_approval_rules import (
+        AutoApprovalRuleError,
+        validate_custom_rule,
+    )
+
+    if session_factory is None:
+        return None
+    with session_factory() as session:
+        setting = session.get(AppSetting, RULE_DRAFT_SETTING_KEY)
+        if setting is None:
+            return None
+        raw_value = str(setting.value or "")
+    try:
+        stored = json.loads(raw_value)
+    except ValueError:
+        return None
+    if not isinstance(stored, dict):
+        return None
+    rule_payload = stored.get("rule")
+    if not isinstance(rule_payload, dict):
+        return None
+    hero = hero if hero is not None else load_hero_products()
+    if not hero.get("ok"):
+        return None
+    allowed_product_ids = {entry["product_id"] for entry in hero["products"]}
+    try:
+        rule = validate_custom_rule(
+            rule_payload,
+            allowed_product_ids=allowed_product_ids,
+        )
+    except AutoApprovalRuleError:
+        return None
+    return {
+        "rule": rule.to_dict(),
+        "saved_at": str(stored.get("saved_at") or ""),
+    }
+
+
+def save_rule_draft(session_factory, rule_payload: dict[str, Any]) -> dict[str, Any]:
+    """保存自定义规则草稿（严格校验后才写入；草稿不作为执行授权）。"""
+    from assistant.database.models import AppSetting
+    from lib.auto_approval_rules import (
+        AutoApprovalRuleError,
+        validate_custom_rule,
+    )
+
+    hero = load_hero_products()
+    if not hero.get("ok"):
+        raise AutoApprovalServiceError(
+            "hero-unavailable",
+            "主推款表不可用，无法保存自定义规则。",
+            status_code=503,
+        )
+    allowed_product_ids = {entry["product_id"] for entry in hero["products"]}
+    try:
+        rule = validate_custom_rule(
+            rule_payload,
+            allowed_product_ids=allowed_product_ids,
+        )
+    except AutoApprovalRuleError as error:
+        raise AutoApprovalServiceError(error.code, error.summary, status_code=400) from error
+    saved_at = _utc_now().isoformat(timespec="seconds")
+    with session_factory() as session:
+        setting = session.get(AppSetting, RULE_DRAFT_SETTING_KEY)
+        value = json.dumps(
+            {"rule": rule.to_dict(), "saved_at": saved_at},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if setting is None:
+            session.add(AppSetting(key=RULE_DRAFT_SETTING_KEY, value=value))
+        else:
+            setting.value = value
+        session.commit()
+    return {"rule": rule.to_dict(), "saved_at": saved_at}
 
 
 def create_preview(
@@ -197,6 +290,8 @@ def create_preview(
         entry["product_id"]: entry["sku"] for entry in hero["products"]
     }
     summary_lines = rule_summary_lines(rule, product_display=product_display)
+    # 记住本次规则，下次进入页面可回填（草稿仅用于回填，不构成执行授权）。
+    save_rule_draft(session_factory, rule.to_dict())
     preview_id = str(uuid.uuid4())
     rules_path = rule_snapshot_directory() / f"rules_{preview_id}.json"
     rules_path.write_text(

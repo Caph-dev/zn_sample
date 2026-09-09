@@ -73,6 +73,8 @@ export interface OptionsPayload {
     preview_freshness_seconds: number;
   };
   hero: {ok: boolean; products: HeroProduct[]; error?: string; detail?: string};
+  /** 上次保存的自定义规则草稿（仅用于回填，不代表本次已执行）。 */
+  saved_rule: {rule: RuleDraft; saved_at: string} | null;
 }
 
 export type CheckStatus = 'passed' | 'failed' | 'needs_review' | 'not_checked';

@@ -25,9 +25,22 @@ from assistant.database.models import (
 from assistant.services.auto_approval_service import (
     AutoApprovalServiceError,
     create_execution,
+    load_rule_draft,
+    save_rule_draft,
 )
 
 ALLOWED_PRODUCTS = [{"product_id": "1732414717062320994", "sku": "B005"}]
+
+
+def _valid_rule_payload() -> dict:
+    return {
+        "schema_version": 1,
+        "mode": "custom",
+        "product_ids": ["1732414717062320994"],
+        "basic": {"fulfillment": {"enabled": True, "min": 85}},
+        "video_live": {"enabled": False},
+        "content": {"enabled": False},
+    }
 
 
 def _mock_hero():
@@ -175,6 +188,82 @@ class ExecutionBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].apply_id, "apply-1")
+
+
+class RuleDraftMemoryTests(unittest.TestCase):
+    """自定义规则记忆：严格校验后才保存，读取时再次校验。"""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        engine = create_database_engine(
+            Path(self.temporary_directory.name) / "assistant.sqlite3"
+        )
+        Base.metadata.create_all(engine)
+        self.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self.hero_patcher = patch(
+            "assistant.services.auto_approval_service.load_hero_products",
+            return_value=_mock_hero(),
+        )
+        self.hero_patcher.start()
+
+    def tearDown(self) -> None:
+        self.hero_patcher.stop()
+        self.temporary_directory.cleanup()
+
+    def test_no_saved_draft_returns_none(self) -> None:
+        self.assertIsNone(load_rule_draft(self.session_factory))
+
+    def test_save_and_load_round_trip(self) -> None:
+        saved = save_rule_draft(self.session_factory, _valid_rule_payload())
+        loaded = load_rule_draft(self.session_factory)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["rule"], saved["rule"])
+        self.assertEqual(loaded["saved_at"], saved["saved_at"])
+        self.assertEqual(loaded["rule"]["basic"]["fulfillment"]["min"], 85)
+
+    def test_invalid_draft_rejected(self) -> None:
+        payload = _valid_rule_payload()
+        payload["basic"] = {}  # 全部关闭 → 空检查组合
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            save_rule_draft(self.session_factory, payload)
+        self.assertEqual(context.exception.code, "empty-check-set")
+
+    def test_unknown_field_rejected(self) -> None:
+        payload = _valid_rule_payload()
+        payload["evil"] = True
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            save_rule_draft(self.session_factory, payload)
+        self.assertEqual(context.exception.code, "unknown-field")
+
+    def test_load_ignores_product_no_longer_allowed(self) -> None:
+        save_rule_draft(self.session_factory, _valid_rule_payload())
+        self.hero_patcher.stop()
+        self.hero_patcher = patch(
+            "assistant.services.auto_approval_service.load_hero_products",
+            return_value={"ok": True, "products": [], "hero_keys": []},
+        )
+        self.hero_patcher.start()
+        self.assertIsNone(load_rule_draft(self.session_factory))
+
+    def test_options_payload_includes_saved_rule(self) -> None:
+        from assistant.services.auto_approval_service import options_payload
+        from lib.auto_approval_rules import validate_custom_rule
+
+        saved = save_rule_draft(self.session_factory, _valid_rule_payload())
+        payload = options_payload(self.session_factory)
+        self.assertIsNotNone(payload["saved_rule"])
+        expected = validate_custom_rule(
+            _valid_rule_payload(),
+            allowed_product_ids={"1732414717062320994"},
+        ).to_dict()
+        self.assertEqual(payload["saved_rule"]["rule"], expected)
+        self.assertEqual(payload["saved_rule"]["rule"], saved["rule"])
+
+    def test_options_payload_without_session_has_no_saved_rule(self) -> None:
+        from assistant.services.auto_approval_service import options_payload
+
+        payload = options_payload()
+        self.assertIsNone(payload["saved_rule"])
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import {AppShell} from '@astryxdesign/core/AppShell';
 import {Banner} from '@astryxdesign/core/Banner';
 import {Stack} from '@astryxdesign/core/Stack';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
@@ -13,14 +14,15 @@ import {
   getRecent,
   getStorePreparation,
   reconcileExecution,
+  saveRuleDraft,
   JobEvent,
 } from './api';
 import {ExecutionPanel} from './components/ExecutionPanel';
+import {AppNavigation} from './components/AppNavigation';
 import {ReadinessPanel} from './components/ReadinessPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
-import {TopNav} from './components/TopNav';
-import {buildStandardRule} from './ruleModel';
+import {buildStandardRule, validateDraft} from './ruleModel';
 import type {
   ExecutionPayload,
   OptionsPayload,
@@ -47,6 +49,17 @@ function ruleEquals(left: RuleDraft, right: RuleDraft): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function formatSavedAt(value: string): string {
+  if (value === '') {
+    return '上次';
+  }
+  const savedDate = new Date(value);
+  if (Number.isNaN(savedDate.getTime())) {
+    return value;
+  }
+  return savedDate.toLocaleString();
+}
+
 export function App() {
   const [options, setOptions] = useState<OptionsPayload | null>(null);
   const [optionsError, setOptionsError] = useState('');
@@ -69,9 +82,11 @@ export function App() {
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
   const [checkingEnvironment, setCheckingEnvironment] = useState(false);
   const [environmentNote, setEnvironmentNote] = useState('');
+  const [draftNotice, setDraftNotice] = useState('');
 
   const previewPollTimer = useRef<number | null>(null);
   const storePollTimer = useRef<number | null>(null);
+  const restoredPreviewRef = useRef(false);
 
   const busy = storeSummary?.error === 'ziniao-busy';
 
@@ -123,6 +138,15 @@ export function App() {
         if (!payload.hero.ok) {
           setOptionsError('主推款表不可用，请检查飞书配置。');
         }
+        // 有上次保存的自定义规则就回填（预览恢复优先，避免覆盖当前任务上下文）。
+        if (payload.saved_rule !== null && !restoredPreviewRef.current) {
+          setRule(payload.saved_rule.rule);
+          setDisplayMode('custom');
+          setDraftNotice(
+            `已恢复上次使用的自定义规则（保存于 ${formatSavedAt(payload.saved_rule.saved_at)}）。` +
+              '确认后可直接筛查，或修改后重新筛查。',
+          );
+        }
       })
       .catch((error) => setOptionsError(errorMessage(error)));
     refreshStore();
@@ -133,12 +157,10 @@ export function App() {
         if (latestPreview !== undefined) {
           getPreview(latestPreview.preview_id)
             .then((payload) => {
+              restoredPreviewRef.current = true;
               setPreview(payload);
               setRule(payload.rule);
               setDisplayMode('custom');
-              if (payload.status === 'completed') {
-                setLimit(Math.max(1, payload.stats.eligible > 0 ? 1 : 1));
-              }
             })
             .catch(() => {});
         }
@@ -158,6 +180,22 @@ export function App() {
       }
     };
   }, [refreshStore]);
+
+  // 自定义规则改动后自动保存为草稿（仅保存校验通过的规则，供下次回填）。
+  useEffect(() => {
+    if (displayMode !== 'custom' || options === null) {
+      return undefined;
+    }
+    if (validateDraft(rule, options).length > 0) {
+      return undefined;
+    }
+    const saveTimer = window.setTimeout(() => {
+      saveRuleDraft(rule).catch(() => {
+        // 草稿保存失败不影响当前操作，下次改动会重试。
+      });
+    }, 800);
+    return () => window.clearTimeout(saveTimer);
+  }, [rule, displayMode, options]);
 
   useEffect(() => {
     if (previewPollTimer.current !== null) {
@@ -309,72 +347,89 @@ export function App() {
   }, [checkingEnvironment]);
 
   return (
-    <Stack gap={3} padding={3}>
-      <TopNav />
-      {optionsError !== '' && (
-        <ReadinessBanner message={optionsError} />
-      )}
-      {previewError !== '' && <PreviewErrorBanner message={previewError} />}
-      {previewEvents.length > 0 && preview !== null && isJobActive(preview.job?.status) && (
-        <TaskProgress
-          label={`筛查任务 ${preview.preview_id}`}
-          events={previewEvents}
+    <AppShell
+      height="auto"
+      variant="section"
+      contentPadding={4}
+      sideNav={<AppNavigation />}
+    >
+      <Stack gap={4}>
+        {draftNotice !== '' && (
+          <Banner
+            status="info"
+            title="已记忆上次的自定义规则"
+            description={draftNotice}
+            isDismissable
+            onDismiss={() => setDraftNotice('')}
+          />
+        )}
+        {optionsError !== '' && (
+          <ReadinessBanner message={optionsError} />
+        )}
+        {previewError !== '' && <PreviewErrorBanner message={previewError} />}
+        {previewEvents.length > 0 && preview !== null && isJobActive(preview.job?.status) && (
+          <TaskProgress
+            label={`筛查任务 ${preview.preview_id}`}
+            events={previewEvents}
+          />
+        )}
+        <ReadinessPanel
+          storeSummary={storeSummary}
+          busy={busy}
+          checkingEnvironment={checkingEnvironment}
+          onCheckEnvironment={onCheckEnvironment}
+          onRefreshStore={refreshStore}
+          environmentNote={environmentNote}
         />
-      )}
-      <ReadinessPanel
-        storeSummary={storeSummary}
-        busy={busy}
-        checkingEnvironment={checkingEnvironment}
-        onCheckEnvironment={onCheckEnvironment}
-        onRefreshStore={refreshStore}
-        environmentNote={environmentNote}
-      />
-      <RuleConfigPanel
-        options={options}
-        rule={rule}
-        displayMode={displayMode}
-        onDisplayModeChange={setDisplayMode}
-        onCopyToCustom={() => {
-          setRule(buildStandardRule(options));
-          setDisplayMode('custom');
-        }}
-        onRuleChange={onRuleChange}
-        onStartPreview={() => void onStartPreview()}
-        previewRunning={previewCreating || (preview !== null && isJobActive(preview.job?.status))}
-        busy={busy}
-        previewInvalidated={previewInvalidated}
-      />
-      {preview !== null && preview.status === 'completed' && (
-        <ResultsPanel
-          preview={preview}
-          selection={selection}
-          onSelectionChange={setSelection}
+        <RuleConfigPanel
+          options={options}
+          rule={rule}
+          displayMode={displayMode}
+          onDisplayModeChange={setDisplayMode}
+          onCopyToCustom={() => {
+            setRule(buildStandardRule(options));
+            setDisplayMode('custom');
+          }}
+          onRuleChange={onRuleChange}
+          onStartPreview={() => void onStartPreview()}
+          previewRunning={
+            previewCreating || (preview !== null && isJobActive(preview.job?.status))
+          }
+          busy={busy}
           previewInvalidated={previewInvalidated}
-          staleReason="规则或阈值已修改，旧结果已失效。"
         />
-      )}
-      <ExecutionPanel
-        options={options}
-        preview={preview !== null && preview.status === 'completed' ? preview : null}
-        previewInvalidated={previewInvalidated}
-        selection={selection}
-        limit={limit}
-        onLimitChange={setLimit}
-        writeFeishu={writeFeishu}
-        onWriteFeishuChange={setWriteFeishu}
-        confirmText={confirmText}
-        onConfirmTextChange={setConfirmText}
-        onExecute={() => void onExecute()}
-        executing={executing}
-        executionError={executionError}
-        execution={execution}
-        reconcileConfirmText={reconcileConfirmText}
-        onReconcileConfirmTextChange={setReconcileConfirmText}
-        onReconcile={() => void onReconcile()}
-        reconciling={reconciling}
-        reconcileError={reconcileError}
-      />
-    </Stack>
+        {preview !== null && preview.status === 'completed' && (
+          <ResultsPanel
+            preview={preview}
+            selection={selection}
+            onSelectionChange={setSelection}
+            previewInvalidated={previewInvalidated}
+            staleReason="规则或阈值已修改，旧结果已失效。"
+          />
+        )}
+        <ExecutionPanel
+          options={options}
+          preview={preview !== null && preview.status === 'completed' ? preview : null}
+          previewInvalidated={previewInvalidated}
+          selection={selection}
+          limit={limit}
+          onLimitChange={setLimit}
+          writeFeishu={writeFeishu}
+          onWriteFeishuChange={setWriteFeishu}
+          confirmText={confirmText}
+          onConfirmTextChange={setConfirmText}
+          onExecute={() => void onExecute()}
+          executing={executing}
+          executionError={executionError}
+          execution={execution}
+          reconcileConfirmText={reconcileConfirmText}
+          onReconcileConfirmTextChange={setReconcileConfirmText}
+          onReconcile={() => void onReconcile()}
+          reconciling={reconciling}
+          reconcileError={reconcileError}
+        />
+      </Stack>
+    </AppShell>
   );
 }
 

@@ -115,21 +115,23 @@ class CustomRule:
     def to_dict(self) -> dict[str, Any]:
         def basic_dict(condition: BasicCondition) -> dict[str, Any]:
             payload: dict[str, Any] = {"enabled": condition.enabled}
-            if condition.enabled or condition.min_value is not None:
+            if condition.min_value is not None:
                 payload["min"] = condition.min_value
-            if condition.enabled or condition.max_value is not None:
+            if condition.max_value is not None:
                 payload["max"] = condition.max_value
             if condition.enabled:
                 payload["values"] = sorted(condition.categories)
             return payload
 
         def side_dict(side: SideCondition) -> dict[str, Any]:
-            return {
-                "enabled": side.enabled,
-                "gpm": side.gpm,
-                "avg_views": side.avg_views,
-                "engagement": side.engagement,
-            }
+            payload: dict[str, Any] = {"enabled": side.enabled}
+            if side.gpm is not None:
+                payload["gpm"] = side.gpm
+            if side.avg_views is not None:
+                payload["avg_views"] = side.avg_views
+            if side.engagement is not None:
+                payload["engagement"] = side.engagement
+            return payload
 
         return {
             "schema_version": self.schema_version,
@@ -191,7 +193,7 @@ def _read_basic_condition(
         _reject("invalid-boolean", f"{context}.{key}.enabled 必须是布尔值")
     min_value: float | None = None
     max_value: float | None = None
-    if "min" in raw:
+    if "min" in raw and raw["min"] is not None:
         min_value = _finite_number(raw["min"], f"{context}.{key}.min")
         if not limits["min"] <= min_value <= limits["max"]:
             _reject(
@@ -200,24 +202,13 @@ def _read_basic_condition(
             )
         if limits.get("integer") and min_value != int(min_value):
             _reject("invalid-integer", f"{context}.{key}.min 必须是整数")
-    if "max" in raw:
+    if "max" in raw and raw["max"] is not None:
         max_value = _finite_number(raw["max"], f"{context}.{key}.max")
         if not limits["min"] <= max_value <= limits["max"]:
             _reject(
                 "value-out-of-range",
                 f"{context}.{key}.max 超出范围 [{limits['min']}, {limits['max']}]",
             )
-    if enabled:
-        if key == "aov":
-            if min_value is None or max_value is None:
-                _reject("missing-value", f"{context}.aov 启用时必须提供 min 与 max")
-            if min_value > max_value:
-                _reject("invalid-range", f"{context}.aov min 必须 ≤ max")
-        else:
-            if min_value is None:
-                _reject("missing-value", f"{context}.{key} 启用时必须提供 min")
-            if max_value is not None and max_value < min_value:
-                _reject("invalid-range", f"{context}.{key} min 必须 ≤ max")
     if key == "categories":
         categories: tuple[str, ...] = ()
         if enabled:
@@ -231,7 +222,23 @@ def _read_basic_condition(
                         f"{context}.categories 含不允许的类目: {value}",
                     )
             categories = tuple(raw_values)
-        return BasicCondition(enabled=enabled, min_value=min_value, max_value=max_value, categories=categories)
+        return BasicCondition(
+            enabled=enabled,
+            min_value=min_value,
+            max_value=max_value,
+            categories=categories,
+        )
+    if enabled:
+        if key == "aov":
+            if min_value is None or max_value is None:
+                _reject("missing-value", f"{context}.aov 启用时必须提供 min 与 max")
+            if min_value > max_value:
+                _reject("invalid-range", f"{context}.aov min 必须 ≤ max")
+        else:
+            if min_value is None:
+                _reject("missing-value", f"{context}.{key} 启用时必须提供 min")
+            if max_value is not None and max_value < min_value:
+                _reject("invalid-range", f"{context}.{key} min 必须 ≤ max")
     return BasicCondition(enabled=enabled, min_value=min_value, max_value=max_value)
 
 
@@ -256,7 +263,8 @@ def _read_side_condition(
 
     def read_metric(metric_key: str, suffix: str, required: bool) -> float | None:
         value: float | None = None
-        if metric_key in raw:
+        # 显式 null 视为「未提供」：禁用侧允许为 null，启用侧按 missing-value 报错。
+        if metric_key in raw and raw[metric_key] is not None:
             value = _finite_number(raw[metric_key], f"{context}.{key}.{metric_key}")
         limits = VIDEO_LIVE_LIMITS[f"{suffix}_{metric_key}"]
         if value is not None and not limits["min"] <= value <= limits["max"]:

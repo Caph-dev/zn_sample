@@ -45,23 +45,36 @@ export const DEFAULT_CATEGORIES = [
   'Home Textiles',
 ];
 
+/** 正式 SOP 阈值（与后端 BASIC_LIMITS.default 一致）：首次进入和复制为自定义都用它。 */
+export const SOP_DEFAULTS: Record<BasicKey, {min: number; max?: number}> = {
+  followers: {min: 2000},
+  gmv: {min: 1500},
+  units: {min: 80},
+  gpm: {min: 10},
+  aov: {min: 10, max: 25},
+  fulfillment: {min: 80},
+  female_pct: {min: 60},
+  categories: {min: 0},
+};
+
 export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
   const basic = {} as RuleDraft['basic'];
   for (const key of BASIC_KEYS) {
     if (key === 'aov') {
       basic[key] = {
         enabled: true,
-        min: 10,
-        max: 25,
+        min: SOP_DEFAULTS.aov.min,
+        max: SOP_DEFAULTS.aov.max ?? 25,
         values: [],
       };
     } else if (key === 'categories') {
       basic[key] = {enabled: true, values: DEFAULT_CATEGORIES.slice()};
     } else {
+      // options 由后端下发（BASIC_LIMITS.default），缺失时回落到 SOP 常量。
       const defaults = options?.basic[key];
       basic[key] = {
         enabled: true,
-        min: defaults?.default ?? 0,
+        min: defaults?.default ?? SOP_DEFAULTS[key].min,
         values: [],
       };
     }
@@ -156,10 +169,19 @@ export function validateDraft(rule: RuleDraft, options: OptionsPayload | null): 
   return errors;
 }
 
-export function summaryLines(rule: RuleDraft): string[] {
-  const lines: string[] = [];
-  lines.push('模式：自定义（本次临时标准，不代表完整 SOP 通过）');
-  lines.push(`商品：${rule.product_ids.join('、')}`);
+export interface SummaryRow {
+  label: string;
+  value: string;
+}
+
+/** 规则摘要的结构化行，供页面用 MetadataList 排版（避免整段文字堆叠）。 */
+export function summaryRows(rule: RuleDraft): SummaryRow[] {
+  const rows: SummaryRow[] = [];
+  rows.push({
+    label: '模式',
+    value: '自定义（本次临时标准，不代表完整 SOP 通过）',
+  });
+  rows.push({label: '商品', value: rule.product_ids.join('、')});
   const enabledParts: string[] = [];
   const disabledParts: string[] = [];
   for (const key of BASIC_KEYS) {
@@ -177,13 +199,24 @@ export function summaryLines(rule: RuleDraft): string[] {
       enabledParts.push(`${BASIC_LABELS[key]} > ${draft.min}${unit}`);
     }
   }
-  lines.push(`基础条件（全部 AND）：${enabledParts.length > 0 ? enabledParts.join('；') : '无'}`);
+  rows.push({
+    label: '基础条件',
+    value: enabledParts.length > 0 ? enabledParts.join('；') : '无（全部未检查）',
+  });
   if (disabledParts.length > 0) {
-    lines.push(`未检查（not_checked）：${disabledParts.join('、')}`);
+    rows.push({label: '未检查', value: disabledParts.join('、')});
   }
   const group = rule.video_live;
   if (group.enabled) {
-    const sideText = (label: string, side: {enabled: boolean; gpm?: number | null; avg_views?: number | null; engagement?: number | null}) => {
+    const sideText = (
+      label: string,
+      side: {
+        enabled: boolean;
+        gpm?: number | null;
+        avg_views?: number | null;
+        engagement?: number | null;
+      },
+    ) => {
       if (!side.enabled) {
         return `${label}未启用`;
       }
@@ -196,19 +229,34 @@ export function summaryLines(rule: RuleDraft): string[] {
       }
       return `${label}（${parts.join(' 且 ')}）`;
     };
-    lines.push(
-      `视频/直播：启用，${group.logic === 'either' ? '任一侧达标' : '两侧均满足'}；${sideText('视频', group.video)}；${sideText('直播', group.live)}`,
-    );
+    rows.push({
+      label: '视频/直播',
+      value: `${group.logic === 'either' ? '任一侧达标' : '两侧均满足'}：${sideText('视频', group.video)}；${sideText('直播', group.live)}`,
+    });
   } else {
-    lines.push('视频/直播：未检查（not_checked）');
+    rows.push({label: '视频/直播', value: '未检查（not_checked）'});
   }
   if (rule.content.enabled) {
-    lines.push(
-      `内容审核：启用，最近 ${rule.content.days} 天 ≥ ${rule.content.min_related} 条相关带货视频${rule.content.require_display ? '，至少 1 条明确展示' : '（不要求展示证据）'}`,
-    );
+    rows.push({
+      label: '内容审核',
+      value: `最近 ${rule.content.days} 天 ≥ ${rule.content.min_related} 条相关带货视频${
+        rule.content.require_display ? '，至少 1 条明确展示' : '（不要求展示证据）'
+      }`,
+    });
   } else {
-    lines.push('内容审核：未执行（风险：不核对近期带货内容）');
+    rows.push({
+      label: '内容审核',
+      value: '未执行（风险：不核对近期带货内容）',
+    });
   }
-  lines.push('履约口径：详情预计发布率优先，否则列表履约率；GPM 详情官方值优先，列表值为近似');
-  return lines;
+  rows.push({
+    label: '指标口径',
+    value: '履约：详情预计发布率优先，否则列表履约率；GPM：详情官方值优先，列表值为近似',
+  });
+  return rows;
+}
+
+/** 纯文本摘要（命令行/日志等场景）。 */
+export function summaryLines(rule: RuleDraft): string[] {
+  return summaryRows(rule).map((row) => `${row.label}：${row.value}`);
 }

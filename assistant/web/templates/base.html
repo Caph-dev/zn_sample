@@ -22,6 +22,7 @@
         <a href="/" {% if request.url.path == "/" %}class="is-active"{% endif %}>工作台</a>
         <a href="/shipments" {% if request.url.path.startswith("/shipments") %}class="is-active"{% endif %}>物流</a>
         <a href="/followups" {% if request.url.path.startswith("/followups") %}class="is-active"{% endif %}>跟进</a>
+        <a href="/auto-approval" {% if request.url.path.startswith("/auto-approval") %}class="is-active"{% endif %}>自动审批</a>
         <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="is-active"{% endif %}>任务</a>
         <a href="/reports" {% if request.url.path.startswith("/reports") %}class="is-active"{% endif %}>报表</a>
         <a href="/diagnostics" {% if request.url.path.startswith("/diagnostics") %}class="is-active"{% endif %}>诊断</a>

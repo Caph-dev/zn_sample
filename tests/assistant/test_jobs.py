@@ -224,6 +224,21 @@ class JobWorkerTests(JobTestCase):
         restored = _latest_active_job(request)
         self.assertIsNone(restored)
 
+    def test_latest_active_job_ignores_stale_terminal_within_old_week_window(self) -> None:
+        """三天的旧任务不再挂到每个页面上（此前窗口是 7 天）。"""
+        from assistant.web.routes import _latest_active_job
+
+        stale_job_id = self.add_job(status="succeeded")
+        with self.session_factory() as session:
+            job = session.get(Job, stale_job_id)
+            job.finished_at = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)
+            )
+            session.commit()
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=self.session_factory)))
+        self.assertIsNone(_latest_active_job(request))
+
     def test_worker_iteration_error_does_not_kill_daemon(self) -> None:
         first_iteration_started = threading.Event()
         second_iteration_started = threading.Event()

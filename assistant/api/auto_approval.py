@@ -76,8 +76,23 @@ def _store_for_request(request: Request, store_id: str | None) -> str:
 
 
 @router.get("/api/auto-approval/options")
-def get_options() -> dict:
-    return auto_approval_service.options_payload()
+def get_options(request: Request) -> dict:
+    session_factory = getattr(request.app.state, "session_factory", None)
+    return auto_approval_service.options_payload(session_factory)
+
+
+@router.put("/api/auto-approval/rule-draft")
+async def save_rule_draft(request: Request) -> dict:
+    """保存自定义规则草稿，供下次进入页面回填（不作为执行授权）。"""
+    session_factory = _session_factory(request)
+    body = await _json_body(request)
+    try:
+        return auto_approval_service.save_rule_draft(
+            session_factory,
+            body.get("rule") or {},
+        )
+    except AutoApprovalServiceError as error:
+        raise _service_error_to_http(error) from error
 
 
 @router.get("/api/auto-approval/hero-refresh")

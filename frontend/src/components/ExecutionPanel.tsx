@@ -1,11 +1,15 @@
 import {AlertDialog} from '@astryxdesign/core/AlertDialog';
 import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
+import {Heading} from '@astryxdesign/core/Heading';
+import {List, ListItem} from '@astryxdesign/core/List';
+import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList';
 import {NumberInput} from '@astryxdesign/core/NumberInput';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
 import {StatusDot} from '@astryxdesign/core/StatusDot';
 import {Switch} from '@astryxdesign/core/Switch';
+import {Text} from '@astryxdesign/core/Text';
 import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
@@ -66,6 +70,17 @@ function statusVariant(status: string): 'success' | 'error' | 'warning' | 'neutr
   return 'neutral';
 }
 
+function splitSummaryLine(line: string): {label: string; value: string} {
+  const separatorIndex = line.indexOf('：');
+  if (separatorIndex <= 0) {
+    return {label: '说明', value: line};
+  }
+  return {
+    label: line.slice(0, separatorIndex),
+    value: line.slice(separatorIndex + 1),
+  };
+}
+
 export function ExecutionPanel({
   options,
   preview,
@@ -106,8 +121,10 @@ export function ExecutionPanel({
     return (
       <Section>
         <Stack gap={2}>
-          <h2 className="section-title">4 · 执行确认</h2>
-          <p className="hint-text">先完成「开始只读筛查」并选择可批准名单，才能进入执行确认。</p>
+          <Heading level={2}>4 · 执行确认</Heading>
+          <Text type="supporting">
+            先完成「开始只读筛查」并选择可批准名单，才能进入执行确认。
+          </Text>
         </Stack>
       </Section>
     );
@@ -116,24 +133,23 @@ export function ExecutionPanel({
   const selectedNames = preview.rows
     .filter((row) => selection.includes(row.apply_id))
     .map((row) => `${row.creator_name}（${row.apply_id}）`);
-
-  const feishuTarget =
-    preview.rule.content.enabled || !writeFeishu
-      ? '达人关系管理(新) / 达人管理总表'
-      : '达人关系管理(新) / 达人管理总表';
+  const summaryRows = preview.rule_summary.map(splitSummaryLine);
+  const feishuTarget = '达人关系管理(新) / 达人管理总表';
 
   return (
     <Section>
       <Stack gap={3}>
-        <h2 className="section-title">4 · 执行确认</h2>
+        <Heading level={2}>4 · 执行确认</Heading>
 
-        <Stack gap={1}>
-          <h3 className="subsection-title">本次规则（服务器快照）</h3>
-          {preview.rule_summary.map((line) => (
-            <p key={line} className="summary-line">
-              {line}
-            </p>
-          ))}
+        <Stack gap={2}>
+          <Heading level={3}>本次规则（服务器快照）</Heading>
+          <MetadataList label={{position: 'start', width: 88}}>
+            {summaryRows.map((row, index) => (
+              <MetadataListItem key={`${row.label}-${index}`} label={row.label}>
+                {row.value}
+              </MetadataListItem>
+            ))}
+          </MetadataList>
         </Stack>
 
         <Stack direction="horizontal" gap={3} vAlign="center">
@@ -155,18 +171,16 @@ export function ExecutionPanel({
           />
         </Stack>
 
-        <Stack gap={1}>
-          <h3 className="subsection-title">已选可批准名单（按此顺序执行）</h3>
+        <Stack gap={2}>
+          <Heading level={3}>已选可批准名单（按此顺序执行）</Heading>
           {selectedNames.length === 0 ? (
-            <p className="hint-text">未选择任何行；空名单不可执行。</p>
+            <Text type="supporting">未选择任何行；空名单不可执行。</Text>
           ) : (
-            <ol className="selection-list">
-              {selectedNames.map((name, index) => (
-                <li key={name}>
-                  {index + 1}. {name}
-                </li>
+            <List listStyle="decimal" density="compact">
+              {selectedNames.map((name) => (
+                <ListItem key={name} label={name} />
               ))}
-            </ol>
+            </List>
           )}
         </Stack>
 
@@ -204,10 +218,10 @@ export function ExecutionPanel({
             onClick={() => setDialogOpen(true)}
           />
         </Stack>
-        <p className="hint-text">
+        <Text type="supporting">
           本次按自定义标准执行，不代表完整 SOP 通过；平台「同意」不可自动撤销；
           批准成功后才会写飞书；不发送任何私信。
-        </p>
+        </Text>
 
         <AlertDialog
           isOpen={dialogOpen}
@@ -228,13 +242,13 @@ export function ExecutionPanel({
 
         {execution !== null && (
           <Stack gap={2}>
-            <h3 className="subsection-title">
+            <Heading level={3}>
               执行批次 {execution.execution_id} · 状态 {execution.status}
-            </h3>
+            </Heading>
             {execution.error_summary !== '' && (
               <Banner status="error" title="执行批次失败" description={execution.error_summary} />
             )}
-            <Stack gap={1}>
+            <Stack gap={2}>
               {execution.items.map((item) => {
                 const approveLabel =
                   APPROVE_STATUS_LABELS[item.approve_status] ?? item.approve_status;
@@ -248,20 +262,20 @@ export function ExecutionPanel({
                         variant={statusVariant(item.approve_status)}
                         label={approveLabel}
                       />
-                      <span>
+                      <Text>
                         {item.creator_name}（{item.apply_id}）平台：{approveLabel}
-                      </span>
+                      </Text>
                       <StatusDot
                         variant={statusVariant(item.feishu_relation_status)}
                         label={feishuLabel}
                       />
-                      <span>飞书：{feishuLabel}</span>
+                      <Text>飞书：{feishuLabel}</Text>
                     </Stack>
                     {item.approve_error !== '' && (
-                      <p className="hint-text">批准说明：{item.approve_error}</p>
+                      <Text type="supporting">批准说明：{item.approve_error}</Text>
                     )}
                     {item.feishu_error !== '' && (
-                      <p className="hint-text">飞书说明：{item.feishu_error}</p>
+                      <Text type="supporting">飞书说明：{item.feishu_error}</Text>
                     )}
                   </Stack>
                 );
