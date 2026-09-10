@@ -68,7 +68,7 @@ export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
         values: [],
       };
     } else if (key === 'categories') {
-      basic[key] = {enabled: true, values: DEFAULT_CATEGORIES.slice()};
+      basic[key] = {enabled: true, values: sortCategories(DEFAULT_CATEGORIES)};
     } else {
       // options 由后端下发（BASIC_LIMITS.default），缺失时回落到 SOP 常量。
       const defaults = options?.basic[key];
@@ -97,22 +97,23 @@ export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
 /**
  * UI 固定项归一化：
  * - 视频/直播组逻辑固定「任一侧达标」（选择框已移除）；旧草稿存 both 会被判为已修改，需重新筛查。
- * - 类目选择框已移除：启用时固定使用全部白名单类目。
+ * - 类目固定启用、固定使用全部白名单类目（选择框已移除），按字典序排序以对齐后端快照的 `sorted()`。
  */
 export function normalizeRule(
   rule: RuleDraft,
   categories: string[] = DEFAULT_CATEGORIES,
 ): RuleDraft {
-  const allCategories = categories.length > 0 ? categories : DEFAULT_CATEGORIES;
+  const allCategories = sortCategories(
+    categories.length > 0 ? categories : DEFAULT_CATEGORIES,
+  );
   const next: RuleDraft = {
     ...rule,
     basic: {
       ...rule.basic,
       categories: {
         ...rule.basic.categories,
-        values: rule.basic.categories.enabled
-          ? allCategories.slice()
-          : rule.basic.categories.values,
+        enabled: true,
+        values: allCategories,
       },
     },
   };
@@ -120,6 +121,114 @@ export function normalizeRule(
     return next;
   }
   return {...next, video_live: {...next.video_live, logic: 'either'}};
+}
+
+function sortCategories(categories: string[]): string[] {
+  return [...categories].sort();
+}
+
+function sameNumber(left: number | null | undefined, right: number | null | undefined): boolean {
+  if (left === null || left === undefined || right === null || right === undefined) {
+    return (left ?? null) === (right ?? null);
+  }
+  return Number(left) === Number(right);
+}
+
+/**
+ * 语义比较「当前表单规则」与「预览快照规则」。
+ *
+ * 不能用 JSON.stringify 直接比较：预览快照经后端 `to_dict()` 规整，类目是字典序、
+ * 部分未启用字段会被省略，键序也可能不同；逐字符比较会把它们误判成「已修改」。
+ * 这里只比较真正影响后端 rule_hash 的字段（启用状态与启用项的取值）。
+ */
+export function rulesEqual(left: RuleDraft, right: RuleDraft): boolean {
+  if (left.schema_version !== right.schema_version || left.mode !== right.mode) {
+    return false;
+  }
+  if (
+    left.product_ids.length !== right.product_ids.length ||
+    left.product_ids.some((productId, index) => productId !== right.product_ids[index])
+  ) {
+    return false;
+  }
+  for (const key of BASIC_KEYS) {
+    const leftCondition = left.basic[key];
+    const rightCondition = right.basic[key];
+    if (leftCondition === undefined || rightCondition === undefined) {
+      return false;
+    }
+    if (leftCondition.enabled !== rightCondition.enabled) {
+      return false;
+    }
+    if (!leftCondition.enabled) {
+      continue;
+    }
+    if (key === 'categories') {
+      const leftCategories = sortCategories(leftCondition.values);
+      const rightCategories = sortCategories(rightCondition.values);
+      if (
+        leftCategories.length !== rightCategories.length ||
+        leftCategories.some((value, index) => value !== rightCategories[index])
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (!sameNumber(leftCondition.min, rightCondition.min)) {
+      return false;
+    }
+    if (key === 'aov' && !sameNumber(leftCondition.max, rightCondition.max)) {
+      return false;
+    }
+  }
+  const leftGroup = left.video_live;
+  const rightGroup = right.video_live;
+  if (leftGroup.enabled !== rightGroup.enabled) {
+    return false;
+  }
+  if (leftGroup.enabled) {
+    if (leftGroup.logic !== rightGroup.logic) {
+      return false;
+    }
+    for (const side of ['video', 'live'] as const) {
+      const leftSide = leftGroup[side];
+      const rightSide = rightGroup[side];
+      if (leftSide.enabled !== rightSide.enabled) {
+        return false;
+      }
+      if (!leftSide.enabled) {
+        continue;
+      }
+      if (!sameNumber(leftSide.gpm, rightSide.gpm)) {
+        return false;
+      }
+      if (!sameNumber(leftSide.avg_views, rightSide.avg_views)) {
+        return false;
+      }
+      const engagementCompared =
+        side === 'video' ||
+        leftSide.engagement !== undefined ||
+        rightSide.engagement !== undefined;
+      if (engagementCompared && !sameNumber(leftSide.engagement, rightSide.engagement)) {
+        return false;
+      }
+    }
+  }
+  const leftContent = left.content;
+  const rightContent = right.content;
+  if (leftContent.enabled !== rightContent.enabled) {
+    return false;
+  }
+  if (leftContent.enabled) {
+    if (
+      leftContent.days !== rightContent.days ||
+      leftContent.min_related !== rightContent.min_related ||
+      leftContent.require_display !== rightContent.require_display
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** 前端校验（服务端仍会再次严格校验）。返回错误消息数组，空数组=通过。 */
@@ -279,7 +388,7 @@ export function summaryRows(rule: RuleDraft): SummaryRow[] {
   }
   rows.push({
     label: '指标口径',
-    value: '履约：详情预计发布率优先，否则列表履约率；GPM：详情官方值优先，列表值为近似',
+    value: '履约（预计发布率）、GPM、客单价均详情值优先；缺失时回退列表履约率、列表近似 GPM、GMV÷件数',
   });
   return rows;
 }

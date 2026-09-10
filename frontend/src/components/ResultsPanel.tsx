@@ -4,6 +4,7 @@ import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
 import {Heading} from '@astryxdesign/core/Heading';
 import {Layout, LayoutContent, LayoutPanel} from '@astryxdesign/core/Layout';
 import {Link} from '@astryxdesign/core/Link';
+import {Pagination} from '@astryxdesign/core/Pagination';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
 import {StatusDot} from '@astryxdesign/core/StatusDot';
@@ -89,6 +90,8 @@ export function ResultsPanel({
   const [filter, setFilter] = useState<FilterTab>('eligible');
   const [search, setSearch] = useState('');
   const [selectedApplyId, setSelectedApplyId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   const rows = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -97,13 +100,13 @@ export function ResultsPanel({
       if (filter === 'eligible' && overall !== 'eligible') {
         return false;
       }
-      if (filter === 'needs_review' && row.overall !== 'needs_review') {
+      if (filter === 'needs_review' && overall !== 'needs_review') {
         return false;
       }
-      if (filter === 'failed' && row.overall !== 'failed') {
+      if (filter === 'failed' && overall !== 'failed') {
         return false;
       }
-      if (filter === 'blocked' && !row.blocked) {
+      if (filter === 'blocked' && overall !== 'blocked') {
         return false;
       }
       if (
@@ -121,6 +124,20 @@ export function ResultsPanel({
   const selectedRow = useMemo(
     () => preview.rows.find((row) => row.apply_id === selectedApplyId) ?? null,
     [preview.rows, selectedApplyId],
+  );
+
+  // 分页只在当前 tab 的筛选结果内进行；序号按页累加，切换 tab/搜索/每页条数都从第 1 页重新编号。
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const numberedRows = useMemo(
+    () =>
+      rows
+        .slice((currentPage - 1) * pageSize, currentPage * pageSize)
+        .map((row, index) => ({
+          ...row,
+          row_number: (currentPage - 1) * pageSize + index + 1,
+        })),
+    [rows, currentPage, pageSize],
   );
 
   const stats = preview.stats;
@@ -152,8 +169,15 @@ export function ResultsPanel({
           />
         )}
 
-        <Stack direction="horizontal" gap={2} vAlign="center">
-          <TabList value={filter} onChange={(value) => setFilter(value as FilterTab)} hasDivider>
+        <Stack direction="horizontal" gap={2} vAlign="center" hAlign="between">
+          <TabList
+            value={filter}
+            onChange={(value) => {
+              setFilter(value as FilterTab);
+              setPage(1);
+            }}
+            hasDivider
+          >
             <Tab value="all" label="全部" />
             <Tab value="eligible" label="符合" />
             <Tab value="needs_review" label="待复核" />
@@ -162,8 +186,16 @@ export function ResultsPanel({
           </TabList>
           <TextInput
             label="搜索达人/申请/商品"
+            isLabelHidden
+            size="sm"
+            width={240}
+            startIcon="search"
+            hasClear
             value={search}
-            onChange={(value) => setSearch(value)}
+            onChange={(value) => {
+              setSearch(value);
+              setPage(1);
+            }}
             placeholder="达人名 / 申请 ID / 商品 ID"
           />
         </Stack>
@@ -172,11 +204,24 @@ export function ResultsPanel({
           content={
             <LayoutContent>
               <Table
-                data={rows as unknown as Record<string, unknown>[]}
+                data={numberedRows as unknown as Record<string, unknown>[]}
                 idKey="apply_id"
                 density="compact"
                 hasHover
+                rowIndexStart={(currentPage - 1) * pageSize + 1}
                 columns={[
+                  {
+                    key: 'row_number',
+                    header: '序号',
+                    width: pixel(56),
+                    align: 'end',
+                    renderCell: (row) => {
+                      const numbered = row as unknown as CandidateRow & {
+                        row_number: number;
+                      };
+                      return <Text type="supporting">{numbered.row_number}</Text>;
+                    },
+                  },
                   {
                     key: 'select',
                     header: '',
@@ -254,6 +299,16 @@ export function ResultsPanel({
                     width: proportional(4),
                     renderCell: (row) => {
                       const candidate = row as unknown as CandidateRow;
+                      if (candidate.blocked) {
+                        const reasons = candidate.safety_blocks
+                          .map((block) => block.detail)
+                          .join('；');
+                        return (
+                          <Text type="supporting">
+                            执行拦截：{reasons || '不满足执行条件'}
+                          </Text>
+                        );
+                      }
                       return (
                         <Text type="supporting">
                           {candidate.checks
@@ -293,6 +348,23 @@ export function ResultsPanel({
                   },
                 ]}
               />
+              {rows.length > pageSize && (
+                <Stack direction="horizontal" hAlign="end" paddingBlockStart={2}>
+                  <Pagination
+                    page={currentPage}
+                    onChange={setPage}
+                    totalItems={rows.length}
+                    pageSize={pageSize}
+                    onPageSizeChange={(size) => {
+                      setPageSize(size);
+                      setPage(1);
+                    }}
+                    pageSizeOptions={[20, 50, 100]}
+                    variant="count"
+                    size="sm"
+                  />
+                </Stack>
+              )}
             </LayoutContent>
           }
           end={

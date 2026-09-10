@@ -5,11 +5,12 @@
 - 正式 SOP 阈值与缺失值语义完全不变；本模块不改 filters、不改 Criteria。
 - 自定义规则只绑定「本次任务」的快照，绝不在服务端改写正式默认值。
 
-三态语义（4.4 节）：
-- 启用指标缺失 → needs_review（不得默认通过；比正式 SOP 的宽松语义更严）
-- 已知违反任一必需条件 → failed
+三态语义：
+- 启用指标缺失或已知违反 → failed（不通过；不默认放过）
 - 完整满足 → passed
 - 未启用的检查 → not_checked（不是「通过」，也不是「跳过即通过」）
+- 唯一例外：详情采集失败（detail_error）导致缺失 → needs_review
+  （该批次 integrity 不完整，本身禁止执行）
 
 本模块只做判定与证据校验，不触发任何平台/飞书写操作。
 """
@@ -28,7 +29,6 @@ SCHEMA_VERSION = 1
 MODE_CUSTOM = "custom"
 
 # 第一版固定的后端边界（P0 决策；改这里必须同步 AGENTS.md 与页面 options）。
-EXECUTE_LIMIT_MAX = 10
 EXECUTE_LIMIT_DEFAULT = 1
 PREVIEW_FRESHNESS_SECONDS = 24 * 60 * 60  # 证据新鲜度：执行时预览须在 24 小时内完成
 PRODUCT_IDS_MAX = 20
@@ -491,7 +491,7 @@ def rule_summary_lines(
         )
     else:
         lines.append("内容审核：未执行（风险：不核对近期带货内容）")
-    lines.append("履约口径：详情预计发布率优先，否则列表履约率；GPM 详情官方值优先，列表值为近似")
+    lines.append("指标口径：履约（预计发布率）、GPM、客单价均详情值优先；缺失时回退列表履约率、列表近似 GPM、GMV÷件数")
     return lines
 
 
@@ -502,7 +502,11 @@ def evaluate_custom_row(
     hero_keys: set[str],
     allowed_product_ids: set[str] | None,
 ) -> dict[str, Any]:
-    """按自定义规则对单行做三态评估；返回逐项结果与总体结论。
+    """按自定义规则对单行做判定；返回逐项结果与总体结论。
+
+    判定语义：启用指标缺失或违反 → failed；完整满足 → passed；未启用 → not_checked。
+    仅「详情采集失败」（detail_error）导致缺失时落 needs_review——该批次
+    integrity 不完整，服务端与脚本都禁止执行。
 
     依赖上游已做数值抽取（lib.filters.evaluate_row 的 *_n 字段或等价字段）。
     这里不做写操作，也不做内容审核（内容审核单独跑 review_creator_rows）。
@@ -510,6 +514,7 @@ def evaluate_custom_row(
     from .feishu_hero import match_hero  # 避免循环
 
     checks: list[dict[str, Any]] = []
+    detail_unavailable = bool(str(row.get("detail_error") or "").strip())
 
     def triage(
         key: str,
@@ -522,8 +527,9 @@ def evaluate_custom_row(
     ) -> str:
         status: str
         if value is None:
-            status = "needs_review"
-            detail = detail or "指标缺失"
+            status = "needs_review" if detail_unavailable else "failed"
+            missing_note = "详情采集失败，未取到值" if detail_unavailable else "指标缺失"
+            detail = f"{detail}；{missing_note}" if detail else missing_note
         elif test_passed:
             status = "passed"
         else:
@@ -606,16 +612,18 @@ def evaluate_custom_row(
             )
         )
     if basic["aov"].enabled:
+        detail_aov = row.get("aov_detail_n")
+        aov_value = detail_aov if detail_aov is not None else row.get("aov_n")
         absorb(
             triage(
                 "aov",
                 "客单价",
-                row.get("aov_n"),
-                test_passed=row.get("aov_n") is not None
+                aov_value,
+                test_passed=aov_value is not None
                 and float(basic["aov"].min_value)
-                <= float(row["aov_n"])
+                <= float(aov_value)
                 <= float(basic["aov"].max_value),
-                source="detail" if row.get("aov_detail_n") is not None else "derived",
+                source="detail" if detail_aov is not None else "derived",
                 detail=f"范围 [{basic['aov'].min_value:g}, {basic['aov'].max_value:g}] USD",
             )
         )
@@ -650,7 +658,7 @@ def evaluate_custom_row(
         categories = row.get("categories_n") or []
         matched = [cat for cat in categories if cat in basic["categories"].categories]
         if not categories:
-            status = "needs_review"
+            status = "failed"
             detail = "类目缺失"
         elif matched:
             status = "passed"
@@ -745,7 +753,7 @@ def evaluate_custom_row(
         if group.logic == "either":
             if video_status == "passed" or live_status == "passed":
                 group_status = "passed"
-            elif video_status == "failed" and live_status == "failed":
+            elif video_status == "failed" or live_status == "failed":
                 group_status = "failed"
             else:
                 group_status = "needs_review"

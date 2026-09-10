@@ -272,15 +272,40 @@ class RuleEvaluationTests(unittest.TestCase):
         self.assertEqual(above["overall"], "passed")
         self.assertTrue(above["custom_eligible"])
 
-    def test_missing_metric_is_needs_review(self) -> None:
+    def test_missing_metric_fails(self) -> None:
+        """启用指标缺失按不通过处理，不默认放过。"""
         result = evaluate_custom_row(
             base_row(fulfillment_n=None),
             self.rule,
             hero_keys=ALLOWED,
             allowed_product_ids=ALLOWED,
         )
+        self.assertEqual(result["overall"], "failed")
+        self.assertFalse(result["custom_eligible"])
+
+    def test_detail_collection_failure_stays_needs_review(self) -> None:
+        """详情采集失败属于「没采到」，不是「平台没有」；批次本身禁止执行。"""
+        result = evaluate_custom_row(
+            base_row(fulfillment_n=None, detail_error="detail-api-systemic-failure"),
+            self.rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
         self.assertEqual(result["overall"], "needs_review")
         self.assertFalse(result["custom_eligible"])
+
+    def test_categories_missing_fails(self) -> None:
+        payload = rule_payload(
+            basic={"categories": {"enabled": True, "values": ["Beauty & Personal Care"]}}
+        )
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(categories_n=[]),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        self.assertEqual(result["overall"], "failed")
 
     def test_disabled_metric_is_not_checked(self) -> None:
         result = evaluate_custom_row(
@@ -319,6 +344,34 @@ class RuleEvaluationTests(unittest.TestCase):
         self.assertEqual(check["source"], "detail-est-post-rate")
         self.assertEqual(check["status"], "passed")
 
+    def test_aov_prefers_detail_value(self) -> None:
+        payload = rule_payload(basic={"aov": {"enabled": True, "min": 10, "max": 25}})
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(aov_n=90.0, aov_detail_n=18.75),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        check = next(item for item in result["checks"] if item["key"] == "aov")
+        self.assertEqual(check["source"], "detail")
+        self.assertEqual(check["value"], 18.75)
+        self.assertEqual(check["status"], "passed")
+
+    def test_aov_falls_back_to_derived_value(self) -> None:
+        payload = rule_payload(basic={"aov": {"enabled": True, "min": 10, "max": 25}})
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(aov_n=90.0, aov_detail_n=None),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        check = next(item for item in result["checks"] if item["key"] == "aov")
+        self.assertEqual(check["source"], "derived")
+        self.assertEqual(check["value"], 90.0)
+        self.assertEqual(check["status"], "failed")
+
     def test_video_live_either_and_both(self) -> None:
         payload = rule_payload(
             basic={},
@@ -350,7 +403,7 @@ class RuleEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(result["overall"], "failed")
 
-    def test_missing_video_metrics_needs_review(self) -> None:
+    def test_missing_video_metrics_fail(self) -> None:
         payload = rule_payload(
             basic={},
             video_live={
@@ -365,7 +418,36 @@ class RuleEvaluationTests(unittest.TestCase):
         result = evaluate_custom_row(
             base_row(), rule, hero_keys=ALLOWED, allowed_product_ids=ALLOWED
         )
-        self.assertEqual(result["overall"], "needs_review")
+        self.assertEqual(result["overall"], "failed")
+
+    def test_either_group_with_single_enabled_side_fails(self) -> None:
+        """任一侧达标：唯一启用侧未达标（含缺失）时整组不通过，而不是待复核。"""
+        payload = rule_payload(
+            basic={},
+            video_live={
+                "enabled": True,
+                "logic": "either",
+                "video": {"enabled": True, "gpm": 10, "avg_views": 300, "engagement": 2},
+                "live": {"enabled": False},
+            },
+            content={"enabled": False},
+        )
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(
+                video_gpm_n=5.0,
+                avg_video_views_n=500.0,
+                video_engagement_n=5.0,
+            ),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        group_check = next(
+            check for check in result["checks"] if check["key"] == "video_live"
+        )
+        self.assertEqual(group_check["status"], "failed")
+        self.assertEqual(result["overall"], "failed")
 
 
 class SummaryTests(unittest.TestCase):

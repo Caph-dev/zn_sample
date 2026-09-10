@@ -2,6 +2,8 @@ import '@astryxdesign/core/reset.css';
 import '@astryxdesign/core/astryx.css';
 import './app.css';
 
+import {InternationalizationProvider} from '@astryxdesign/core/i18n';
+import zhCN from '@astryxdesign/core/locales/zh-CN.json';
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import {App} from './App';
@@ -30,6 +32,8 @@ if (container === null) {
 }
 createRoot(container).render(
   <StrictMode>
-    <App bootstrap={readBootstrap()} />
+    <InternationalizationProvider locale="zh-CN" messages={{'zh-CN': zhCN}}>
+      <App bootstrap={readBootstrap()} />
+    </InternationalizationProvider>
   </StrictMode>,
 );

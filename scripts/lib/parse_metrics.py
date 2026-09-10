@@ -80,22 +80,39 @@ def parse_percent(v: Any) -> float | None:
     return x * 100 if 0 <= x <= 1 else x
 
 
+def _gender_percent(value: Any) -> float | None:
+    """性别占比统一成 0-100；0-1 的小数按比例缩放。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number * 100 if 0 <= number <= 1 else number
+
+
 def female_ratio(gender_list: Any) -> float | None:
-    """top_follower_gender: [{key:Female,value:0.56},...] → 0-100 女性占比。"""
+    """top_follower_gender: [{key:Female,value:0.56},...] → 0-100 女性占比。
+
+    列表常只返回占比最高的单一性别（多为 Male）；此时用 1 - male 推导女性占比。
+    未知性别键不推导，返回 None（宁缺勿猜）。
+    """
     if not gender_list:
         return None
     if isinstance(gender_list, dict):
         gender_list = [gender_list]
-    for g in gender_list:
-        if not isinstance(g, dict):
-            continue
-        key = str(g.get("key") or "")
+    entries: list[tuple[str, Any]] = [
+        (str(entry.get("key") or ""), entry.get("value"))
+        for entry in gender_list
+        if isinstance(entry, dict)
+    ]
+    for key, value in entries:
         if re.search(r"female|女", key, re.I):
-            try:
-                val = float(g.get("value"))
-            except (TypeError, ValueError):
+            return _gender_percent(value)
+    for key, value in entries:
+        if key.strip().lower() in {"male", "男", "男性"}:
+            male_percent = _gender_percent(value)
+            if male_percent is None:
                 return None
-            return val * 100 if 0 <= val <= 1 else val
+            return max(0.0, min(100.0, 100.0 - male_percent))
     return None
 
 
