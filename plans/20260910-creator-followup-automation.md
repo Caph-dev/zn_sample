@@ -85,7 +85,7 @@
 ### 3.1 交付物
 
 1. 新脚本 `scripts/send_followup_message.py`（唯一真发路径）。
-2. `scripts/lib/im_api.py` 扩展：图片消息能力（依赖 3.3 spike 结论）。
+2. `scripts/lib/im_api.py` 扩展：图片消息能力（spike 结论：SDK 支持，走 Context Provider 的 `sendImageMessageWithFiles`，见 3.3）。
 3. `followup_tasks` 发送结果语义扩展 + 标签更新（`assistant/domain/followup_labels.py`）。
 4. 操作台发送入口：新任务类型 + 详情页「发送」按钮 + 确认弹窗（见 3.6）。
 5. 详情页发送状态展示（只读）。
@@ -117,12 +117,52 @@
    - 失败（未发送）→ `last_error`，保持 `pending`，下次人工决定。
 7. **可选飞书**：仅当确认已发且 `--write-feishu`。
 
-### 3.3 B005 图片 spike（先做，带停止点）
+### 3.3 B005 图片 spike（2026-09-10 已完成：SDK 支持）
 
-- 只读探查 SDK：确认当前 IM SDK 是否暴露图片消息能力（消息类型、上传接口、大小/格式限制）。
-- 支持 → 实现附件发送：D0 + B005 + `attachment_key` 存在时随文发送图片。
-- **不支持 → 停止**，输出结论（SDK 版本、缺失能力、可行替代）并向业务汇报，不擅自做 DOM 上传或第三方图床。
-- 若后续改为 DOM 上传，须另开计划并补「上传后核对预览/实际消息」的确认步骤。
+探查环境：2 号店 `27506607043054`（当时唯一 running），页面 `/affiliate/sample/sample-request`；全程只读：未点击、未发送、未导航。
+
+**已确认（bundle 与 React 树实测证据）**
+
+- `webpackChunkecom_seller` 模块 `4613` 暴露 `sendImageMessageWithFiles(conversationId, files)`：逐文件先建本地回显（`sendLocalImageMessage`，消息类型 `file_image`），再 `uploadImage(files)` 上传，拿到 `image_details` 后逐条发送 `{clientId, url, width, height}`；失败把消息状态置为 `Failed`。
+- 上传实现（模块 `98452`）：`new FormData()` + `append("images[]", file)`，multipart POST，走 SDK `UploadImage({role, biz})`。
+- 消息类型常量（模块 `4534`）：`FILE_IMAGE = "file_image"`。
+- SDK 通过 React Context Provider 暴露 `sdkInstance` / `sendTextMessage` / `sendImageMessageWithFiles` / `sendLocalImageMessage` / `sdkStatus` 等；页面 fiber 树只读查找实测成功（遍历约 781 个节点，`sdkStatus=2`）。
+- bundle 扫描未发现客户端大小/格式硬限制（`maxSize` / `fileSize` / `image/*` 等未命中相关校验）；限制预计在服务端上传接口。B005 附件为 1.1 MB PNG。
+
+**Phase 1 实现路径（按此落地）**
+
+1. 复用 `open_conversation_via_new_message` 打开会话并取 `conversationId`（与文本路径相同）。
+2. 页面内只读定位 SDK Context Provider，调用 `value.sendImageMessageWithFiles(conversationId, [file])`；`sdkStatus` 未就绪或找不到 Provider 时拒绝发送，不改走 DOM 上传。
+3. 图片文件在页面内构造：B005 PNG base64 分片注入 → `new File([bytes], "b05.png", {type: "image/png"})`；1.1 MB 必须分片，单片大小与次数在实现时实测（避免单次 `execute_script` 过大）。
+4. 发送顺序：先 `sendTextMessage`（SOP 话术）再图片；发送后核对线程与本地回显状态。
+5. 任一步失败 → 不写本地「已发」、不写飞书；`send-unknown` 规则不变。
+
+**仍在 Phase 1 实发时验证**
+
+- 服务端上传大小/格式上限与错误返回；是否需要页面上下文提供 `role`/`biz`。
+- 图片发送的失败可观测性（是否仅有 `Failed` 飞行状态）；图片消息无文本时如何做发送后确认。
+- 大图分片注入的耗时与 zclaw 稳定性。
+
+Provider 只读查找参考（实现时使用，不点击不发送）：
+
+```js
+const root = document.querySelector('#root') || document.body;
+const key = Object.keys(root).find(k =>
+  k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
+let fiber = key ? root[key] : null;
+if (fiber && fiber.current) fiber = fiber.current;
+const stack = [fiber];
+while (stack.length) {
+  const node = stack.pop();
+  if (!node) continue;
+  const value = node.memoizedProps && node.memoizedProps.value;
+  if (value && typeof value.sendImageMessageWithFiles === 'function') {
+    return value; // value.sendImageMessageWithFiles(conversationId, [file])
+  }
+  if (node.child) stack.push(node.child);
+  if (node.sibling) stack.push(node.sibling);
+}
+```
 
 ### 3.4 数据与语义
 
@@ -225,7 +265,7 @@
 
 | Phase | 关键验收 | 新增测试重点 |
 |-------|----------|--------------|
-| 1 | 1 号店 D0 实发 1 条并确认；重跑不重发 | 门闩/限量/幂等/备份/send-unknown/标签 |
+| 1 | 1 号店 D0 实发 1 条（含 B005 配图）并确认；重跑不重发 | 门闩/限量/幂等/备份/send-unknown/标签/图片分片与失败可观测性 |
 | 2 | 巡检 → 确认 → 感谢私信 1 条 | 熔断/hold/类型与语言/候选筛选 |
 | 3 | 批量未履约写飞书（限量实测）；D+10 留痕文件 | 批量校验/拒绝路径/对账 |
 | 4 | 人工送达日 → 哨兵解决 → 日历重排 | 日期校验/ETA 拒绝/状态迁移 |
@@ -240,7 +280,7 @@
 
 | 风险 | 影响 | 处置 |
 |------|------|------|
-| IM SDK 图片能力未知 | B005 附图发送无法实现 | Phase 1 spike 先行；不支持即停止汇报（已确认决策 2） |
+| 图片上传服务端上限未验证 | B005 配图可能被拒或超时 | spike 已确认 SDK 支持（见 3.3）；Phase 1 限量实发验证 1.1 MB PNG 与失败可观测性 |
 | TikHub 配额/费用 | 内容巡检不可持续 | 按第 5 步同一配置与预算；必要时限量（见 §9） |
 | 反爬熔断误伤 | 巡检/详情接口系统级失败 | 沿用 `SYSTEMIC_DETAIL_FAILURE_LIMIT` 熔断与汇总日志 |
 | 会话路径互斥 | 与批准/物流脚本冲突 | 单店写任务串行 + 启动前 running 校验 |
