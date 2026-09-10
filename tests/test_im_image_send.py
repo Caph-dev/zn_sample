@@ -80,6 +80,31 @@ class MessageFingerprintTests(unittest.TestCase):
         self.assertFalse(im_api.thread_contains_message_predicate("")(body))
 
 
+class ThreadThanksHoldTests(unittest.TestCase):
+    def test_sop_thanks_copy_holds_the_thread(self) -> None:
+        thread_text = (
+            "Hi creator! We just saw the video you created for us and really appreciate it."
+        )
+        self.assertEqual(
+            im_api.thread_thanks_hold_reason(thread_text),
+            "content-thanks-found",
+        )
+
+    def test_uncertain_colleague_thanks_holds_the_thread(self) -> None:
+        self.assertEqual(
+            im_api.thread_thanks_hold_reason(
+                "Thank you for your support on this video campaign."
+            ),
+            "uncertain-thanks-found",
+        )
+
+    def test_plain_thread_does_not_hold(self) -> None:
+        self.assertEqual(
+            im_api.thread_thanks_hold_reason("Hi! Any updates on the product?"),
+            "",
+        )
+
+
 class _FakeZclaw:
     def __init__(self, results: list[dict]) -> None:
         self.results = list(results)
@@ -326,6 +351,40 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
                 already_sent_predicate=im_api.thread_contains_message_predicate(self.body),
             )
         self.assertEqual(result["status"], "already-sent")
+        send_text.assert_not_called()
+        send_image.assert_not_called()
+
+    def test_thread_with_thanks_copy_holds_the_send(self) -> None:
+        thanks_text = (
+            "Hi carol! We just saw the video you created for us and really appreciate it."
+        )
+        with (
+            patch(
+                "lib.im_dom.open_conversation_via_new_message",
+                return_value={
+                    "ok": True,
+                    "click": {"conversation_id": "conv-1", "result_creator_id": "cid-1"},
+                },
+            ),
+            patch(
+                "lib.im_dom.inspect_current_thread",
+                return_value={"thread_text": thanks_text},
+            ),
+            patch("lib.im_api.send_message_via_sdk") as send_text,
+            patch("lib.im_api.send_image_message_via_sdk") as send_image,
+        ):
+            result = im_api.send_direct_message(
+                "store",
+                self.body,
+                creator_name="carol",
+                creator_id="cid-1",
+                execute=True,
+                already_sent_predicate=im_api.thread_contains_message_predicate(self.body),
+                hold_predicate=im_api.thread_thanks_hold_reason,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["reason"], "content-thanks-found")
         send_text.assert_not_called()
         send_image.assert_not_called()
 

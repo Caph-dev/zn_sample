@@ -148,6 +148,36 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         </Section>
       )}
 
+      {data.can_acknowledge && (
+        <Section>
+          <Stack gap={2}>
+            <Heading level={2}>感谢私信进度</Heading>
+            {data.action_completed ? (
+              <Text>
+                已标记为「已发送内容感谢」（{data.send_result_label}）。这是本地记录，不是平台发送回执。
+              </Text>
+            ) : data.status === 'needs_review' ? (
+              <Text>先完成上方的人工确认，再预演或标记感谢私信。</Text>
+            ) : (
+              <>
+                <Text>
+                  可先预演打开会话核对（不会发送）。如果感谢私信已经人工发出（例如从旧流程发出），
+                  点右侧按钮只记本地完成，不会重复发送。
+                </Text>
+                <Stack direction="horizontal" gap={2}>
+                  <form method="post" action={`/api/followups/${data.id}/preview-send`}>
+                    <Button type="submit" label="预演感谢私信" variant="secondary" />
+                  </form>
+                  <form method="post" action={`/api/followups/${data.id}/mark-sent`}>
+                    <Button type="submit" label="标记感谢私信已发（本地）" variant="primary" />
+                  </form>
+                </Stack>
+              </>
+            )}
+          </Stack>
+        </Section>
+      )}
+
       {data.can_list && (
         <Section>
           <Stack gap={2}>

@@ -349,6 +349,7 @@ def followup_detail_data(
             "send_result_label": followup_send_result_label(task.send_result),
             "send_ready": _followup_send_ready(task, sample_case),
             "can_send": task.action_kind == "send_message",
+            "can_acknowledge": task.action_kind == ACTION_KIND_ACKNOWLEDGE_CONTENT,
             "can_list": task.action_kind == "list_only",
             "is_unfulfilled_stage": task.stage == "unfulfilled",
         }

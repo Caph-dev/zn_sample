@@ -510,6 +510,24 @@ def thread_contains_message_predicate(body: str) -> Callable[[str], bool]:
     return predicate
 
 
+def thread_thanks_hold_reason(thread_text: str) -> str:
+    """Return a non-empty hold reason when the thread already shows thanks copy.
+
+    A reminder must never go out to a creator who was already thanked (the
+    local pipeline may simply not know the content was found yet).
+    """
+    from assistant.domain.message_templates import (
+        looks_like_content_thanks,
+        looks_like_uncertain_thanks,
+    )
+
+    if looks_like_content_thanks(thread_text):
+        return "content-thanks-found"
+    if looks_like_uncertain_thanks(thread_text):
+        return "uncertain-thanks-found"
+    return ""
+
+
 def send_direct_message(
     store_id: str,
     body: str,
@@ -521,6 +539,7 @@ def send_direct_message(
     wait: float = 2.5,
     write_source: str = "api",
     already_sent_predicate: Callable[[str], bool] | None = None,
+    hold_predicate: Callable[[str], str] | None = None,
     image_path: str | Path | None = None,
     image_chunk_chars: int = DEFAULT_IMAGE_CHUNK_CHARS,
 ) -> dict[str, Any]:
@@ -528,6 +547,8 @@ def send_direct_message(
 
     Default is dry-run: open the conversation and inspect it, but never call
     the IM SDK or click the send button. ``execute=True`` is required to send.
+    ``hold_predicate`` returns a non-empty reason when the thread shows the job
+    is moot (for example an already-sent thanks message); the send is skipped.
     ``image_path`` 只在文本确认发送后、且 ``write_source="api"`` 时追加发送；
     ``shop_id`` 仅为兼容既有调用方保留；打开会话不使用它，也不导航到其它页面。
     """
@@ -568,6 +589,16 @@ def send_direct_message(
             "image_planned": image_planned,
             "image_skipped": "already-sent" if image_planned else "",
         }
+    if hold_predicate is not None:
+        hold_reason = str(hold_predicate(thread_text) or "").strip()
+        if hold_reason:
+            return {
+                "ok": False,
+                "status": "held",
+                "reason": hold_reason,
+                "message": normalized_body,
+                "image_planned": image_planned,
+            }
     if not execute:
         return {
             "ok": True,

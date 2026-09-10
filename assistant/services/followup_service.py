@@ -286,7 +286,10 @@ class FollowupService:
             if task is None:
                 raise ValueError("followup-not-found")
             action_kind = task.action_kind or action_kind_for_stage(task.stage)
-            if action_kind != ACTION_KIND_SEND_MESSAGE:
+            if action_kind not in {
+                ACTION_KIND_SEND_MESSAGE,
+                ACTION_KIND_ACKNOWLEDGE_CONTENT,
+            }:
                 raise ValueError("not-message-task")
             if task.status == "needs_review":
                 raise ValueError("task-needs-review")
@@ -327,9 +330,13 @@ class FollowupService:
         return result
 
     def mark_message_sent(self, task_id: int) -> dict:
+        """Mark either a follow-up reminder or a content-thanks DM as sent locally."""
         return self._mark_local_completion(
             task_id,
-            expected_action=ACTION_KIND_SEND_MESSAGE,
+            allowed_actions=(
+                ACTION_KIND_SEND_MESSAGE,
+                ACTION_KIND_ACKNOWLEDGE_CONTENT,
+            ),
             send_result=MARKED_SENT_RESULT,
             wrong_action_error="not-message-task",
         )
@@ -337,7 +344,7 @@ class FollowupService:
     def mark_list_handed_over(self, task_id: int) -> dict:
         return self._mark_local_completion(
             task_id,
-            expected_action=ACTION_KIND_LIST_ONLY,
+            allowed_actions=(ACTION_KIND_LIST_ONLY,),
             send_result=LISTED_RESULT,
             wrong_action_error="not-list-task",
         )
@@ -346,7 +353,7 @@ class FollowupService:
         self,
         task_id: int,
         *,
-        expected_action: str,
+        allowed_actions: tuple[str, ...],
         send_result: str,
         wrong_action_error: str,
     ) -> dict:
@@ -355,7 +362,7 @@ class FollowupService:
             if task is None:
                 raise ValueError("followup-not-found")
             action_kind = task.action_kind or action_kind_for_stage(task.stage)
-            if action_kind != expected_action:
+            if action_kind not in allowed_actions:
                 raise ValueError(wrong_action_error)
             if followup_task_completed(
                 {"sent_at": task.sent_at, "send_result": task.send_result}

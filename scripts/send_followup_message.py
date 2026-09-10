@@ -26,6 +26,7 @@ from lib.console import set_verbose  # noqa: E402
 from lib.im_api import (  # noqa: E402
     send_direct_message,
     thread_contains_message_predicate,
+    thread_thanks_hold_reason,
 )
 from lib.zclaw import resolve_store_id  # noqa: E402
 
@@ -36,6 +37,10 @@ DEFAULT_EXECUTE_LIMIT = 1
 SENDABLE_STAGES = ("arrival", "day_3", "day_7", "content_found")
 MESSAGE_STAGES = ("arrival", "day_3", "day_7")
 DEFAULT_CLAIM_STALE_MINUTES = 30
+HOLD_REVIEW_REASONS = {
+    "content-thanks-found": "content_thanks_already_sent",
+    "uncertain-thanks-found": "uncertain_thanks_needs_review",
+}
 
 
 def select_sendable_tasks(
@@ -323,6 +328,20 @@ def record_send_result(session_factory, row: dict[str, Any], result: dict[str, A
                 )
             session.commit()
             return
+        if status == "held":
+            if task.send_result == SENDING_RESULT:
+                task.send_result = ""
+            task.status = "needs_review"
+            task.review_reason = HOLD_REVIEW_REASONS.get(
+                str(result.get("reason") or ""),
+                "content_thanks_already_sent",
+            )
+            task.requires_manual_confirmation = True
+            task.last_error = (
+                f"会话里已有感谢话术（{result.get('reason') or 'unknown'}）；未发送"
+            )
+            session.commit()
+            return
         if status == "send-unknown":
             task.send_result = "send-unknown"
             task.status = "needs_review"
@@ -474,6 +493,7 @@ def run(args: argparse.Namespace) -> int:
         "selected": len(rows),
         "sent": 0,
         "previewed": 0,
+        "held": 0,
         "skipped": 0,
         "rows": [],
         "execute": bool(args.execute),
@@ -539,8 +559,29 @@ def run(args: argparse.Namespace) -> int:
             execute=bool(args.execute),
             wait=float(args.send_wait),
             already_sent_predicate=thread_contains_message_predicate(row["message"]),
+            hold_predicate=thread_thanks_hold_reason,
             image_path=attachment,
         )
+        if result.get("status") == "held":
+            if args.execute:
+                record_send_result(session_factory, row, result)
+            summary["held"] += 1
+            summary["rows"].append(
+                {
+                    "task_id": row["task_id"],
+                    "creator_name": row["creator_name"],
+                    "stage": row["stage"],
+                    "result": "held",
+                    "reason": result.get("reason") or "",
+                    "message": "" if args.execute else row["message"],
+                }
+            )
+            logger.warning(
+                f"[保留] {row['creator_name']} 会话里已有感谢话术"
+                f"（{result.get('reason')}）；不发送，"
+                + ("已转人工确认。" if args.execute else "执行时会转人工确认。")
+            )
+            continue
         row_summary = {
             "task_id": row["task_id"],
             "creator_name": row["creator_name"],

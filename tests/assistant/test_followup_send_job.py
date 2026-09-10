@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,8 +26,10 @@ from assistant.database.models import (  # noqa: E402
     SampleCase,
     Store,
 )
+from assistant.domain.followup_labels import followup_action_display  # noqa: E402
 from assistant.jobs.handlers import followup_send as handler  # noqa: E402
 from assistant.jobs.registry import HandlerFailure  # noqa: E402
+from assistant.services.followup_service import FollowupService  # noqa: E402
 from assistant.web.console_pages import followup_detail_data  # noqa: E402
 
 
@@ -338,6 +341,100 @@ class FollowupSendPayloadTests(unittest.TestCase):
                 scheduled_label="",
             )
         self.assertTrue(payload["send_ready"])
+
+
+class FollowupAcknowledgeTests(unittest.TestCase):
+    """Content-thanks tasks can be closed locally when the DM was sent elsewhere."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.engine = create_database_engine(
+            Path(self.temporary_directory.name) / "test.sqlite3"
+        )
+        Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        with self.session_factory() as session:
+            store = Store(ziniao_store_id="store-1", store_name="store")
+            session.add(store)
+            session.flush()
+            sample_case = SampleCase(
+                store_id=store.id,
+                creator_id="creator-1",
+                creator_name="creator",
+                apply_id="apply-1",
+                product_id="1732414717062320994",
+                platform_status="completed",
+            )
+            session.add(sample_case)
+            session.flush()
+            task = FollowupTask(
+                sample_case_id=sample_case.id,
+                stage="content_found",
+                scheduled_for=date(2026, 9, 10),
+                status="pending",
+                action_kind="acknowledge_content",
+                template_key="video_found_en",
+                message_preview="We just saw the video you created for us...",
+            )
+            session.add(task)
+            session.commit()
+            self.task_id = task.id
+            self.sample_case_id = sample_case.id
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        self.temporary_directory.cleanup()
+
+    def load_task(self) -> FollowupTask:
+        with self.session_factory() as session:
+            return session.get(FollowupTask, self.task_id)
+
+    def test_mark_message_sent_accepts_content_thanks_tasks(self) -> None:
+        result = FollowupService(self.session_factory).mark_message_sent(self.task_id)
+        self.assertTrue(result["ok"])
+        task = self.load_task()
+        self.assertEqual(task.send_result, "marked-sent")
+        self.assertIsNotNone(task.sent_at)
+        self.assertEqual(
+            followup_action_display(
+                "acknowledge_content",
+                sent_at=task.sent_at,
+                send_result=task.send_result,
+            ),
+            "已发送内容感谢（本地标记）",
+        )
+
+    def test_acknowledge_payload_exposes_local_mark(self) -> None:
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, self.task_id)
+            sample_case = session.get(SampleCase, self.sample_case_id)
+            payload = followup_detail_data(
+                task,
+                sample_case,
+                None,
+                attachment_url="",
+                scheduled_label="",
+            )
+        self.assertTrue(payload["can_acknowledge"])
+        self.assertTrue(payload["send_ready"])
+
+    def test_list_only_tasks_are_still_rejected(self) -> None:
+        with self.session_factory() as session:
+            sample_case = session.scalar(select(SampleCase))
+            task = FollowupTask(
+                sample_case_id=sample_case.id,
+                stage="day_10_list",
+                scheduled_for=date(2026, 9, 10),
+                status="pending",
+                action_kind="list_only",
+                template_key="",
+                message_preview="名单",
+            )
+            session.add(task)
+            session.commit()
+            list_task_id = task.id
+        with self.assertRaises(ValueError):
+            FollowupService(self.session_factory).mark_message_sent(list_task_id)
 
 
 if __name__ == "__main__":

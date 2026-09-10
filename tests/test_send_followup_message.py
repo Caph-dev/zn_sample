@@ -304,6 +304,21 @@ class SendFollowupRecordingTests(unittest.TestCase):
         self.assertEqual(task.status, "pending")
         self.assertEqual(task.last_error, "target-conversation-not-visible")
 
+    def test_held_result_moves_task_to_review_and_releases_claim(self) -> None:
+        self.assertTrue(claim_task(self.session_factory, self.task_id))
+        record_send_result(
+            self.session_factory,
+            {"task_id": self.task_id},
+            {"ok": False, "status": "held", "reason": "content-thanks-found"},
+        )
+        task = self.load_task()
+        self.assertEqual(task.send_result, "")
+        self.assertEqual(task.status, "needs_review")
+        self.assertEqual(task.review_reason, "content_thanks_already_sent")
+        self.assertTrue(task.requires_manual_confirmation)
+        self.assertIsNone(task.sent_at)
+        self.assertIn("未发送", task.last_error)
+
 
 class SendFollowupBackupTests(unittest.TestCase):
     def test_backup_file_contains_rows(self) -> None:
