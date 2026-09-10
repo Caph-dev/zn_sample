@@ -12,6 +12,37 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib import im_api  # noqa: E402
+from lib import im_dom  # noqa: E402
+
+
+class ImThreadTextTests(unittest.TestCase):
+    def test_missing_probe_returns_empty(self) -> None:
+        self.assertEqual(im_dom.im_thread_text_with_tail(None), "")
+        self.assertEqual(im_dom.im_thread_text_with_tail({}), "")
+
+    def test_short_thread_returns_head_once(self) -> None:
+        body = "Hi creator! Just checking in."
+        self.assertEqual(
+            im_dom.im_thread_text_with_tail({"thread_text": body, "thread_text_tail": body}),
+            body,
+        )
+
+    def test_long_thread_keeps_head_and_tail(self) -> None:
+        head = "a" * 4000
+        tail = "b" * 4000
+        combined = im_dom.im_thread_text_with_tail(
+            {"thread_text": head, "thread_text_tail": tail}
+        )
+        self.assertTrue(combined.startswith(head))
+        self.assertTrue(combined.endswith(tail))
+        self.assertIn("\n", combined)
+
+    def test_overlapping_tail_is_not_duplicated(self) -> None:
+        body = "x" * 3000
+        self.assertEqual(
+            im_dom.im_thread_text_with_tail({"thread_text": body, "thread_text_tail": body[-1000:]}),
+            body,
+        )
 
 
 class ImageChunkTests(unittest.TestCase):
@@ -209,7 +240,10 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
             ),
             patch(
                 "lib.im_dom.inspect_current_thread",
-                side_effect=[{"thread_text": ""}, {"thread_text": self.body}],
+                side_effect=[
+                    {"thread_text": ""},
+                    {"thread_text": "x" * 5000, "thread_text_tail": self.body},
+                ],
             ),
             patch("lib.im_dom.composer_identity_matches", return_value=True),
             patch("lib.im_api.send_message_via_sdk", return_value={"ok": True}),
@@ -261,6 +295,37 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
         self.assertEqual(result["status"], "already-sent")
         self.assertTrue(result["image_planned"])
         self.assertEqual(result["image_skipped"], "already-sent")
+        send_text.assert_not_called()
+        send_image.assert_not_called()
+
+    def test_tail_only_thread_still_detects_the_sent_message(self) -> None:
+        with (
+            patch(
+                "lib.im_dom.open_conversation_via_new_message",
+                return_value={
+                    "ok": True,
+                    "click": {"conversation_id": "conv-1", "result_creator_id": "cid-1"},
+                },
+            ),
+            patch(
+                "lib.im_dom.inspect_current_thread",
+                return_value={
+                    "thread_text": "z" * 5000,
+                    "thread_text_tail": self.body,
+                },
+            ),
+            patch("lib.im_api.send_message_via_sdk") as send_text,
+            patch("lib.im_api.send_image_message_via_sdk") as send_image,
+        ):
+            result = im_api.send_direct_message(
+                "store",
+                self.body,
+                creator_name="carol",
+                creator_id="cid-1",
+                execute=True,
+                already_sent_predicate=im_api.thread_contains_message_predicate(self.body),
+            )
+        self.assertEqual(result["status"], "already-sent")
         send_text.assert_not_called()
         send_image.assert_not_called()
 

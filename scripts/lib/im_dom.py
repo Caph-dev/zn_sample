@@ -89,7 +89,8 @@ INSPECT_IM_JS = r"""
     selected_preview: selected ? String(selected.innerText || '').slice(0, 200) : '',
     selected_user_id: selectedUserId,
     selected_conversation_id: selectedConversationId,
-    thread_text: threadText.slice(0, 4000)
+    thread_text: threadText.slice(0, 4000),
+    thread_text_tail: threadText.slice(-4000)
   });
 })()
 """
@@ -495,6 +496,21 @@ def im_thread_text(probe: dict[str, Any] | None) -> str:
     if not isinstance(probe, dict):
         return ""
     return str(probe.get("thread_text") or "").strip()
+
+
+def im_thread_text_with_tail(probe: dict[str, Any] | None) -> str:
+    """会话正文的头 + 尾两段，用于发送确认指纹。
+
+    ``thread_text`` 只取前 4000 字符；长会话里刚发送的消息可能落在窗口之外，
+    因此发送去重与发送后确认额外拼接 ``thread_text_tail``。
+    """
+    if not isinstance(probe, dict):
+        return ""
+    head = str(probe.get("thread_text") or "").strip()
+    tail = str(probe.get("thread_text_tail") or "").strip()
+    if not tail or tail == head or head.endswith(tail):
+        return head
+    return f"{head}\n{tail}"
 
 
 def thread_has_named_intro(probe: dict[str, Any] | None, creator_name: str) -> bool:

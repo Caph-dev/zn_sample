@@ -2,7 +2,7 @@
 
 日期：2026-09-10
 分支：`creator-followup-page`
-状态：待实施。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
+状态：Phase 1 离线主干已实现并加固（发送脚本、图片 SDK 通道、结果语义、原子认领与互斥、离线单测；全量 684 tests OK）。未执行任何真实发送或写飞书；限量实发验收须另行授权。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
 
 权威口径：`样品申请筛查sop/2-查看到货+达人跟进.md`（项目约定 + 2026-08-26 文档更新）。
 飞书 wiki 正文里的旧日历（到货第五天 / 每隔两天）与 B006-A 一律忽略，不进入代码、话术与验收。
@@ -114,7 +114,8 @@
 6. **落库**：
    - 确认已发 → `sent_at`、`send_result=platform-sent`、`send_confirmation=<指纹>`；
    - 结果未知 → `send_result=send-unknown`、`status=needs_review`、`review_reason=send_unknown_needs_review`（**移出自动发送池**，不重试）；
-   - 失败（未发送）→ `last_error`，保持 `pending`，下次人工决定。
+   - 失败（未发送）→ `last_error`，保持 `pending`，下次人工决定；
+   - 文本已确认但配图失败 → 仍记 `platform-sent`（避免重发已发话术）并转 `needs_review`（`image_send_failed`），由人工补图。
 7. **可选飞书**：仅当确认已发且 `--write-feishu`。
 
 ### 3.3 B005 图片 spike（2026-09-10 已完成：SDK 支持）
@@ -135,7 +136,7 @@
 2. 页面内只读定位 SDK Context Provider，调用 `value.sendImageMessageWithFiles(conversationId, [file])`；`sdkStatus` 未就绪或找不到 Provider 时拒绝发送，不改走 DOM 上传。
 3. 图片文件在页面内构造：B005 PNG base64 分片注入 → `new File([bytes], "b05.png", {type: "image/png"})`；1.1 MB 必须分片，单片大小与次数在实现时实测（避免单次 `execute_script` 过大）。
 4. 发送顺序：先 `sendTextMessage`（SOP 话术）再图片；发送后核对线程与本地回显状态。
-5. 任一步失败 → 不写本地「已发」、不写飞书；`send-unknown` 规则不变。
+5. 失败处理：文本已确认则记 `platform-sent`；配图失败转 `needs_review`（`image_send_failed`）由人工补图，不重发话术；文本结果未知走 `send-unknown` 规则。
 
 **仍在 Phase 1 实发时验证**
 
@@ -168,16 +169,19 @@ while (stack.length) {
 
 - 复用 `followup_tasks` 现有字段（`sent_at` / `send_result` / `send_confirmation` / `last_error`），不新建表。
 - `send_result` 取值：
-  - `platform-sent`（新）：平台发送后经线程确认；
-  - `send-unknown`（新）：已发出但未确认，禁止自动重试；
+  - `platform-sent`：平台发送后经线程确认；
+  - `send-unknown`：已发出但未确认，禁止自动重试；
+  - `sending`：发送中的原子认领（临态，发送结束后被最终结果覆盖；超时转 `send-unknown` + `needs_review`）；
   - `marked-sent`（保留）：网页人工标记，不等同平台发送；
   - `listed`（保留）：D+10 已出名单。
-- 标签同步更新 `FOLLOWUP_ACTION_COMPLETED_LABELS` / 详情页文案，明确区分「平台已发送 / 本地人工标记 / 未确认」。
-- 幂等键使用既有 `message_send_idempotency_key`（`policies.py`），不再另造。
+- 标签同步更新 `FOLLOWUP_ACTION_COMPLETED_LABELS` / 详情页文案，明确区分「平台已发送 / 本地人工标记 / 未确认 / 发送中」。
+- 幂等键使用既有 `message_send_idempotency_key`（`policies.py`），不再另造；脚本输出中保留供核对。
 
 ### 3.5 互斥与安全
 
-- 同一时刻只允许一个占用店铺/会话的写任务：启动前解析 running 店；检测到 `operator_pipeline` / `operator_tracking` / `auto_approval_execute` 等写任务运行中直接拒绝。
+- 启动先检查 `jobs` 表中 pending/running 的页面任务（`ZINIAO_JOB_TYPES` ∪ `followup_generate`）；存在则拒绝（退出码 3），不并发占用店铺页面。
+- 每条发送前用条件 UPDATE 原子认领（`send_result=sending`）；认领失败说明其他运行已占用，直接跳过，绝不重复发送。
+- 认领超过 30 分钟（`--claim-stale-minutes` 可调）视为进程中断：转 `needs_review` + `send_interrupted`，由人工核对，不自动重发。
 - 与 16:00 无关（跟进私信不受物流时间门限制）。
 - 每条发送前检查取消信号；批量中途取消只保留已确认结果。
 
@@ -198,7 +202,7 @@ while (stack.length) {
 ### 3.7 验收（DoD）
 
 - 1 号店选 1 条真实 D0 任务：预演 → 发送 → 平台确认 → 本地 `platform-sent`；重复运行不重发。
-- 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归。
+- 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归；以及原子认领（双运行只发一次）、陈旧认领转人工、页面任务互斥（退出码 3）。
 - 操作台按钮：缺确认不建任务、运行中无取消、点击一次最多一条。
 - 网页只新增发送入口；其余仍只有预演与本地标记；详情页能看到平台发送状态。
 

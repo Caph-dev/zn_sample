@@ -534,7 +534,7 @@ def send_direct_message(
     from .im_dom import (
         composer_identity_matches,
         fill_or_send_message,
-        im_thread_text,
+        im_thread_text_with_tail,
         inspect_current_thread,
         open_conversation_via_new_message,
     )
@@ -559,7 +559,7 @@ def send_direct_message(
         creator_id or clicked.get("result_creator_id") or ""
     ).strip()
     probe = inspect_current_thread(store_id, name, wait=wait)
-    thread_text = im_thread_text(probe)
+    thread_text = im_thread_text_with_tail(probe)
     if already_sent_predicate is not None and already_sent_predicate(thread_text):
         return {
             "ok": True,
@@ -607,7 +607,7 @@ def send_direct_message(
         post_probe = inspect_current_thread(store_id, name, wait=wait)
         confirmed = True
         if already_sent_predicate is not None:
-            confirmed = already_sent_predicate(im_thread_text(post_probe))
+            confirmed = already_sent_predicate(im_thread_text_with_tail(post_probe))
         image_result: dict[str, Any] | None = None
         if confirmed and image_path:
             image_result = send_image_message_via_sdk(
@@ -635,7 +635,7 @@ def send_direct_message(
         post_probe = inspect_current_thread(store_id, name, wait=wait)
         confirmed = True
         if already_sent_predicate is not None:
-            confirmed = already_sent_predicate(im_thread_text(post_probe))
+            confirmed = already_sent_predicate(im_thread_text_with_tail(post_probe))
         return {
             "ok": confirmed,
             "status": "sent" if confirmed else "send-unknown",
