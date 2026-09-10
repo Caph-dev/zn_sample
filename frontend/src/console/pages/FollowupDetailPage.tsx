@@ -2,6 +2,7 @@ import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
 import {Heading} from '@astryxdesign/core/Heading';
+import {Link} from '@astryxdesign/core/Link';
 import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
@@ -29,13 +30,26 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         <MetadataListItem label="订单号">{data.main_order_id}</MetadataListItem>
         <MetadataListItem label="物流单号">{data.tracking_display}</MetadataListItem>
         <MetadataListItem label="送达">
-          {data.delivered_at !== '' ? data.delivered_at : data.scheduled_label}
+          {data.delivered_text !== '' ? data.delivered_text : data.scheduled_label}
         </MetadataListItem>
         <MetadataListItem label="样品状态">{data.platform_status_text}</MetadataListItem>
         <MetadataListItem label="达人类型">{data.creator_type_label}</MetadataListItem>
         <MetadataListItem label="阶段">
           <StatusToken label={data.stage_label} tone={data.stage_tone} />
         </MetadataListItem>
+        {data.current_stage_label !== '' && (
+          <MetadataListItem label="当前应做">
+            <Stack direction="horizontal" gap={2}>
+              <StatusToken label={data.current_stage_label} tone="accent" />
+              <Text type="supporting">{data.current_stage_due}</Text>
+              {data.current_task_url !== '' ? (
+                <Link href={data.current_task_url}>{data.current_stage_note}</Link>
+              ) : (
+                <Text type="supporting">{data.current_stage_note}</Text>
+              )}
+            </Stack>
+          </MetadataListItem>
+        )}
         <MetadataListItem label="动作">
           <StatusToken label={data.action_label} tone={data.action_tone} />
         </MetadataListItem>

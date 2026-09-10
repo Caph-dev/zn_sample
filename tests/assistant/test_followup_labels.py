@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from assistant.domain.followup_labels import (
     followup_action_display,
+    followup_action_tone,
     followup_language_label,
     followup_send_result_label,
     followup_stage_list_rank,
@@ -74,6 +75,36 @@ class FollowupLabelTests(unittest.TestCase):
         )
         self.assertNotIn("D+3", followup_action_display("send_message"))
         self.assertNotIn("D+7", followup_action_display("send_message"))
+
+    def test_suppressed_action_is_not_shown_as_pending(self) -> None:
+        self.assertEqual(
+            followup_action_display(
+                "send_message",
+                status="suppressed",
+                suppressed_reason="superseded_by_later_stage",
+            ),
+            "不再发送（已由新阶段取代）",
+        )
+        self.assertEqual(
+            followup_action_display(
+                "send_message",
+                status="suppressed",
+                suppressed_reason="content_confirmed",
+            ),
+            "不再发送（达人已出内容）",
+        )
+        self.assertEqual(
+            followup_action_display("send_message", status="suppressed"),
+            "不再发送",
+        )
+        self.assertEqual(
+            followup_action_tone(
+                "send_message",
+                status="suppressed",
+                suppressed_reason="superseded_by_later_stage",
+            ),
+            "neutral",
+        )
 
     def test_send_result_labels_distinguish_platform_and_local(self) -> None:
         self.assertEqual(followup_send_result_label("platform-sent"), "平台已确认发送")

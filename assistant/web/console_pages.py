@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Sequence
 
 from assistant.domain.followup_labels import (
@@ -34,6 +34,10 @@ from assistant.domain.followup_labels import (
 from assistant.domain.followup_stage import (
     ACTION_KIND_ACKNOWLEDGE_CONTENT,
     ACTION_KIND_SEND_MESSAGE,
+    days_since_delivery,
+    followup_task_completed,
+    is_stale_followup_stage,
+    latest_due_unpublished_stage,
 )
 from assistant.domain.platform_status import PLATFORM_STATUS_PROCESSING
 from assistant.domain.timeutil import beijing_now
@@ -234,12 +238,16 @@ def _followup_row(task: Any, sample_case: Any) -> dict:
             task.action_kind,
             sent_at=task.sent_at,
             send_result=task.send_result,
+            status=task.status,
+            suppressed_reason=task.suppressed_reason,
         ),
         "action_tone": astryx_tone(
             followup_action_tone(
                 task.action_kind,
                 sent_at=task.sent_at,
                 send_result=task.send_result,
+                status=task.status,
+                suppressed_reason=task.suppressed_reason,
             )
         ),
         "action_completed": action_completed,
@@ -284,7 +292,7 @@ def followups_data(
     }
 
 
-def _followup_send_ready(task: Any, sample_case: Any) -> bool:
+def _followup_send_ready(task: Any, sample_case: Any, shipment: Any | None) -> bool:
     """Mirror the send script selector so the real-send button only shows when valid.
 
     The script re-validates everything before sending; this is display-only.
@@ -311,10 +319,19 @@ def _followup_send_ready(task: Any, sample_case: Any) -> bool:
         return False
     if str(task.stage) == "content_found":
         return True
+    if _followup_stage_stale(task, shipment):
+        return False
     return (
         str(sample_case.platform_status or "") == PLATFORM_STATUS_PROCESSING
         and not bool(sample_case.platform_status_stale)
     )
+
+
+def _followup_stage_stale(task: Any, shipment: Any | None) -> bool:
+    """True when a later calendar node is already due for this task's stage."""
+    delivered_at = getattr(shipment, "delivered_at", None) if shipment else None
+    days = days_since_delivery(delivered_at) if delivered_at is not None else None
+    return is_stale_followup_stage(stage=str(task.stage or ""), days=days)
 
 
 def _followup_preview_status(task: Any) -> tuple[str, str, str]:
@@ -339,6 +356,72 @@ def _followup_preview_status(task: Any) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _followup_current_stage(
+    task: Any,
+    sample_case: Any,
+    shipment: Any | None,
+    case_tasks: Iterable[dict] | None,
+) -> tuple[str, str, str, str]:
+    """Return (label, url, note, due) for the case's current calendar node.
+
+    The detail page shows the stage of one task record; this tells the operator
+    which node the case should actually be worked on right now, so a superseded
+    record cannot be mistaken for the current step. ``due`` spells out the
+    scheduled date and how late that node is, so a node name such as D+3 is not
+    read as "today is day 3".
+    """
+    if str(getattr(sample_case, "platform_status", "") or "") != PLATFORM_STATUS_PROCESSING:
+        return "", "", "", ""
+    delivered_at = getattr(shipment, "delivered_at", None) if shipment else None
+    if delivered_at is None:
+        return "", "", "", ""
+    days = days_since_delivery(delivered_at)
+    latest = latest_due_unpublished_stage(days)
+    if latest is None:
+        return "", "", "", ""
+    stage, offset_days = latest
+    label = FOLLOWUP_STAGE_LABELS.get(stage, stage)
+    overdue_days = days - offset_days
+    due_date = beijing_now().date() - timedelta(days=overdue_days)
+    if overdue_days > 0:
+        due = f"应做 {due_date:%m-%d} · 已逾期 {overdue_days} 天"
+    elif overdue_days == 0:
+        due = f"应做 {due_date:%m-%d}（今天）"
+    else:
+        due = f"应做 {due_date:%m-%d}"
+    candidates = sorted(
+        (
+            item
+            for item in (case_tasks or [])
+            if str(item.get("stage") or "") == stage
+        ),
+        key=lambda item: (str(item.get("scheduled_for") or ""), int(item.get("id") or 0)),
+    )
+    pending = [item for item in candidates if not followup_task_completed(item)]
+    if pending:
+        target = pending[-1]
+        if int(target.get("id") or 0) == int(getattr(task, "id", 0) or 0):
+            return label, "", "就是本条（当前应做的一步）", due
+        return label, f"/followups/{target['id']}", "打开当前应做的一步", due
+    if candidates:
+        return label, "", "本节点已处理", due
+    return label, "", "尚未生成：先点「生成今日跟进待办」", due
+
+
+def _followup_delivered_text(shipment: Any | None) -> str:
+    """Beijing-time delivery display with the elapsed natural days.
+
+    The raw column is UTC; showing it as-is made the day count (computed in
+    Beijing time) look wrong.
+    """
+    delivered_at = getattr(shipment, "delivered_at", None) if shipment else None
+    if delivered_at is None:
+        return ""
+    local = beijing_now(delivered_at)
+    days = days_since_delivery(delivered_at)
+    return f"{local:%Y-%m-%d %H:%M}（北京时间）· 到货已 {days} 天"
+
+
 def followup_detail_data(
     task: Any,
     sample_case: Any,
@@ -346,15 +429,24 @@ def followup_detail_data(
     *,
     attachment_url: str,
     scheduled_label: str,
+    case_tasks: Iterable[dict] | None = None,
 ) -> dict:
     payload = _followup_row(task, sample_case)
     preview_state, preview_label, preview_at = _followup_preview_status(task)
+    stage_stale = _followup_stage_stale(task, shipment)
+    current_label, current_url, current_note, current_due = _followup_current_stage(
+        task,
+        sample_case,
+        shipment,
+        case_tasks,
+    )
     payload.update(
         {
             "product_id": sample_case.product_id,
             "main_order_id": sample_case.main_order_id,
             "tracking_display": shipment.tracking_display if shipment else "",
             "delivered_at": _display(shipment.delivered_at) if shipment else "",
+            "delivered_text": _followup_delivered_text(shipment),
             "scheduled_label": scheduled_label,
             "platform_status_text": sample_case.platform_status_label or str(sample_case.curr_status),
             "creator_type_label": CREATOR_TYPE_LABELS.get(
@@ -363,7 +455,11 @@ def followup_detail_data(
             ),
             "message_preview": task.message_preview or "",
             "attachment_url": attachment_url,
-            "note": _followup_note(task),
+            "note": _followup_note(task, stale_stage=stage_stale),
+            "current_stage_label": current_label,
+            "current_stage_due": current_due,
+            "current_task_url": current_url,
+            "current_stage_note": current_note,
             "review_label": REVIEW_REASON_LABELS.get(
                 task.review_reason,
                 task.review_reason or "需要人工确认后再继续。",
@@ -373,7 +469,7 @@ def followup_detail_data(
             "preview_state": preview_state,
             "preview_label": preview_label,
             "preview_at": preview_at,
-            "send_ready": _followup_send_ready(task, sample_case),
+            "send_ready": _followup_send_ready(task, sample_case, shipment),
             "can_send": task.action_kind == "send_message",
             "can_acknowledge": task.action_kind == ACTION_KIND_ACKNOWLEDGE_CONTENT,
             "can_list": task.action_kind == "list_only",
@@ -383,13 +479,15 @@ def followup_detail_data(
     return payload
 
 
-def _followup_note(task: Any) -> str:
+def _followup_note(task: Any, *, stale_stage: bool = False) -> str:
     if task.status == "suppressed" and task.suppressed_reason == SUPERSEDED_REASON:
         return "此前生成的跟进步骤已由更新的日历节点取代，不再需要处理。"
     if task.status == "suppressed":
         return f"此前生成的跟进步骤已不再适用（{followup_status_label(task.status, suppressed_reason=task.suppressed_reason)}）。"
     if task.status == "needs_review":
         return REVIEW_REASON_LABELS.get(task.review_reason, task.review_reason or "需要人工确认后再继续。")
+    if stale_stage:
+        return "该阶段已过期（已有更晚的日历节点到期），不会自动发送：请先「生成今日跟进待办」，或人工跳过本条。"
     return ""
 
 

@@ -163,6 +163,7 @@ export interface FollowupDetailData extends FollowupRow {
   main_order_id: string;
   tracking_display: string;
   delivered_at: string;
+  delivered_text: string;
   scheduled_label: string;
   platform_status_text: string;
   creator_type_label: string;
@@ -175,6 +176,10 @@ export interface FollowupDetailData extends FollowupRow {
   preview_state: string;
   preview_label: string;
   preview_at: string;
+  current_stage_label: string;
+  current_stage_due: string;
+  current_task_url: string;
+  current_stage_note: string;
   send_ready: boolean;
   can_send: boolean;
   can_acknowledge: boolean;

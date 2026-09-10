@@ -41,6 +41,10 @@ HOLD_REVIEW_REASONS = {
     "content-thanks-found": "content_thanks_already_sent",
     "uncertain-thanks-found": "uncertain_thanks_needs_review",
 }
+STALE_REVIEW_REASONS = {
+    "stale_stage": "stale_stage",
+    "missing_delivery_date": "missing_delivery_time",
+}
 
 
 def select_sendable_tasks(
@@ -52,23 +56,34 @@ def select_sendable_tasks(
     creator_name: str = "",
     task_id: int | None = None,
     limit: int = DEFAULT_EXECUTE_LIMIT,
+    include_blocked: bool = False,
 ) -> list[dict[str, Any]]:
-    """Select due follow-up tasks that may be sent now (read-only query)."""
+    """Select due follow-up tasks that may be sent now (read-only query).
+
+    Only the latest calendar node may be sent. A message stage whose next node
+    is already due is out of sequence, so it is excluded here (or returned with
+    ``blocked_reason`` when ``include_blocked`` is set); ``limit`` counts
+    sendable rows only.
+    """
     from sqlalchemy import and_, func, or_, select
 
-    from assistant.database.models import FollowupTask, SampleCase, Store
+    from assistant.database.models import FollowupTask, SampleCase, Shipment, Store
     from assistant.domain.followup_labels import COMPLETED_RESULTS, SENDING_RESULT
     from assistant.domain.followup_stage import (
         ACTION_KIND_ACKNOWLEDGE_CONTENT,
         ACTION_KIND_SEND_MESSAGE,
+        days_since_delivery,
+        is_stale_followup_stage,
+        latest_due_unpublished_stage,
     )
     from assistant.domain.platform_status import PLATFORM_STATUS_PROCESSING
     from assistant.domain.policies import message_send_idempotency_key
 
     query = (
-        select(FollowupTask, SampleCase, Store)
+        select(FollowupTask, SampleCase, Store, Shipment)
         .join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
         .join(Store, SampleCase.store_id == Store.id)
+        .outerjoin(Shipment, Shipment.sample_case_id == SampleCase.id)
         .where(
             FollowupTask.status == "pending",
             FollowupTask.sent_at.is_(None),
@@ -106,12 +121,47 @@ def select_sendable_tasks(
         )
     if task_id is not None:
         query = query.where(FollowupTask.id == int(task_id))
-    query = query.order_by(FollowupTask.scheduled_for, FollowupTask.id).limit(
-        max(1, int(limit))
-    )
+    query = query.order_by(FollowupTask.scheduled_for, FollowupTask.id)
 
     rows: list[dict[str, Any]] = []
-    for task, sample_case, store in session.execute(query).all():
+    blocked_rows: list[dict[str, Any]] = []
+    for task, sample_case, store, shipment in session.execute(query).all():
+        delivered_at = shipment.delivered_at if shipment is not None else None
+        days = (
+            days_since_delivery(delivered_at, today=today)
+            if delivered_at is not None
+            else None
+        )
+        if days is None:
+            blocked_reason = "missing_delivery_date"
+            blocked_message = "缺少已确认的送达日；无法核对当前应做阶段，本条不发送"
+        elif is_stale_followup_stage(stage=task.stage, days=days):
+            latest = latest_due_unpublished_stage(days)
+            blocked_reason = "stale_stage"
+            blocked_message = (
+                f"{task.stage}（排期 {task.scheduled_for}）已过期："
+                f"到货 {days} 天，当前应做 {latest[0] if latest else '未知'}；本条不发送"
+            )
+        else:
+            blocked_reason = ""
+            blocked_message = ""
+        if blocked_reason:
+            if include_blocked:
+                blocked_rows.append(
+                    {
+                        "task_id": task.id,
+                        "stage": task.stage,
+                        "scheduled_for": (
+                            task.scheduled_for.isoformat() if task.scheduled_for else ""
+                        ),
+                        "creator_id": str(sample_case.creator_id or ""),
+                        "creator_name": str(sample_case.creator_name or ""),
+                        "store_ziniao_id": str(store.ziniao_store_id or ""),
+                        "blocked_reason": blocked_reason,
+                        "blocked_message": blocked_message,
+                    }
+                )
+            continue
         rows.append(
             {
                 "task_id": task.id,
@@ -138,7 +188,7 @@ def select_sendable_tasks(
                 ),
             }
         )
-    return rows
+    return rows[: max(1, int(limit))] + blocked_rows
 
 
 def write_pre_execute_backup(
@@ -280,6 +330,31 @@ def release_stale_claims(
             )
         session.commit()
     return stale
+
+
+def record_stale_stage(session_factory, row: dict[str, Any]) -> None:
+    """Move an out-of-sequence calendar stage out of the send pool.
+
+    The task is never sent; it is parked in review so the operator sees that a
+    node was missed (``stale_stage``) or that the delivery date is unknown.
+    """
+    from assistant.database.models import FollowupTask
+    from assistant.domain.followup_labels import SENDING_RESULT
+
+    with session_factory() as session:
+        task = session.get(FollowupTask, int(row["task_id"]))
+        if task is None or task.status != "pending":
+            return
+        if str(task.send_result or "") == SENDING_RESULT:
+            return
+        task.status = "needs_review"
+        task.review_reason = STALE_REVIEW_REASONS.get(
+            str(row.get("blocked_reason") or ""),
+            "stale_stage",
+        )
+        task.requires_manual_confirmation = True
+        task.last_error = str(row.get("blocked_message") or "阶段已过期；未发送")
+        session.commit()
 
 
 def record_send_result(session_factory, row: dict[str, Any], result: dict[str, Any]) -> None:
@@ -431,7 +506,7 @@ def run(args: argparse.Namespace) -> int:
     task_id = int(args.task_id) if args.task_id else None
     today = beijing_now().date()
     with session_factory() as session:
-        rows = select_sendable_tasks(
+        candidates = select_sendable_tasks(
             session,
             today=today,
             stage=args.stage or "",
@@ -439,15 +514,38 @@ def run(args: argparse.Namespace) -> int:
             creator_name=args.creator_name or "",
             task_id=task_id,
             limit=1 if task_id else limit,
+            include_blocked=True,
         )
+    rows = [row for row in candidates if not row.get("blocked_reason")]
+    blocked_rows = [row for row in candidates if row.get("blocked_reason")]
+    for row in blocked_rows:
+        logger.warning(f"[过期] {row['creator_name']} {row.get('blocked_message')}")
+        if args.execute:
+            record_stale_stage(session_factory, row)
     if not rows:
         if task_id:
-            logger.error(
-                f"[选人] task={task_id} 当前不可发送（已发/待确认/未到期/平台状态不符）。"
+            reason = (
+                blocked_rows[0].get("blocked_message")
+                if blocked_rows
+                else "已发/待确认/未到期/平台状态不符"
             )
+            logger.error(f"[选人] task={task_id} 当前不可发送（{reason}）。")
             print(
                 json.dumps(
-                    {"selected": 0, "sent": 0, "skipped": 0, "task_id": task_id},
+                    {
+                        "selected": 0,
+                        "sent": 0,
+                        "skipped": 0,
+                        "task_id": task_id,
+                        "blocked": [
+                            {
+                                "task_id": row["task_id"],
+                                "reason": row["blocked_reason"],
+                                "message": row["blocked_message"],
+                            }
+                            for row in blocked_rows
+                        ],
+                    },
                     ensure_ascii=False,
                 )
             )
@@ -455,7 +553,13 @@ def run(args: argparse.Namespace) -> int:
         logger.info("[选人] 没有到期的跟进私信任务。")
         print(
             json.dumps(
-                {"selected": 0, "sent": 0, "skipped": 0, "rows": []},
+                {
+                    "selected": 0,
+                    "sent": 0,
+                    "skipped": 0,
+                    "blocked_stale_stage": len(blocked_rows),
+                    "rows": [],
+                },
                 ensure_ascii=False,
             )
         )
@@ -478,11 +582,22 @@ def run(args: argparse.Namespace) -> int:
         "previewed": 0,
         "held": 0,
         "skipped": 0,
+        "blocked_stale_stage": len(blocked_rows),
         "rows": [],
         "execute": bool(args.execute),
         "write_feishu": bool(args.write_feishu),
         "store_id": store_id,
     }
+    if blocked_rows:
+        summary["blocked_rows"] = [
+            {
+                "task_id": row["task_id"],
+                "creator_name": row["creator_name"],
+                "reason": row["blocked_reason"],
+                "message": row["blocked_message"],
+            }
+            for row in blocked_rows
+        ]
     if stale_claims:
         summary["stale_claims"] = [item["task_id"] for item in stale_claims]
     backup_path: Path | None = None

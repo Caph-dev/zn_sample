@@ -76,6 +76,27 @@ def latest_due_unpublished_stage(days: int) -> tuple[str, int] | None:
     return ("unfulfilled", 15)
 
 
+MESSAGE_STAGES = frozenset({"arrival", "day_3", "day_7"})
+
+
+def is_stale_followup_stage(*, stage: str, days: int | None) -> bool:
+    """True when a later calendar node is already due for this delivery age.
+
+    A message stage may only be sent while it is the latest due node: once the
+    next node is due, the older copy is out of sequence (a D0 "did it arrive?"
+    message sent six days later) and must not go out. Without a confirmed
+    delivery date there is no calendar to check, so the stage fails closed.
+    """
+    if stage not in MESSAGE_STAGES:
+        return False
+    if days is None:
+        return True
+    latest = latest_due_unpublished_stage(days)
+    if latest is None:
+        return True
+    return latest[0] != stage
+
+
 def _as_date(scheduled_for: str | date | None) -> date | None:
     if scheduled_for is None:
         return None

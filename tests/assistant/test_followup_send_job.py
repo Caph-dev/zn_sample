@@ -4,7 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,6 +27,7 @@ from assistant.database.models import (  # noqa: E402
     Store,
 )
 from assistant.domain.followup_labels import followup_action_display  # noqa: E402
+from assistant.domain.timeutil import beijing_now  # noqa: E402
 from assistant.jobs.handlers import followup_send as handler  # noqa: E402
 from assistant.jobs.registry import HandlerFailure  # noqa: E402
 from assistant.services.followup_service import FollowupService  # noqa: E402
@@ -285,6 +286,12 @@ class FollowupSendPayloadTests(unittest.TestCase):
         values.update(overrides)
         return SimpleNamespace(**values)
 
+    def _shipment(self, *, delivered_days_ago: int = 0) -> SimpleNamespace:
+        return SimpleNamespace(
+            delivered_at=beijing_now() - timedelta(days=delivered_days_ago),
+            tracking_display="",
+        )
+
     def test_due_pending_task_is_send_ready(self) -> None:
         with patch(
             "assistant.web.console_pages.beijing_now",
@@ -293,7 +300,7 @@ class FollowupSendPayloadTests(unittest.TestCase):
             payload = followup_detail_data(
                 self._task(),
                 self._case(),
-                None,
+                self._shipment(),
                 attachment_url="",
                 scheduled_label="2026-09-10",
             )
@@ -304,43 +311,228 @@ class FollowupSendPayloadTests(unittest.TestCase):
             "assistant.web.console_pages.beijing_now",
             return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
         ):
+            shipment = self._shipment()
             future = followup_detail_data(
                 self._task(scheduled_for=date(2026, 9, 11)),
                 self._case(),
-                None,
+                shipment,
                 attachment_url="",
                 scheduled_label="",
             )
             reviewed = followup_detail_data(
                 self._task(status="needs_review", requires_manual_confirmation=True),
                 self._case(),
-                None,
+                shipment,
                 attachment_url="",
                 scheduled_label="",
             )
             completed = followup_detail_data(
                 self._task(send_result="platform-sent"),
                 self._case(),
-                None,
+                shipment,
                 attachment_url="",
                 scheduled_label="",
             )
             claimed = followup_detail_data(
                 self._task(send_result="sending"),
                 self._case(),
-                None,
+                shipment,
                 attachment_url="",
                 scheduled_label="",
             )
             shipped = followup_detail_data(
                 self._task(),
                 self._case(platform_status="shipped"),
-                None,
+                shipment,
                 attachment_url="",
                 scheduled_label="",
             )
         for payload in (future, reviewed, completed, claimed, shipped):
             self.assertFalse(payload["send_ready"])
+
+    def test_superseded_stage_is_not_send_ready(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+            )
+        self.assertFalse(payload["send_ready"])
+        self.assertIn("已过期", payload["note"])
+
+    def test_current_stage_stays_send_ready_later_in_the_calendar(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(stage="day_3", template_key="day3_hero_video_en"),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+            )
+        self.assertTrue(payload["send_ready"])
+        self.assertEqual(payload["note"], "")
+
+    def test_missing_delivery_date_is_not_send_ready(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(),
+                self._case(),
+                None,
+                attachment_url="",
+                scheduled_label="",
+            )
+        self.assertFalse(payload["send_ready"])
+
+    def test_current_stage_points_to_the_pending_node_task(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[
+                    {
+                        "id": 1,
+                        "stage": "arrival",
+                        "scheduled_for": date(2026, 9, 5),
+                        "sent_at": None,
+                        "send_result": "",
+                    },
+                    {
+                        "id": 9,
+                        "stage": "day_3",
+                        "scheduled_for": date(2026, 9, 8),
+                        "sent_at": None,
+                        "send_result": "",
+                    },
+                ],
+            )
+        self.assertEqual(payload["current_stage_label"], "到货后第 3 天")
+        self.assertEqual(payload["current_task_url"], "/followups/9")
+        self.assertIn("打开当前应做", payload["current_stage_note"])
+
+    def test_current_stage_marks_this_task(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(id=9, stage="day_3", template_key="day3_hero_video_en"),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[
+                    {
+                        "id": 9,
+                        "stage": "day_3",
+                        "scheduled_for": date(2026, 9, 8),
+                        "sent_at": None,
+                        "send_result": "",
+                    }
+                ],
+            )
+        self.assertEqual(payload["current_stage_label"], "到货后第 3 天")
+        self.assertEqual(payload["current_task_url"], "")
+        self.assertIn("就是本条", payload["current_stage_note"])
+
+    def test_current_stage_without_generated_task(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[],
+            )
+        self.assertEqual(payload["current_stage_label"], "到货后第 3 天")
+        self.assertEqual(payload["current_task_url"], "")
+        self.assertIn("尚未生成", payload["current_stage_note"])
+
+    def test_current_stage_hidden_for_finished_case(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(stage="content_found", action_kind="acknowledge_content"),
+                self._case(platform_status="completed"),
+                self._shipment(),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[],
+            )
+        self.assertEqual(payload["current_stage_label"], "")
+        self.assertEqual(payload["current_task_url"], "")
+
+    def test_superseded_record_is_not_shown_as_pending(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(
+                    status="suppressed",
+                    suppressed_reason="superseded_by_later_stage",
+                ),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[],
+            )
+        self.assertEqual(payload["action_label"], "不再发送（已由新阶段取代）")
+        self.assertFalse(payload["send_ready"])
+
+    def test_delivery_shows_beijing_time_and_elapsed_days(self) -> None:
+        shipment = self._shipment(delivered_days_ago=5)
+        payload = followup_detail_data(
+            self._task(),
+            self._case(),
+            shipment,
+            attachment_url="",
+            scheduled_label="",
+            case_tasks=[],
+        )
+        local = beijing_now(shipment.delivered_at)
+        self.assertEqual(
+            payload["delivered_text"],
+            f"{local:%Y-%m-%d %H:%M}（北京时间）· 到货已 5 天",
+        )
+
+    def test_current_stage_due_spells_out_the_delay(self) -> None:
+        with patch(
+            "assistant.web.console_pages.beijing_now",
+            return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        ):
+            payload = followup_detail_data(
+                self._task(stage="day_3", template_key="day3_hero_video_en"),
+                self._case(),
+                self._shipment(delivered_days_ago=5),
+                attachment_url="",
+                scheduled_label="",
+                case_tasks=[],
+            )
+        self.assertEqual(payload["current_stage_due"], "应做 09-08 · 已逾期 2 天")
 
     def test_content_found_is_ready_even_when_case_completed(self) -> None:
         with patch(

@@ -179,6 +179,8 @@
 
 **跟进日历（仅免费样品【处理中】`tab=40`；跟进不分商品，全部主推款都跟进）：** D0 / D+3 / D+7 发话术；D+10 只出名单；D+15 飞书合作状态写 **未发布**（业务含义=未履约，不是「待发布」）。刚到货话术分商品：B005 附讲解图，非 B005 只发话术；3/7 天话术通用。达人发视频/直播 → 平台已完成 + 文档原文感谢话术 + 飞书 **已完成**。达人类型用筛查导出「视频达人/直播达人」；视频+直播同时标记时跟进话术按视频达人，不拆两条。类型未知才人工。不要把【已发货】当已送达。不扫买返。
 
+**发送只认「当前最新应做阶段」（2026-09-10 加）：** 由到货日推算的当前节点之外一律不发——例如到货已 5 天时，5 天前的 D0 任务不得补发。判定用 `is_stale_followup_stage`（`assistant/domain/followup_stage.py`），脚本选择器与网页「发送」按钮共用；被拦下的过期任务转 `needs_review` + `stale_stage`（缺送达日转 `missing_delivery_time`），不发送。日历只在跑「生成今日跟进待办」时推进（不是 cron），所以每天/每次发送前应先跑一次生成，否则待办池会停在旧节点。
+
 **跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。有简介时走 LLM JSON 的 `lang`（不看 `confidence`；`.env`：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，默认 DeepSeek `deepseek-v4-flash`）；空简介、识别失败或非法 lang 默认英语。`sync_shipped_tracking.py` 已是这个优先级。
 
 `detail_targets`：仅 `--with-detail` 只拉列表初判通过行；加 `--detail-all` 才拉全表。试跑限量用 `--max-rows`。

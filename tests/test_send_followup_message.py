@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,12 +22,14 @@ from assistant.database.models import (  # noqa: E402
     FollowupTask,
     Job,
     SampleCase,
+    Shipment,
     Store,
 )
 from send_followup_message import (  # noqa: E402
     claim_task,
     find_running_jobs,
     record_send_result,
+    record_stale_stage,
     release_stale_claims,
     resolve_attachment_path,
     run,
@@ -36,6 +38,8 @@ from send_followup_message import (  # noqa: E402
 )
 
 TODAY = date(2026, 9, 10)
+# Delivery offsets that keep each stage the latest due calendar node.
+STAGE_DELIVERED_DAYS_AGO = {"arrival": 0, "day_3": 5, "day_7": 8}
 
 
 class SendFollowupSelectionTests(unittest.TestCase):
@@ -67,6 +71,8 @@ class SendFollowupSelectionTests(unittest.TestCase):
         message_preview: str = "Hi creator! Just checking in.",
         attachment_key: str = "",
         store_ziniao_id: str = "store-1",
+        delivered_days_ago: int | None = None,
+        create_shipment: bool = True,
     ) -> None:
         with self.session_factory() as session:
             store = session.scalar(
@@ -87,6 +93,23 @@ class SendFollowupSelectionTests(unittest.TestCase):
             )
             session.add(sample_case)
             session.flush()
+            if create_shipment:
+                days_ago = (
+                    delivered_days_ago
+                    if delivered_days_ago is not None
+                    else STAGE_DELIVERED_DAYS_AGO.get(stage, 0)
+                )
+                session.add(
+                    Shipment(
+                        sample_case_id=sample_case.id,
+                        delivered_at=datetime.combine(
+                            TODAY - timedelta(days=days_ago),
+                            time(1, 0),
+                            tzinfo=timezone.utc,
+                        ),
+                        status_category="delivered",
+                    )
+                )
             session.add(
                 FollowupTask(
                     sample_case_id=sample_case.id,
@@ -191,6 +214,59 @@ class SendFollowupSelectionTests(unittest.TestCase):
             }
         rows = self.select(task_id=task_ids["beta"])
         self.assertEqual([row["creator_name"] for row in rows], ["beta"])
+
+    def test_superseded_arrival_is_not_selected(self) -> None:
+        # 到货 5 天：当前应做 day_3，5 天前的 D0 话术不得再发。
+        self.add_task(creator_name="late_d0", stage="arrival", delivered_days_ago=5)
+        self.assertEqual(self.select(), [])
+
+    def test_superseded_arrival_is_reported_as_blocked(self) -> None:
+        self.add_task(creator_name="late_d0", stage="arrival", delivered_days_ago=5)
+        self.add_task(creator_name="on_time", stage="arrival", delivered_days_ago=0)
+        rows = self.select(include_blocked=True, limit=1)
+        sendable = [row for row in rows if not row.get("blocked_reason")]
+        blocked = [row for row in rows if row.get("blocked_reason")]
+        self.assertEqual([row["creator_name"] for row in sendable], ["on_time"])
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["blocked_reason"], "stale_stage")
+        self.assertEqual(blocked[0]["creator_name"], "late_d0")
+        self.assertIn("当前应做 day_3", blocked[0]["blocked_message"])
+
+    def test_current_day_3_stage_is_still_selectable(self) -> None:
+        self.add_task(
+            creator_name="d3",
+            stage="day_3",
+            delivered_days_ago=5,
+            template_key="day3_hero_video_en",
+        )
+        self.add_task(
+            creator_name="d7",
+            stage="day_7",
+            delivered_days_ago=8,
+            template_key="day7_hero_video_en",
+        )
+        self.assertEqual(
+            [row["creator_name"] for row in self.select()],
+            ["d3", "d7"],
+        )
+
+    def test_missing_delivery_date_is_blocked(self) -> None:
+        self.add_task(creator_name="no_delivery", create_shipment=False)
+        self.assertEqual(self.select(), [])
+        rows = self.select(include_blocked=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["blocked_reason"], "missing_delivery_date")
+
+    def test_content_found_is_not_treated_as_stale(self) -> None:
+        self.add_task(
+            creator_name="thanks",
+            stage="content_found",
+            action_kind="acknowledge_content",
+            platform_status="completed",
+            delivered_days_ago=40,
+        )
+        rows = self.select()
+        self.assertEqual([row["stage"] for row in rows], ["content_found"])
 
 
 class SendFollowupRecordingTests(unittest.TestCase):
@@ -318,6 +394,45 @@ class SendFollowupRecordingTests(unittest.TestCase):
         self.assertTrue(task.requires_manual_confirmation)
         self.assertIsNone(task.sent_at)
         self.assertIn("未发送", task.last_error)
+
+    def test_stale_stage_is_parked_for_review(self) -> None:
+        record_stale_stage(
+            self.session_factory,
+            {
+                "task_id": self.task_id,
+                "blocked_reason": "stale_stage",
+                "blocked_message": "arrival 已过期：到货 5 天，当前应做 day_3；本条不发送",
+            },
+        )
+        task = self.load_task()
+        self.assertEqual(task.status, "needs_review")
+        self.assertEqual(task.review_reason, "stale_stage")
+        self.assertTrue(task.requires_manual_confirmation)
+        self.assertIsNone(task.sent_at)
+        self.assertEqual(task.send_result, "")
+        self.assertIn("当前应做 day_3", task.last_error)
+
+    def test_missing_delivery_date_maps_to_the_existing_review_reason(self) -> None:
+        record_stale_stage(
+            self.session_factory,
+            {
+                "task_id": self.task_id,
+                "blocked_reason": "missing_delivery_date",
+                "blocked_message": "缺少已确认的送达日",
+            },
+        )
+        task = self.load_task()
+        self.assertEqual(task.review_reason, "missing_delivery_time")
+
+    def test_stale_stage_leaves_an_untouched_claim_alone(self) -> None:
+        self.assertTrue(claim_task(self.session_factory, self.task_id))
+        record_stale_stage(
+            self.session_factory,
+            {"task_id": self.task_id, "blocked_reason": "stale_stage"},
+        )
+        task = self.load_task()
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.send_result, "sending")
 
 
 class SendFollowupBackupTests(unittest.TestCase):
