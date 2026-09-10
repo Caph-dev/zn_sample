@@ -133,6 +133,37 @@ class FollowupGenerateTests(unittest.TestCase):
             self.assertIn("arrival_other", task.template_key)
             self.assertIn("excited to see your content", task.message_preview)
 
+    def test_arrival_hero_product_keeps_the_product_image(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task = session.scalar(select(FollowupTask))
+            self.assertEqual(task.stage, "arrival")
+            self.assertIn("arrival_hero", task.template_key)
+            self.assertTrue(
+                task.attachment_key.endswith("2-查看到货+达人跟进-b05.png")
+            )
+
+    def test_later_stage_drops_the_product_image(self) -> None:
+        # SOP：讲解图只随刚到货（D0）发；第 3 / 7 天只发话术。
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task = session.scalar(select(FollowupTask))
+            self.assertEqual(task.stage, "day_3")
+            self.assertIn("unpublished_3_video", task.template_key)
+            self.assertEqual(task.attachment_key, "")
+
     def test_dual_marked_creator_uses_video_followup_template(self) -> None:
         self.add_case(curr_status=40, delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc), is_video_creator="是", is_live_creator="是", language="en")
         FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))

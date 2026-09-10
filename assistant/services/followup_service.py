@@ -611,7 +611,9 @@ class FollowupService:
             task.message_preview = followup_review_label(review_reason) if review_reason else ""
         task.attachment_key = (
             attachment["path"]
-            if attachment["matched"] and action_kind == ACTION_KIND_SEND_MESSAGE
+            if attachment["matched"]
+            and task.stage == "arrival"
+            and action_kind == ACTION_KIND_SEND_MESSAGE
             else ""
         )
         task.requires_manual_confirmation = needs_review
