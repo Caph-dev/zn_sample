@@ -5,11 +5,12 @@
 - 正式 SOP 阈值与缺失值语义完全不变；本模块不改 filters、不改 Criteria。
 - 自定义规则只绑定「本次任务」的快照，绝不在服务端改写正式默认值。
 
-三态语义（4.4 节）：
-- 启用指标缺失 → needs_review（不得默认通过；比正式 SOP 的宽松语义更严）
-- 已知违反任一必需条件 → failed
+三态语义：
+- 启用指标缺失或已知违反 → failed（不通过；不默认放过）
 - 完整满足 → passed
 - 未启用的检查 → not_checked（不是「通过」，也不是「跳过即通过」）
+- 唯一例外：详情采集失败（detail_error）导致缺失 → needs_review
+  （该批次 integrity 不完整，本身禁止执行）
 
 本模块只做判定与证据校验，不触发任何平台/飞书写操作。
 """
@@ -502,7 +503,11 @@ def evaluate_custom_row(
     hero_keys: set[str],
     allowed_product_ids: set[str] | None,
 ) -> dict[str, Any]:
-    """按自定义规则对单行做三态评估；返回逐项结果与总体结论。
+    """按自定义规则对单行做判定；返回逐项结果与总体结论。
+
+    判定语义：启用指标缺失或违反 → failed；完整满足 → passed；未启用 → not_checked。
+    仅「详情采集失败」（detail_error）导致缺失时落 needs_review——该批次
+    integrity 不完整，服务端与脚本都禁止执行。
 
     依赖上游已做数值抽取（lib.filters.evaluate_row 的 *_n 字段或等价字段）。
     这里不做写操作，也不做内容审核（内容审核单独跑 review_creator_rows）。
@@ -510,6 +515,7 @@ def evaluate_custom_row(
     from .feishu_hero import match_hero  # 避免循环
 
     checks: list[dict[str, Any]] = []
+    detail_unavailable = bool(str(row.get("detail_error") or "").strip())
 
     def triage(
         key: str,
@@ -522,8 +528,9 @@ def evaluate_custom_row(
     ) -> str:
         status: str
         if value is None:
-            status = "needs_review"
-            detail = detail or "指标缺失"
+            status = "needs_review" if detail_unavailable else "failed"
+            missing_note = "详情采集失败，未取到值" if detail_unavailable else "指标缺失"
+            detail = f"{detail}；{missing_note}" if detail else missing_note
         elif test_passed:
             status = "passed"
         else:
@@ -652,7 +659,7 @@ def evaluate_custom_row(
         categories = row.get("categories_n") or []
         matched = [cat for cat in categories if cat in basic["categories"].categories]
         if not categories:
-            status = "needs_review"
+            status = "failed"
             detail = "类目缺失"
         elif matched:
             status = "passed"
@@ -747,7 +754,7 @@ def evaluate_custom_row(
         if group.logic == "either":
             if video_status == "passed" or live_status == "passed":
                 group_status = "passed"
-            elif video_status == "failed" and live_status == "failed":
+            elif video_status == "failed" or live_status == "failed":
                 group_status = "failed"
             else:
                 group_status = "needs_review"

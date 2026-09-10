@@ -97,13 +97,13 @@ export function ResultsPanel({
       if (filter === 'eligible' && overall !== 'eligible') {
         return false;
       }
-      if (filter === 'needs_review' && row.overall !== 'needs_review') {
+      if (filter === 'needs_review' && overall !== 'needs_review') {
         return false;
       }
-      if (filter === 'failed' && row.overall !== 'failed') {
+      if (filter === 'failed' && overall !== 'failed') {
         return false;
       }
-      if (filter === 'blocked' && !row.blocked) {
+      if (filter === 'blocked' && overall !== 'blocked') {
         return false;
       }
       if (
@@ -254,6 +254,16 @@ export function ResultsPanel({
                     width: proportional(4),
                     renderCell: (row) => {
                       const candidate = row as unknown as CandidateRow;
+                      if (candidate.blocked) {
+                        const reasons = candidate.safety_blocks
+                          .map((block) => block.detail)
+                          .join('；');
+                        return (
+                          <Text type="supporting">
+                            执行拦截：{reasons || '不满足执行条件'}
+                          </Text>
+                        );
+                      }
                       return (
                         <Text type="supporting">
                           {candidate.checks
