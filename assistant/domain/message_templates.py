@@ -73,12 +73,12 @@ Solo quería pasar por aquí para confirmar si ya recibiste el producto correcta
 Si tienes algún plan de hacer un live próximamente o necesitas cualquier ayuda de nuestra parte (información del producto, ideas de contenido, promociones, etc.), no dudes en escribirme cuando quieras. Haré todo lo posible para apoyarte y coordinar todo contigo. 💕
 
 ¡Tenemos muchas ganas de ver tu contenido y seguir colaborando contigo! 🥰""",
-    "unpublished_3_video_en": """Hi{creator_name} ! ❤️
+    "unpublished_3_video_en": """Hi {creator_name}! ❤️
 
 Just a friendly reminder that our product is currently running a limited-time promotion. ✨
 
 We’re excited to see your video after trying the product! If you have any questions or need any help while creating your content, feel free to reach out anytime. 😊""",
-    "unpublished_3_video_es": """Hola{creator_name}! ❤️
+    "unpublished_3_video_es": """Hola {creator_name}! ❤️
 
 Solo quería recordarte que el producto con el que estamos colaborando tiene una promoción especial por tiempo limitado. ✨
 
@@ -90,7 +90,7 @@ Just a friendly reminder that the product we’re collaborating on is currently 
 We’re really looking forward to seeing you showcase and test the product during your next live stream! If you need any help during your live session, please feel free to contact me anytime. 😊
 
 We’d be happy to support you and look forward to having a great collaboration together! 💕""",
-    "unpublished_3_live_es": """Hola{creator_name}! ❤️
+    "unpublished_3_live_es": """Hola {creator_name}! ❤️
 
 Solo quería recordarte que el producto con el que estamos colaborando actualmente tiene una promoción especial por tiempo limitado. ✨
 
@@ -120,7 +120,7 @@ We’ve noticed that this product has been getting great exposure and attention 
 With the product’s strong momentum and your amazing ability to connect with and recommend products to your audience, we believe it could bring great results together. 🚀
 
 If you’d like, we can also set up an exclusive live flash sale event for you to help boost your sales. And if there’s anything you need support with before or during your live stream, please feel free to let me know anytime. I’ll do my best to help! 💕""",
-    "unpublished_7_live_es": """Hola{creator_name}! ❤️
+    "unpublished_7_live_es": """Hola {creator_name}! ❤️
 
 Quería preguntarte si tienes algún plan de hacer un live próximamente. 😊
 

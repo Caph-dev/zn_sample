@@ -344,7 +344,11 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
             ),
             patch(
                 "lib.im_dom.inspect_current_thread",
-                return_value={"thread_text": "unrelated", "messages": messages},
+                return_value={
+                    "thread_text": "unrelated",
+                    "messages": messages,
+                    "page_offset_minutes": 420,
+                },
             ),
             patch("lib.im_api.send_message_via_sdk") as send_text,
             patch("lib.im_api.send_image_message_via_sdk") as send_image,
@@ -359,7 +363,16 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
                 image_path=Path("/tmp/does-not-need-to-exist-b05.png"),
             )
 
-        self.assertEqual(seen, [messages])
+        # 逐条消息带上探针里的页面时区偏移，窗口判定才能换算成北京日期。
+        self.assertEqual(
+            seen,
+            [
+                [
+                    {**messages[0], "page_offset_minutes": 420},
+                    {**messages[1], "page_offset_minutes": 420},
+                ]
+            ],
+        )
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "already-sent")
         self.assertEqual(result["reason"], "self-message-in-window")

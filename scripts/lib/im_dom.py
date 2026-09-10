@@ -118,6 +118,7 @@ INSPECT_IM_JS = r"""
     selected_conversation_id: selectedConversationId,
     thread_text: threadText.slice(0, 4000),
     thread_text_tail: threadText.slice(-4000),
+    page_offset_minutes: new Date().getTimezoneOffset(),
     message_count: threadMessages.length,
     messages: threadMessages.slice(-60)
   });
@@ -567,13 +568,30 @@ def im_thread_text_with_tail(probe: dict[str, Any] | None) -> str:
 
 
 def inspected_messages(probe: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Return the per-message rows collected by ``INSPECT_IM_JS``."""
+    """Return the per-message rows collected by ``INSPECT_IM_JS``.
+
+    Each row carries the page timezone offset captured by the probe
+    (``new Date().getTimezoneOffset()``) so the duplicate-window check can turn
+    a page-local label into a Beijing-day timestamp.
+    """
     if not isinstance(probe, dict):
         return []
     messages = probe.get("messages")
     if not isinstance(messages, list):
         return []
-    return [message for message in messages if isinstance(message, dict)]
+    offset = probe.get("page_offset_minutes")
+    try:
+        offset_minutes: int | None = int(offset) if offset is not None else None
+    except (TypeError, ValueError):
+        offset_minutes = None
+    rows: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        annotated = dict(message)
+        annotated["page_offset_minutes"] = offset_minutes
+        rows.append(annotated)
+    return rows
 
 
 _MONTH_NUMBERS = {
@@ -599,27 +617,158 @@ _WEEKDAY_NUMBERS = {
     "saturday": 5,
     "sunday": 6,
 }
+_CN_WEEKDAY_NUMBERS = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+_ES_WEEKDAY_NUMBERS = {
+    "lun": 0,
+    "mar": 1,
+    "mié": 2,
+    "mie": 2,
+    "jue": 3,
+    "vie": 4,
+    "sáb": 5,
+    "sab": 5,
+    "dom": 6,
+}
 _RELATIVE_CHAT_DAYS = {
     "today": 0,
     "今天": 0,
+    "hoy": 0,
     "yesterday": -1,
     "昨天": -1,
+    "ayer": -1,
     "前天": -2,
 }
-_CHAT_CLOCK_RE = re.compile(r"(\d{1,2}):(\d{2})(?:\s*([ap])\.?m\.?)?", re.IGNORECASE)
+# 中文界面把上午/下午写在时刻前面（「昨天 上午5:46」），英文界面写在后面（「4:55 AM」）。
+_CN_AM_MARKERS = ("上午", "凌晨", "早上", "清晨", "早晨")
+_CN_PM_MARKERS = ("下午", "晚上", "傍晚", "夜里")
+_CN_NOON_MARKERS = ("中午",)
+_CHAT_CLOCK_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_CHAT_MERIDIEM_RE = re.compile(r"([ap])\.?\s*m\.?", re.IGNORECASE)
 _CHAT_MONTH_DAY_RE = re.compile(r"([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,\s*(\d{4}))?")
 _CHAT_WEEKDAY_RE = re.compile(r"([A-Za-z]{6,9}),")
+_CHAT_ES_WEEKDAY_RE = re.compile(r"(lun|mar|mié|mie|jue|vie|sáb|sab|dom),", re.IGNORECASE)
+_CHAT_CN_WEEKDAY_RE = re.compile(r"(?:星期|周)\s*([一二三四五六日天])")
+_CHAT_CN_MONTH_DAY_RE = re.compile(r"(?:(\d{4})\s*年)?\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+_BEIJING_OFFSET_MINUTES = 8 * 60
 
 
-def parse_chat_time_text(text: str, *, now: datetime | None = None) -> datetime | None:
-    """Parse one IM time label into the moment it labels.
+def _chat_hour_with_meridiem(raw: str, hour: int) -> int:
+    """Resolve the AM/PM marker of a label (Chinese or English) to a 0–23 hour."""
+    if any(marker in raw for marker in _CN_NOON_MARKERS):
+        return 12 if hour % 12 == 0 else hour
+    is_pm = any(marker in raw for marker in _CN_PM_MARKERS)
+    is_am = any(marker in raw for marker in _CN_AM_MARKERS)
+    english = _CHAT_MERIDIEM_RE.search(raw)
+    if english is not None:
+        if english.group(1).lower() == "p":
+            is_pm = True
+        else:
+            is_am = True
+    if is_pm:
+        return hour % 12 + 12
+    if is_am:
+        return hour % 12
+    return hour
 
-    Labels look like ``Sep 3 5:55 PM`` (year omitted), ``Tuesday, 4:55 AM`` or
-    ``Yesterday 4:55 AM``. A label without both a clock and a date (``12:41 AM``,
-    a bare ``昨天``) or anything unrecognized returns ``None`` so callers never
-    guess a day. The page renders labels in its own timezone, so a label may sit
-    one day off around midnight; callers compare natural days over a multi-day
-    window.
+
+def _shift_year_back(parsed: date) -> date | None:
+    try:
+        return parsed.replace(year=parsed.year - 1)
+    except ValueError:
+        return None
+
+
+def _chat_label_date(raw: str, page_now: datetime) -> tuple[date | None, bool]:
+    """Resolve the date part of a label.
+
+    Returns ``(day, has_date_leg)``. ``(None, False)`` means the label carries no
+    date at all (a bare clock is the page's today); ``(None, True)`` means a date
+    was written but cannot be valid, so the whole label is unusable.
+    """
+    lowered = raw.lower()
+    for label, day_offset in _RELATIVE_CHAT_DAYS.items():
+        if label in lowered:
+            return (page_now + timedelta(days=day_offset)).date(), True
+
+    weekday_number: int | None = None
+    cn_weekday = _CHAT_CN_WEEKDAY_RE.search(raw)
+    if cn_weekday is not None:
+        weekday_number = _CN_WEEKDAY_NUMBERS.get(cn_weekday.group(1))
+    if weekday_number is None:
+        es_weekday = _CHAT_ES_WEEKDAY_RE.search(raw)
+        if es_weekday is not None:
+            weekday_number = _ES_WEEKDAY_NUMBERS.get(es_weekday.group(1).lower())
+    if weekday_number is None:
+        en_weekday = _CHAT_WEEKDAY_RE.match(raw)
+        if en_weekday is not None:
+            weekday_number = _WEEKDAY_NUMBERS.get(en_weekday.group(1).lower())
+    if weekday_number is not None:
+        return (
+            page_now - timedelta(days=(page_now.weekday() - weekday_number) % 7)
+        ).date(), True
+
+    cn_month_day = _CHAT_CN_MONTH_DAY_RE.search(raw)
+    if cn_month_day is not None:
+        year_text = cn_month_day.group(1)
+        try:
+            parsed = date(
+                int(year_text) if year_text else page_now.year,
+                int(cn_month_day.group(2)),
+                int(cn_month_day.group(3)),
+            )
+        except ValueError:
+            return None, True
+        if year_text is None and parsed > page_now.date():
+            return _shift_year_back(parsed), True
+        return parsed, True
+
+    month_day = _CHAT_MONTH_DAY_RE.search(raw)
+    if month_day is not None:
+        month = _MONTH_NUMBERS.get(month_day.group(1)[:3].lower())
+        if month is None:
+            return None, True
+        year_text = month_day.group(3)
+        try:
+            parsed = date(
+                int(year_text) if year_text else page_now.year,
+                month,
+                int(month_day.group(2)),
+            )
+        except ValueError:
+            return None, True
+        if year_text is None and parsed > page_now.date():
+            return _shift_year_back(parsed), True
+        return parsed, True
+    return None, False
+
+
+def parse_chat_time_text(
+    text: str,
+    *,
+    now: datetime | None = None,
+    page_offset_minutes: int | None = None,
+) -> datetime | None:
+    """Parse one IM time label into the moment it labels, in Beijing time.
+
+    The page renders labels in its own locale and timezone. Measured on the US
+    store (2026-09-10, page timezone GMT-0700): Chinese UI shows ``上午1:43``
+    (clock only = the page's today), ``昨天 上午5:46``, ``星期二, 4:55 上午``,
+    ``9月1日 7:41`` and ``2025年9月16日 6:28``; the English UI shows
+    ``Sep 3 5:55 PM`` / ``Tuesday, 4:55 AM``. A label without a clock (``昨天``)
+    or of an unrecognized shape returns ``None`` so callers never guess a day.
+
+    ``page_offset_minutes`` is the page's ``getTimezoneOffset()``. When given,
+    the label is shifted into Beijing time first, so comparing its natural day
+    against the delivery calendar is not off by one around page midnight.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -627,51 +776,26 @@ def parse_chat_time_text(text: str, *, now: datetime | None = None) -> datetime 
     clock = _CHAT_CLOCK_RE.search(raw)
     if clock is None:
         return None
-    hour = int(clock.group(1))
+    hour = _chat_hour_with_meridiem(raw, int(clock.group(1)))
     minute = int(clock.group(2))
-    meridiem = str(clock.group(3) or "").lower()
-    if meridiem:
-        hour = hour % 12 + (12 if meridiem == "p" else 0)
     if hour > 23 or minute > 59:
         return None
     if now is None:
         from assistant.domain.timeutil import beijing_now
 
         now = beijing_now()
-    reference = now
-    lowered = raw.lower()
-    for label, day_offset in _RELATIVE_CHAT_DAYS.items():
-        if lowered.startswith(label):
-            day = (reference + timedelta(days=day_offset)).date()
-            return datetime(day.year, day.month, day.day, hour, minute)
-    weekday = _CHAT_WEEKDAY_RE.match(raw)
-    if weekday:
-        weekday_number = _WEEKDAY_NUMBERS.get(weekday.group(1).lower())
-        if weekday_number is None:
+    shift: timedelta | None = None
+    page_now = now
+    if page_offset_minutes is not None:
+        shift = timedelta(minutes=int(page_offset_minutes) + _BEIJING_OFFSET_MINUTES)
+        page_now = now - shift
+    day, has_date_leg = _chat_label_date(raw, page_now)
+    if day is None:
+        if has_date_leg:
             return None
-        day = (reference - timedelta(days=(reference.weekday() - weekday_number) % 7)).date()
-        return datetime(day.year, day.month, day.day, hour, minute)
-    month_day = _CHAT_MONTH_DAY_RE.search(raw)
-    if month_day:
-        month = _MONTH_NUMBERS.get(month_day.group(1)[:3].lower())
-        if month is None:
-            return None
-        day_number = int(month_day.group(2))
-        year_text = month_day.group(3)
-        try:
-            parsed = datetime(
-                int(year_text) if year_text else reference.year,
-                month,
-                day_number,
-                hour,
-                minute,
-            )
-        except ValueError:
-            return None
-        if year_text is None and parsed.date() > reference.date():
-            parsed = parsed.replace(year=parsed.year - 1)
-        return parsed
-    return None
+        day = page_now.date()
+    parsed = datetime(day.year, day.month, day.day, hour, minute)
+    return parsed + shift if shift is not None else parsed
 
 
 def self_message_in_window_predicate(
@@ -701,6 +825,7 @@ def self_message_in_window_predicate(
             sent_at = parse_chat_time_text(
                 str(message.get("time_text") or ""),
                 now=now,
+                page_offset_minutes=message.get("page_offset_minutes"),
             )
             if sent_at is None:
                 continue
