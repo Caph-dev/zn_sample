@@ -165,9 +165,12 @@ FILL_MESSAGE_JS_TMPL = r"""
 """
 
 # 样品申请等业务页右下角「聊天数」浮动入口 → 弹出聊天数面板。
+# 弹层关闭后 DOM 节点会留在页面上（宽高为 0），所以「已开」判断必须带可见性，
+# 否则会把隐藏的旧面板当成还开着，既不重新点开、又找不到里面的按钮（2026-09-10 实测）。
 OPEN_CHAT_PANEL_JS = r"""
 (() => {
-  if ([...document.querySelectorAll('.core-modal-content')].some(m => /最近联系人/.test(m.innerText || ''))) {
+  if ([...document.querySelectorAll('.core-modal-content')].some(m =>
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || ''))) {
     return JSON.stringify({ok: true, already: true});
   }
   const entry = [...document.querySelectorAll('div')].find(el => {
@@ -209,7 +212,7 @@ OPEN_CHAT_PANEL_JS = r"""
 CLICK_NEW_MESSAGE_BTN_JS = r"""
 (() => {
   const modal = [...document.querySelectorAll('.core-modal-content')].find(m =>
-    /最近联系人/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || '')
   );
   if (!modal) return JSON.stringify({ok: false, reason: 'no-chat-panel'});
   const btn = [...modal.querySelectorAll('button')].find(b => {
@@ -242,7 +245,7 @@ CLICK_NEW_MESSAGE_BTN_JS = r"""
 FILL_NEW_MESSAGE_SEARCH_JS_TMPL = r"""
 ((value) => {
   const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
-    /新消息|发送给/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /新消息|发送给/.test(m.innerText || '')
   );
   if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
   const input = drawer.querySelector('input.core-input');
@@ -268,12 +271,15 @@ FILL_NEW_MESSAGE_SEARCH_JS_TMPL = r"""
 # 面板还在动画里就去找 edit 按钮，返回 no-chat-panel），改为短轮询就绪。
 CHAT_PANEL_READY_TIMEOUT_SECONDS = 20.0
 NEW_MESSAGE_DRAWER_TIMEOUT_SECONDS = 20.0
+# 连续发送时抽屉里的搜索结果异步刷新：只点一次实测会落空（2026-09-10 批量第 3 条），
+# 因此结果行也要短轮询；脚本按达人名匹配，不会点到上一条的旧结果。
+NEW_MESSAGE_RESULT_TIMEOUT_SECONDS = 20.0
 READY_POLL_INTERVAL_SECONDS = 0.5
 
 CHAT_PANEL_READY_JS = r"""
 (() => {
   const modal = [...document.querySelectorAll('.core-modal-content')].find(m =>
-    /最近联系人/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || '')
   );
   return JSON.stringify({ok: !!modal});
 })()
@@ -282,7 +288,7 @@ CHAT_PANEL_READY_JS = r"""
 NEW_MESSAGE_DRAWER_READY_JS = r"""
 (() => {
   const drawer = [...document.querySelectorAll('.core-drawer-content')].find(d =>
-    /新消息|发送给/.test(d.innerText || '')
+    d.getBoundingClientRect().width > 0 && /新消息|发送给/.test(d.innerText || '')
   );
   return JSON.stringify({ok: !!drawer});
 })()
@@ -294,7 +300,7 @@ CLICK_NEW_MESSAGE_RESULT_JS_TMPL = r"""
   const query = String(want || '').trim().toLowerCase();
   if (!query) return JSON.stringify({ok: false, reason: 'empty-query'});
   const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
-    /新消息|发送给/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /新消息|发送给/.test(m.innerText || '')
   );
   if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
   const unwrapField = value => {
@@ -945,6 +951,38 @@ def _wait_for_page_flag(
         time.sleep(max(0.05, interval))
 
 
+def _click_new_message_result(
+    store_id: str,
+    creator_key: str,
+    *,
+    timeout: float | None = None,
+    interval: float = 1.0,
+) -> dict[str, Any]:
+    """Click the search result row, retrying while the list re-renders.
+
+    The drawer refreshes its results asynchronously; in a batch run the next
+    creator's row can still be missing 2.5s after typing, which used to abort
+    the whole run. The script matches by creator name, so a retry can never
+    click the previous creator's leftover row.
+    """
+    effective_timeout = (
+        NEW_MESSAGE_RESULT_TIMEOUT_SECONDS if timeout is None else float(timeout)
+    )
+    deadline = time.monotonic() + max(0.0, effective_timeout)
+    last: dict[str, Any] = {}
+    while True:
+        result = zclaw_exec(
+            store_id,
+            CLICK_NEW_MESSAGE_RESULT_JS_TMPL.replace("%WANT%", _js_str(creator_key)),
+        )
+        if isinstance(result, dict) and result.get("ok"):
+            return result
+        last = result if isinstance(result, dict) else {"raw": str(result)[:200]}
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(max(0.2, interval))
+
+
 def _try_open_via_new_message(
     store_id: str,
     creator_key: str,
@@ -983,11 +1021,8 @@ def _try_open_via_new_message(
     if not isinstance(filled, dict) or not filled.get("ok"):
         return {"ok": False, "error": "发送给输入失败", "fill": filled}
     time.sleep(max(1.0, wait))
-    clicked = zclaw_exec(
-        store_id,
-        CLICK_NEW_MESSAGE_RESULT_JS_TMPL.replace("%WANT%", _js_str(name)),
-    )
-    if not isinstance(clicked, dict) or not clicked.get("ok"):
+    clicked = _click_new_message_result(store_id, name)
+    if not clicked.get("ok"):
         return {"ok": False, "error": "结果行未找到或点击失败", "click": clicked}
     result_creator_id = str(clicked.get("result_creator_id") or "").strip()
     expected_creator_id = str(creator_id or result_creator_id).strip()

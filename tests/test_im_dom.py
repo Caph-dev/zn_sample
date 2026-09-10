@@ -10,14 +10,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.im_dom import (  # noqa: E402
+    CHAT_PANEL_READY_JS,
+    CLICK_NEW_MESSAGE_BTN_JS,
     CLICK_NEW_MESSAGE_RESULT_JS_TMPL,
     composer_identity_matches,
     composer_ready,
     conversation_matches,
+    FILL_NEW_MESSAGE_SEARCH_JS_TMPL,
     INSPECT_IM_JS,
     im_thread_text,
     inspect_current_thread,
     inspected_messages,
+    NEW_MESSAGE_DRAWER_READY_JS,
+    OPEN_CHAT_PANEL_JS,
     open_conversation_via_new_message,
     parse_chat_time_text,
     search_result_identity_from_data_source,
@@ -186,6 +191,20 @@ class ImOpenPathTests(unittest.TestCase):
         self.assertIn("if (messageScope) {", INSPECT_IM_JS)
         self.assertIn("threadMessages", INSPECT_IM_JS)
 
+    def test_overlay_lookups_require_a_visible_node(self) -> None:
+        """弹层关闭后 DOM 还在（宽高 0）：只看文字会把旧面板当成还开着。"""
+        scripts = {
+            "open_chat_panel": OPEN_CHAT_PANEL_JS,
+            "click_new_message_btn": CLICK_NEW_MESSAGE_BTN_JS,
+            "fill_new_message_search": FILL_NEW_MESSAGE_SEARCH_JS_TMPL,
+            "chat_panel_ready": CHAT_PANEL_READY_JS,
+            "new_message_drawer_ready": NEW_MESSAGE_DRAWER_READY_JS,
+            "click_new_message_result": CLICK_NEW_MESSAGE_RESULT_JS_TMPL,
+        }
+        for name, script in scripts.items():
+            with self.subTest(script=name):
+                self.assertIn("getBoundingClientRect().width > 0", script)
+
     def test_new_message_result_identity_binds_array_item_to_row(self) -> None:
         script = CLICK_NEW_MESSAGE_RESULT_JS_TMPL
         self.assertNotIn(
@@ -313,7 +332,11 @@ class ImOpenPathTests(unittest.TestCase):
             },
         ]
 
-        with patch("lib.im_dom._wait_for_page_flag", return_value=True):
+        with (
+            patch("lib.im_dom._wait_for_page_flag", return_value=True),
+            # 结果行重试的超时归零：每个候选只点一次，重试行为另有专门测试。
+            patch("lib.im_dom.NEW_MESSAGE_RESULT_TIMEOUT_SECONDS", 0.0),
+        ):
             result = open_conversation_via_new_message(
                 "store-test",
                 creator_id="creator-id",
@@ -325,10 +348,36 @@ class ImOpenPathTests(unittest.TestCase):
         self.assertEqual(inspect.call_count, 2)
 
     @patch("lib.im_dom.time.sleep", return_value=None)
+    @patch("lib.im_dom.zclaw_exec")
+    def test_result_row_click_retries_until_the_row_renders(self, execute, _sleep) -> None:
+        """连续发送时结果行异步刷新：点空要重试，不能直接中断整批。"""
+        from lib.im_dom import _click_new_message_result
+
+        execute.side_effect = [
+            {"ok": False, "reason": "no-result-row"},
+            {"ok": False, "reason": "no-result-row"},
+            {"ok": True, "via": "react-onClick", "result_creator_id": "creator-1"},
+        ]
+        result = _click_new_message_result("store", "creator_handle", timeout=30)
+        self.assertTrue(result["ok"])
+        self.assertEqual(execute.call_count, 3)
+
+    @patch("lib.im_dom.time.sleep", return_value=None)
+    @patch("lib.im_dom.zclaw_exec")
+    def test_result_row_click_gives_up_at_the_deadline(self, execute, _sleep) -> None:
+        from lib.im_dom import _click_new_message_result
+
+        execute.side_effect = [{"ok": False, "reason": "no-result-row"}] * 3
+        result = _click_new_message_result("store", "creator_handle", timeout=0)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("reason"), "no-result-row")
+        self.assertEqual(execute.call_count, 1)
+
     @patch("lib.im_dom.inspect_im")
+    @patch("lib.im_dom.time.sleep", return_value=None)
     @patch("lib.im_dom.zclaw_exec")
     def test_open_conversation_reports_a_panel_that_never_renders(
-        self, execute, inspect, _sleep
+        self, execute, _sleep, inspect
     ) -> None:
         """面板点了但一直不出现时要报明确错误，不能继续去点 edit 按钮。"""
         inspect.return_value = {
