@@ -18,7 +18,6 @@ import {
   BASIC_KEYS,
   BASIC_LABELS,
   BASIC_UNITS,
-  DEFAULT_CATEGORIES,
   summaryRows,
   validateDraft,
 } from '../ruleModel';
@@ -263,19 +262,6 @@ export function RuleConfigPanel({
                   </Stack>
                 </GridSpan>
               </Grid>
-              <Stack gap={1}>
-                <CheckboxInput
-                  size="sm"
-                  label="类目（命中任一项，默认全部白名单类目）"
-                  value={rule.basic.categories.enabled}
-                  onChange={(checked) =>
-                    updateBasic('categories', {
-                      enabled: checked,
-                      values: (options?.categories ?? DEFAULT_CATEGORIES).slice(),
-                    })
-                  }
-                />
-              </Stack>
             </Stack>
 
             <Stack gap={2}>

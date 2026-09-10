@@ -125,10 +125,10 @@ class ExecutionBoundaryTests(unittest.TestCase):
             self._create(limit=0)
         self.assertEqual(context.exception.code, "invalid-limit")
 
-    def test_limit_over_cap_rejected(self) -> None:
-        with self.assertRaises(AutoApprovalServiceError) as context:
-            self._create(limit=99)
-        self.assertEqual(context.exception.code, "limit-too-large")
+    def test_limit_has_no_upper_cap(self) -> None:
+        """限量只要求正整数，不再有 10 条上限。"""
+        created = self._create(limit=99)
+        self.assertIn("execution_id", created)
 
     def test_selection_over_limit_rejected(self) -> None:
         with self.assertRaises(AutoApprovalServiceError) as context:

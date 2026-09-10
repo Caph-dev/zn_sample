@@ -68,7 +68,6 @@ export interface OptionsPayload {
   video_live: Record<string, {min: number; max: number; default?: number}>;
   content: {days: number[]; min_related: number[]};
   limits: {
-    execute_limit_max: number;
     execute_limit_default: number;
     preview_freshness_seconds: number;
   };

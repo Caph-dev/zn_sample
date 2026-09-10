@@ -13,10 +13,9 @@ import {Text} from '@astryxdesign/core/Text';
 import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
-import type {ExecutionPayload, OptionsPayload, PreviewPayload} from '../types';
+import type {ExecutionPayload, PreviewPayload} from '../types';
 
 interface ExecutionPanelProps {
-  options: OptionsPayload | null;
   preview: PreviewPayload | null;
   previewInvalidated: boolean;
   selection: string[];
@@ -82,7 +81,6 @@ function splitSummaryLine(line: string): {label: string; value: string} {
 }
 
 export function ExecutionPanel({
-  options,
   preview,
   previewInvalidated,
   selection,
@@ -103,7 +101,6 @@ export function ExecutionPanel({
   reconcileError,
 }: ExecutionPanelProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const limitMax = options?.limits.execute_limit_max ?? 10;
   const canExecute = useMemo(() => {
     if (preview === null || previewInvalidated) {
       return false;
@@ -158,8 +155,7 @@ export function ExecutionPanel({
             value={limit}
             onChange={onLimitChange}
             min={1}
-            max={limitMax}
-            description={`上限 ${limitMax}；0/负值不会变成不限`}
+            description="正整数（≥1），无上限；所选条数不得超过它"
             isDisabled={execution !== null}
           />
           <Switch

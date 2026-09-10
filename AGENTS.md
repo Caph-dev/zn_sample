@@ -88,7 +88,7 @@
 
 - **隔离，不是默认**：正式 SOP、`filters.Criteria`、0/1/2/3 入口行为不变。自定义规则只绑定本次任务快照；关闭检查 = not_checked，≠通过。正式入口与旧导出继续严格走 `_guard_content_review()`；本页批准只接受服务器生成的自定义快照（preview 信封 + rule hash + 逐项证据），禁止前端布尔量绕过内容门禁。
 - **规则 schema 严格**（`validate_custom_rule`）：未知字段、非有限数字、非法范围、空条件组合、非主推商品都拒绝。至少启用一项检查；比较符第一版固定 `>`（客单价为区间）；`video_live` 组 either/both，both 须两侧都启用。
-- **第一版后端边界**：执行限量 1–10；预览新鲜度 24 小时；内容组 days 仅 7、min_related 仅 4（与内容审核库一致，前端锁定）；数值上限见 `BASIC_LIMITS`/`VIDEO_LIVE_LIMITS`。
+- **第一版后端边界**：执行限量为正整数（默认 1，无上限）；预览新鲜度 24 小时；内容组 days 仅 7、min_related 仅 4（与内容审核库一致，前端锁定）；数值上限见 `BASIC_LIMITS`/`VIDEO_LIVE_LIMITS`。
 - **判定语义**：启用指标缺失或违反 → failed（不通过）；完整满足 → passed；仅详情采集失败（`detail_error`）导致缺失 → needs_review，且批次禁止执行。视频/直播任一侧通过即过；AND 组已知失败即失败。主推/当前款/`can_be_approved=false`/缺 ID 为**执行拦截**（blocked），不属审核项。
 - **按需采集**：仅 video/live 组启用才拉详情；详情字段优先（履约 `est_post_rate`、官方 GPM、客单价 `aov_detail`），缺失回退列表口径（GPM 近似标记 source=list-proxy）。内容审核只跑自定义已通过行，与正式链路同一 `review_creator_rows`/`validate_content_review` 证据。
 - **执行边界**：服务端校验 preview 完成/完整/新鲜 + 候选 ⊆ eligible + 限量 + 键入 `y` + 幂等键（重复点击/重试去重）；脚本内再验信封/店铺/hash、逐行复算结论、hero 重查、产品解析、查重、`check_pending_application_api` 预检后批准（`--write-source api` 固定）；批准未知 → 不写飞书、不自动重试。写飞书默认关，目标仍「达人关系管理(新)」。reconcile 复用正式 confirm 管线（不重批）。

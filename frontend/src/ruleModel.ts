@@ -97,8 +97,7 @@ export function buildStandardRule(options: OptionsPayload | null): RuleDraft {
 /**
  * UI 固定项归一化：
  * - 视频/直播组逻辑固定「任一侧达标」（选择框已移除）；旧草稿存 both 会被判为已修改，需重新筛查。
- * - 类目选择框已移除：启用时固定使用全部白名单类目。
- * - 类目按字典序排序：后端快照 `rule.to_dict()` 会对类目 `sorted()`，保持同序才不会误判「结果已失效」。
+ * - 类目固定启用、固定使用全部白名单类目（选择框已移除），按字典序排序以对齐后端快照的 `sorted()`。
  */
 export function normalizeRule(
   rule: RuleDraft,
@@ -113,9 +112,8 @@ export function normalizeRule(
       ...rule.basic,
       categories: {
         ...rule.basic.categories,
-        values: rule.basic.categories.enabled
-          ? allCategories
-          : rule.basic.categories.values,
+        enabled: true,
+        values: allCategories,
       },
     },
   };

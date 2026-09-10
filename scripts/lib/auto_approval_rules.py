@@ -29,7 +29,6 @@ SCHEMA_VERSION = 1
 MODE_CUSTOM = "custom"
 
 # 第一版固定的后端边界（P0 决策；改这里必须同步 AGENTS.md 与页面 options）。
-EXECUTE_LIMIT_MAX = 10
 EXECUTE_LIMIT_DEFAULT = 1
 PREVIEW_FRESHNESS_SECONDS = 24 * 60 * 60  # 证据新鲜度：执行时预览须在 24 小时内完成
 PRODUCT_IDS_MAX = 20

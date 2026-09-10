@@ -371,7 +371,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           />
         )}
         <ExecutionPanel
-          options={options}
           preview={preview !== null && preview.status === 'completed' ? preview : null}
           previewInvalidated={previewInvalidated}
           selection={selection}

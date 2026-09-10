@@ -28,7 +28,6 @@ from assistant.paths import ensure_user_dirs
 
 # 服务端固定边界（与 lib.auto_approval_rules 一致；重复声明以便离线校验）。
 PREVIEW_FRESHNESS_SECONDS = 24 * 60 * 60
-EXECUTE_LIMIT_MAX = 10
 EXECUTE_LIMIT_DEFAULT = 1
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 CONFIRMATION_ANSWERS = frozenset({"y", "yes"})
@@ -136,7 +135,6 @@ def options_payload(session_factory=None) -> dict[str, Any]:
         BASIC_LIMITS,
         CONTENT_ALLOWED_DAYS,
         CONTENT_ALLOWED_MIN_RELATED,
-        EXECUTE_LIMIT_MAX,
         EXECUTE_LIMIT_DEFAULT,
         PREVIEW_FRESHNESS_SECONDS,
         VIDEO_LIVE_LIMITS,
@@ -159,7 +157,6 @@ def options_payload(session_factory=None) -> dict[str, Any]:
             "min_related": list(CONTENT_ALLOWED_MIN_RELATED),
         },
         "limits": {
-            "execute_limit_max": EXECUTE_LIMIT_MAX,
             "execute_limit_default": EXECUTE_LIMIT_DEFAULT,
             "preview_freshness_seconds": PREVIEW_FRESHNESS_SECONDS,
         },
@@ -451,13 +448,7 @@ def create_execution(
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise AutoApprovalServiceError(
             "invalid-limit",
-            f"限量必须为正整数（默认 {EXECUTE_LIMIT_DEFAULT}，上限 {EXECUTE_LIMIT_MAX}）。",
-            status_code=400,
-        )
-    if limit > EXECUTE_LIMIT_MAX:
-        raise AutoApprovalServiceError(
-            "limit-too-large",
-            f"限量超过上限 {EXECUTE_LIMIT_MAX}。",
+            f"限量必须为正整数（默认 {EXECUTE_LIMIT_DEFAULT}，无上限）。",
             status_code=400,
         )
     if len(apply_ids) > limit:
