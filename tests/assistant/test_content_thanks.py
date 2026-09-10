@@ -124,6 +124,24 @@ class ContentThanksDecisionTests(unittest.TestCase):
         self.assertTrue(looks_like_uncertain_thanks("Thank you so much for the video!"))
         self.assertFalse(looks_like_content_thanks("Thank you so much for the video!"))
 
+    def test_nearby_thanks_and_content_word_still_hold(self) -> None:
+        self.assertTrue(
+            looks_like_uncertain_thanks("Thank you so much for the video you posted!")
+        )
+        self.assertTrue(
+            looks_like_uncertain_thanks("Gracias por tu video, lo vimos ayer.")
+        )
+
+    def test_distant_thanks_and_content_word_do_not_hold(self) -> None:
+        far_apart = (
+            "Could you please share your WhatsApp or email so we can stay in touch "
+            "during the collaboration? Thank you!"
+            + " filler " * 40
+            + "For this product, our only request is that you create 2-3 short videos "
+            "within 1 week."
+        )
+        self.assertFalse(looks_like_uncertain_thanks(far_apart))
+
     def test_preview_decision_never_sends_or_writes(self) -> None:
         decision = decide_content_thanks_action(
             feishu_status="待发布",

@@ -21,7 +21,11 @@ from assistant.jobs.registry import HandlerFailure, JobCancelled, get_handler
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 5.0
-STALE_JOB_TIMEOUT_SECONDS = 60.0
+HEARTBEAT_RETRY_DELAY_SECONDS = 1.0
+HEARTBEAT_RETRY_ATTEMPTS = 3
+# 写锁最长会被一个长事务占用 busy_timeout（30s），心跳可能连续错过若干拍；
+# 阈值必须明显大于该等待窗口，否则正在跑的任务会被误判为中断。
+STALE_JOB_TIMEOUT_SECONDS = 150.0
 STALE_REAPER_INTERVAL_SECONDS = 30.0
 WORKER_POLL_INTERVAL_SECONDS = 0.2
 TERMINAL_STATUSES = frozenset(
@@ -113,24 +117,48 @@ def _finish_job(
         session.commit()
 
 
+def _refresh_heartbeat(session_factory, job_id: str) -> bool:
+    """Refresh one running job; False once the job is gone or already finished."""
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        if job is None or job.status != "running":
+            return False
+        job.heartbeat_at = utc_now()
+        session.commit()
+    return True
+
+
 def _heartbeat_loop(
     session_factory,
     job_id: str,
     stop_event: threading.Event,
     *,
     interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    retry_delay: float = HEARTBEAT_RETRY_DELAY_SECONDS,
+    attempts: int = HEARTBEAT_RETRY_ATTEMPTS,
 ) -> None:
-    """Refresh one running job while its read-only handler is blocked."""
+    """Refresh one running job while its read-only handler is blocked.
+
+    长事务会短暂占住写锁，所以一拍失败先重试；全部重试也失败才记一条 warning
+    （不打堆栈），心跳由此只会延后，不会中断任务。
+    """
     while not stop_event.wait(interval):
-        try:
-            with session_factory() as session:
-                job = session.get(Job, job_id)
-                if job is None or job.status != "running":
+        for attempt in range(1, attempts + 1):
+            try:
+                if not _refresh_heartbeat(session_factory, job_id):
                     return
-                job.heartbeat_at = utc_now()
-                session.commit()
-        except Exception:
-            logger.exception("job heartbeat failed job_id=%s", job_id)
+                break
+            except Exception as error:
+                if attempt >= attempts:
+                    logger.warning(
+                        "job heartbeat delayed job_id=%s attempts=%s error=%s",
+                        job_id,
+                        attempt,
+                        error,
+                    )
+                    break
+                if stop_event.wait(retry_delay):
+                    return
 
 
 def _clear_active_job_state(job_id: str) -> None:

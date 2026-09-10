@@ -9,7 +9,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 
-from assistant.database.models import Job
+from assistant.database.models import FollowupTask, Job
 from assistant.jobs.locks import create_or_get_pending_job, request_cancellation
 from assistant.jobs.progress import list_events
 from assistant.jobs.registry import WRITE_JOB_TYPES
@@ -25,6 +25,7 @@ OPERATOR_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "operator_followup_send",
     }
 )
 
@@ -48,6 +49,7 @@ def _job_payload(job: Job) -> dict:
         "error_code": job.error_code,
         "error_summary": job.error_summary,
         "result_summary": job.result_summary,
+        "log_path": job.log_path or "",
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
@@ -174,6 +176,47 @@ def create_operator_tracking(
         job_type="operator_tracking",
         request_payload={"force": force_requested},
     )
+
+
+@router.post("/api/jobs/followups/send")
+def create_followup_send(
+    request: Request,
+    confirmation: str = Form(default=""),
+    task_id: int = Form(default=0),
+) -> dict:
+    """Send exactly one follow-up task; task_id stays server-validated."""
+    if confirmation.strip().lower() not in {"y", "yes"}:
+        raise HTTPException(status_code=400, detail="operator-confirmation-required")
+    normalized_task_id = int(task_id)
+    if normalized_task_id <= 0:
+        raise HTTPException(status_code=400, detail="followup-task-required")
+    session_factory = _session_factory(request)
+    with session_factory() as session:
+        if session.get(FollowupTask, normalized_task_id) is None:
+            raise HTTPException(status_code=404, detail="followup-task-not-found")
+    job_id, deduplicated = create_or_get_pending_job(
+        session_factory,
+        job_type="operator_followup_send",
+        store_id=None,
+        result_summary=json.dumps(
+            {"task_id": normalized_task_id},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+    if deduplicated:
+        with session_factory() as session:
+            existing_job = session.get(Job, job_id)
+        try:
+            existing_payload = json.loads(str(existing_job.result_summary or "{}"))
+        except json.JSONDecodeError:
+            existing_payload = {}
+        if (
+            isinstance(existing_payload, dict)
+            and int(existing_payload.get("task_id") or 0) != normalized_task_id
+        ):
+            raise HTTPException(status_code=409, detail="followup-send-busy")
+    return {"job_id": job_id, "deduplicated": deduplicated}
 
 
 @router.get("/api/jobs/{job_id}")

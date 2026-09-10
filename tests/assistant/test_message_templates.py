@@ -81,6 +81,22 @@ class FollowupMessageTemplateTests(unittest.TestCase):
         )
         self.assertIn("promoción", rendered_message)
 
+    def test_reminder_templates_greet_with_clean_spacing(self) -> None:
+        """D+3 / D+7 提醒话术的问候语：Hi/Hola 后有空隙、名字与 ! 之间不留空隙。
+
+        2026-09-10 实测渲染出「Himaideediaz ! ❤️」；SOP 与模板已同步修正。
+        """
+        reminder_keys = sorted(
+            key for key in message_templates._TEMPLATES if key.startswith("unpublished_")
+        )
+        self.assertTrue(reminder_keys)
+        for template_key in reminder_keys:
+            with self.subTest(template_key=template_key):
+                first_line = render_followup_message(
+                    template_key, creator_name="Creator"
+                ).splitlines()[0].strip()
+                self.assertRegex(first_line, r"^(Hi|Hola) Creator! ❤️$")
+
     def test_video_found_includes_content_url_without_extra_copy(self) -> None:
         content_url = "https://example.test/content/123"
         rendered_message = render_followup_message(

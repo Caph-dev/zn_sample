@@ -113,6 +113,7 @@ export interface JobDetailData extends JobRow {
   progress_message: string;
   error_summary: string;
   error_code: string;
+  log_path: string;
   is_operator_job: boolean;
   is_active: boolean;
 }
@@ -163,6 +164,7 @@ export interface FollowupDetailData extends FollowupRow {
   main_order_id: string;
   tracking_display: string;
   delivered_at: string;
+  delivered_text: string;
   scheduled_label: string;
   platform_status_text: string;
   creator_type_label: string;
@@ -170,7 +172,18 @@ export interface FollowupDetailData extends FollowupRow {
   attachment_url: string;
   note: string;
   review_label: string;
+  send_result: string;
+  send_result_label: string;
+  preview_state: string;
+  preview_label: string;
+  preview_at: string;
+  current_stage_label: string;
+  current_stage_due: string;
+  current_task_url: string;
+  current_stage_note: string;
+  send_ready: boolean;
   can_send: boolean;
+  can_acknowledge: boolean;
   can_list: boolean;
   is_unfulfilled_stage: boolean;
 }

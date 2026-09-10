@@ -6,8 +6,20 @@ from datetime import datetime
 
 EMPTY_STATUS_DISPLAY = "-"
 MARKED_SENT_RESULT = "marked-sent"
+PLATFORM_SENT_RESULT = "platform-sent"
+SEND_UNKNOWN_RESULT = "send-unknown"
+SENDING_RESULT = "sending"
 LISTED_RESULT = "listed"
-COMPLETED_LOCAL_RESULTS = frozenset({MARKED_SENT_RESULT, LISTED_RESULT})
+# D+15 未履约：飞书合作状态已写成「未发布」并回读确认。
+UNFULFILLED_WRITTEN_RESULT = "unfulfilled-written"
+COMPLETED_RESULTS = frozenset(
+    {
+        MARKED_SENT_RESULT,
+        PLATFORM_SENT_RESULT,
+        LISTED_RESULT,
+        UNFULFILLED_WRITTEN_RESULT,
+    }
+)
 SUPERSEDED_REASON = "superseded_by_later_stage"
 
 FOLLOWUP_STATUS_LABELS = {
@@ -60,6 +72,23 @@ FOLLOWUP_ACTION_LABELS = {
 FOLLOWUP_ACTION_COMPLETED_LABELS = {
     "send_message": "已发跟进私信",
     "list_only": "已出名单给业务",
+    "acknowledge_content": "已发送内容感谢",
+    "mark_unfulfilled": "已写飞书「未发布」",
+}
+
+_COMPLETED_RESULT_SUFFIXES = {
+    PLATFORM_SENT_RESULT: "（平台确认）",
+    MARKED_SENT_RESULT: "（本地标记）",
+    UNFULFILLED_WRITTEN_RESULT: "（飞书确认）",
+}
+
+FOLLOWUP_SEND_RESULT_LABELS = {
+    PLATFORM_SENT_RESULT: "平台已确认发送",
+    MARKED_SENT_RESULT: "本地人工标记",
+    SEND_UNKNOWN_RESULT: "发送结果未确认",
+    SENDING_RESULT: "发送中",
+    LISTED_RESULT: "已出名单给业务",
+    UNFULFILLED_WRITTEN_RESULT: "飞书合作状态已写未发布",
 }
 
 CREATOR_TYPE_LABELS = {
@@ -76,6 +105,13 @@ REVIEW_REASON_LABELS = {
     "missing_template": "当前动作没有可用话术",
     "missing_language": "语言无法可靠确认，请先选定英语或西班牙语",
     "low_confidence_language": "语言置信度不足，请先选定英语或西班牙语",
+    "send_unknown_needs_review": "发送结果未确认；请先人工核对会话，勿自动重发",
+    "send_interrupted": "上次发送未完成（进程中断）；请先人工核对会话，勿自动重发",
+    "image_send_failed": "配图发送失败；请人工在会话里补发图片，勿重发话术",
+    "content_thanks_already_sent": "会话里已有感谢话术，疑似达人已出内容；请先完成内容确认，确认后本提醒会被抑制",
+    "uncertain_thanks_needs_review": "会话里出现感谢类消息；请先人工核对是否已出内容，再决定是否发送",
+    "stale_stage": "阶段已过期（已有更晚的日历节点到期）；本条不会自动发送，请先「生成今日跟进待办」或人工跳过",
+    "feishu_write_failed": "飞书合作状态没有写成（守卫拒绝、匹配到多行/无行或接口报错）；请在飞书人工核对，勿重复点击",
 }
 
 SUPPRESSED_REASON_LABELS = {
@@ -109,7 +145,7 @@ def followup_action_completed(
     sent_at: datetime | None = None,
     send_result: str = "",
 ) -> bool:
-    return sent_at is not None or send_result in COMPLETED_LOCAL_RESULTS
+    return sent_at is not None or send_result in COMPLETED_RESULTS
 
 
 def followup_action_display(
@@ -117,12 +153,21 @@ def followup_action_display(
     *,
     sent_at: datetime | None = None,
     send_result: str = "",
+    status: str = "",
+    suppressed_reason: str = "",
 ) -> str:
+    if status == "suppressed":
+        suppressed_label = SUPPRESSED_REASON_LABELS.get(suppressed_reason, "")
+        return f"不再发送（{suppressed_label}）" if suppressed_label else "不再发送"
     if followup_action_completed(sent_at=sent_at, send_result=send_result):
         completed_label = FOLLOWUP_ACTION_COMPLETED_LABELS.get(action_kind)
         if completed_label:
-            return completed_label
+            return f"{completed_label}{_COMPLETED_RESULT_SUFFIXES.get(send_result, '')}"
     return FOLLOWUP_ACTION_LABELS.get(action_kind, action_kind or "")
+
+
+def followup_send_result_label(send_result: str) -> str:
+    return FOLLOWUP_SEND_RESULT_LABELS.get(send_result, send_result or "")
 
 
 def followup_action_tone(
@@ -130,7 +175,11 @@ def followup_action_tone(
     *,
     sent_at: datetime | None = None,
     send_result: str = "",
+    status: str = "",
+    suppressed_reason: str = "",
 ) -> str:
+    if status == "suppressed":
+        return "neutral"
     if followup_action_completed(sent_at=sent_at, send_result=send_result):
         if action_kind in FOLLOWUP_ACTION_COMPLETED_LABELS:
             return "success"

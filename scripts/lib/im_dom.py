@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import re
 import time
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
 
 from .zclaw import zclaw_exec
 
@@ -79,6 +81,31 @@ INSPECT_IM_JS = r"""
     return null;
   };
   const currentIdentity = identityFromFiber(input);
+  const messageScope = (() => {
+    if (!input) return null;
+    for (let node = input.parentElement, depth = 0; node && depth < 14; depth++, node = node.parentElement) {
+      if (node.classList && node.classList.contains('chatd-root')) return node;
+    }
+    return document;
+  })();
+  const threadMessages = [];
+  let lastSeenTime = '';
+  if (messageScope) {
+    for (const row of messageScope.querySelectorAll('.chatd-message')) {
+      const timeNode = row.querySelector('.chatd-message-time .chatd-time');
+      if (timeNode) lastSeenTime = String(timeNode.textContent || '').trim();
+      const textNode = row.querySelector('.chatd-message-body-info-message pre');
+      const messageNode = row.querySelector('.chatd-message-body-info-message');
+      threadMessages.push({
+        is_self: row.classList.contains('chatd-message--right')
+          || !!row.querySelector('.chatd-bubble-main--self'),
+        text: String((textNode || messageNode || {}).textContent || '')
+          .replace(/\s+/g, ' ').trim().slice(0, 300),
+        has_image: !!row.querySelector('.chatd-imageMessage'),
+        time_text: lastSeenTime
+      });
+    }
+  }
   return JSON.stringify({
     href: location.href,
     title: document.title || '',
@@ -89,7 +116,11 @@ INSPECT_IM_JS = r"""
     selected_preview: selected ? String(selected.innerText || '').slice(0, 200) : '',
     selected_user_id: selectedUserId,
     selected_conversation_id: selectedConversationId,
-    thread_text: threadText.slice(0, 4000)
+    thread_text: threadText.slice(0, 4000),
+    thread_text_tail: threadText.slice(-4000),
+    page_offset_minutes: new Date().getTimezoneOffset(),
+    message_count: threadMessages.length,
+    messages: threadMessages.slice(-60)
   });
 })()
 """
@@ -134,9 +165,12 @@ FILL_MESSAGE_JS_TMPL = r"""
 """
 
 # 样品申请等业务页右下角「聊天数」浮动入口 → 弹出聊天数面板。
+# 弹层关闭后 DOM 节点会留在页面上（宽高为 0），所以「已开」判断必须带可见性，
+# 否则会把隐藏的旧面板当成还开着，既不重新点开、又找不到里面的按钮（2026-09-10 实测）。
 OPEN_CHAT_PANEL_JS = r"""
 (() => {
-  if ([...document.querySelectorAll('.core-modal-content')].some(m => /最近联系人/.test(m.innerText || ''))) {
+  if ([...document.querySelectorAll('.core-modal-content')].some(m =>
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || ''))) {
     return JSON.stringify({ok: true, already: true});
   }
   const entry = [...document.querySelectorAll('div')].find(el => {
@@ -178,7 +212,7 @@ OPEN_CHAT_PANEL_JS = r"""
 CLICK_NEW_MESSAGE_BTN_JS = r"""
 (() => {
   const modal = [...document.querySelectorAll('.core-modal-content')].find(m =>
-    /最近联系人/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || '')
   );
   if (!modal) return JSON.stringify({ok: false, reason: 'no-chat-panel'});
   const btn = [...modal.querySelectorAll('button')].find(b => {
@@ -211,7 +245,7 @@ CLICK_NEW_MESSAGE_BTN_JS = r"""
 FILL_NEW_MESSAGE_SEARCH_JS_TMPL = r"""
 ((value) => {
   const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
-    /新消息|发送给/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /新消息|发送给/.test(m.innerText || '')
   );
   if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
   const input = drawer.querySelector('input.core-input');
@@ -233,13 +267,40 @@ FILL_NEW_MESSAGE_SEARCH_JS_TMPL = r"""
 })(%VALUE%)
 """
 
+# 面板 / 抽屉都是异步渲染：固定 sleep 实测不够（2026-09-10 首次预演 259 时
+# 面板还在动画里就去找 edit 按钮，返回 no-chat-panel），改为短轮询就绪。
+CHAT_PANEL_READY_TIMEOUT_SECONDS = 20.0
+NEW_MESSAGE_DRAWER_TIMEOUT_SECONDS = 20.0
+# 连续发送时抽屉里的搜索结果异步刷新：只点一次实测会落空（2026-09-10 批量第 3 条），
+# 因此结果行也要短轮询；脚本按达人名匹配，不会点到上一条的旧结果。
+NEW_MESSAGE_RESULT_TIMEOUT_SECONDS = 20.0
+READY_POLL_INTERVAL_SECONDS = 0.5
+
+CHAT_PANEL_READY_JS = r"""
+(() => {
+  const modal = [...document.querySelectorAll('.core-modal-content')].find(m =>
+    m.getBoundingClientRect().width > 0 && /最近联系人/.test(m.innerText || '')
+  );
+  return JSON.stringify({ok: !!modal});
+})()
+"""
+
+NEW_MESSAGE_DRAWER_READY_JS = r"""
+(() => {
+  const drawer = [...document.querySelectorAll('.core-drawer-content')].find(d =>
+    d.getBoundingClientRect().width > 0 && /新消息|发送给/.test(d.innerText || '')
+  );
+  return JSON.stringify({ok: !!drawer});
+})()
+"""
+
 # 「新消息」抽屉里的搜索结果行：行内 button 挂 React onClick，点击打开会话。
 CLICK_NEW_MESSAGE_RESULT_JS_TMPL = r"""
 ((want) => {
   const query = String(want || '').trim().toLowerCase();
   if (!query) return JSON.stringify({ok: false, reason: 'empty-query'});
   const drawer = [...document.querySelectorAll('.core-drawer-content')].find(m =>
-    /新消息|发送给/.test(m.innerText || '')
+    m.getBoundingClientRect().width > 0 && /新消息|发送给/.test(m.innerText || '')
   );
   if (!drawer) return JSON.stringify({ok: false, reason: 'no-new-message-drawer'});
   const unwrapField = value => {
@@ -497,6 +558,290 @@ def im_thread_text(probe: dict[str, Any] | None) -> str:
     return str(probe.get("thread_text") or "").strip()
 
 
+def im_thread_text_with_tail(probe: dict[str, Any] | None) -> str:
+    """会话正文的头 + 尾两段，用于发送确认指纹。
+
+    ``thread_text`` 只取前 4000 字符；长会话里刚发送的消息可能落在窗口之外，
+    因此发送去重与发送后确认额外拼接 ``thread_text_tail``。
+    """
+    if not isinstance(probe, dict):
+        return ""
+    head = str(probe.get("thread_text") or "").strip()
+    tail = str(probe.get("thread_text_tail") or "").strip()
+    if not tail or tail == head or head.endswith(tail):
+        return head
+    return f"{head}\n{tail}"
+
+
+def inspected_messages(probe: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return the per-message rows collected by ``INSPECT_IM_JS``.
+
+    Each row carries the page timezone offset captured by the probe
+    (``new Date().getTimezoneOffset()``) so the duplicate-window check can turn
+    a page-local label into a Beijing-day timestamp.
+    """
+    if not isinstance(probe, dict):
+        return []
+    messages = probe.get("messages")
+    if not isinstance(messages, list):
+        return []
+    offset = probe.get("page_offset_minutes")
+    try:
+        offset_minutes: int | None = int(offset) if offset is not None else None
+    except (TypeError, ValueError):
+        offset_minutes = None
+    rows: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        annotated = dict(message)
+        annotated["page_offset_minutes"] = offset_minutes
+        rows.append(annotated)
+    return rows
+
+
+_MONTH_NUMBERS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_WEEKDAY_NUMBERS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+_CN_WEEKDAY_NUMBERS = {
+    "一": 0,
+    "二": 1,
+    "三": 2,
+    "四": 3,
+    "五": 4,
+    "六": 5,
+    "日": 6,
+    "天": 6,
+}
+_ES_WEEKDAY_NUMBERS = {
+    "lun": 0,
+    "mar": 1,
+    "mié": 2,
+    "mie": 2,
+    "jue": 3,
+    "vie": 4,
+    "sáb": 5,
+    "sab": 5,
+    "dom": 6,
+}
+_RELATIVE_CHAT_DAYS = {
+    "today": 0,
+    "今天": 0,
+    "hoy": 0,
+    "yesterday": -1,
+    "昨天": -1,
+    "ayer": -1,
+    "前天": -2,
+}
+# 中文界面把上午/下午写在时刻前面（「昨天 上午5:46」），英文界面写在后面（「4:55 AM」）。
+_CN_AM_MARKERS = ("上午", "凌晨", "早上", "清晨", "早晨")
+_CN_PM_MARKERS = ("下午", "晚上", "傍晚", "夜里")
+_CN_NOON_MARKERS = ("中午",)
+_CHAT_CLOCK_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_CHAT_MERIDIEM_RE = re.compile(r"([ap])\.?\s*m\.?", re.IGNORECASE)
+_CHAT_MONTH_DAY_RE = re.compile(r"([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,\s*(\d{4}))?")
+_CHAT_WEEKDAY_RE = re.compile(r"([A-Za-z]{6,9}),")
+_CHAT_ES_WEEKDAY_RE = re.compile(r"(lun|mar|mié|mie|jue|vie|sáb|sab|dom),", re.IGNORECASE)
+_CHAT_CN_WEEKDAY_RE = re.compile(r"(?:星期|周)\s*([一二三四五六日天])")
+_CHAT_CN_MONTH_DAY_RE = re.compile(r"(?:(\d{4})\s*年)?\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+_BEIJING_OFFSET_MINUTES = 8 * 60
+
+
+def _chat_hour_with_meridiem(raw: str, hour: int) -> int:
+    """Resolve the AM/PM marker of a label (Chinese or English) to a 0–23 hour."""
+    if any(marker in raw for marker in _CN_NOON_MARKERS):
+        return 12 if hour % 12 == 0 else hour
+    is_pm = any(marker in raw for marker in _CN_PM_MARKERS)
+    is_am = any(marker in raw for marker in _CN_AM_MARKERS)
+    english = _CHAT_MERIDIEM_RE.search(raw)
+    if english is not None:
+        if english.group(1).lower() == "p":
+            is_pm = True
+        else:
+            is_am = True
+    if is_pm:
+        return hour % 12 + 12
+    if is_am:
+        return hour % 12
+    return hour
+
+
+def _shift_year_back(parsed: date) -> date | None:
+    try:
+        return parsed.replace(year=parsed.year - 1)
+    except ValueError:
+        return None
+
+
+def _chat_label_date(raw: str, page_now: datetime) -> tuple[date | None, bool]:
+    """Resolve the date part of a label.
+
+    Returns ``(day, has_date_leg)``. ``(None, False)`` means the label carries no
+    date at all (a bare clock is the page's today); ``(None, True)`` means a date
+    was written but cannot be valid, so the whole label is unusable.
+    """
+    lowered = raw.lower()
+    for label, day_offset in _RELATIVE_CHAT_DAYS.items():
+        if label in lowered:
+            return (page_now + timedelta(days=day_offset)).date(), True
+
+    weekday_number: int | None = None
+    cn_weekday = _CHAT_CN_WEEKDAY_RE.search(raw)
+    if cn_weekday is not None:
+        weekday_number = _CN_WEEKDAY_NUMBERS.get(cn_weekday.group(1))
+    if weekday_number is None:
+        es_weekday = _CHAT_ES_WEEKDAY_RE.search(raw)
+        if es_weekday is not None:
+            weekday_number = _ES_WEEKDAY_NUMBERS.get(es_weekday.group(1).lower())
+    if weekday_number is None:
+        en_weekday = _CHAT_WEEKDAY_RE.match(raw)
+        if en_weekday is not None:
+            weekday_number = _WEEKDAY_NUMBERS.get(en_weekday.group(1).lower())
+    if weekday_number is not None:
+        return (
+            page_now - timedelta(days=(page_now.weekday() - weekday_number) % 7)
+        ).date(), True
+
+    cn_month_day = _CHAT_CN_MONTH_DAY_RE.search(raw)
+    if cn_month_day is not None:
+        year_text = cn_month_day.group(1)
+        try:
+            parsed = date(
+                int(year_text) if year_text else page_now.year,
+                int(cn_month_day.group(2)),
+                int(cn_month_day.group(3)),
+            )
+        except ValueError:
+            return None, True
+        if year_text is None and parsed > page_now.date():
+            return _shift_year_back(parsed), True
+        return parsed, True
+
+    month_day = _CHAT_MONTH_DAY_RE.search(raw)
+    if month_day is not None:
+        month = _MONTH_NUMBERS.get(month_day.group(1)[:3].lower())
+        if month is None:
+            return None, True
+        year_text = month_day.group(3)
+        try:
+            parsed = date(
+                int(year_text) if year_text else page_now.year,
+                month,
+                int(month_day.group(2)),
+            )
+        except ValueError:
+            return None, True
+        if year_text is None and parsed > page_now.date():
+            return _shift_year_back(parsed), True
+        return parsed, True
+    return None, False
+
+
+def parse_chat_time_text(
+    text: str,
+    *,
+    now: datetime | None = None,
+    page_offset_minutes: int | None = None,
+) -> datetime | None:
+    """Parse one IM time label into the moment it labels, in Beijing time.
+
+    The page renders labels in its own locale and timezone. Measured on the US
+    store (2026-09-10, page timezone GMT-0700): Chinese UI shows ``上午1:43``
+    (clock only = the page's today), ``昨天 上午5:46``, ``星期二, 4:55 上午``,
+    ``9月1日 7:41`` and ``2025年9月16日 6:28``; the English UI shows
+    ``Sep 3 5:55 PM`` / ``Tuesday, 4:55 AM``. A label without a clock (``昨天``)
+    or of an unrecognized shape returns ``None`` so callers never guess a day.
+
+    ``page_offset_minutes`` is the page's ``getTimezoneOffset()``. When given,
+    the label is shifted into Beijing time first, so comparing its natural day
+    against the delivery calendar is not off by one around page midnight.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    clock = _CHAT_CLOCK_RE.search(raw)
+    if clock is None:
+        return None
+    hour = _chat_hour_with_meridiem(raw, int(clock.group(1)))
+    minute = int(clock.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    if now is None:
+        from assistant.domain.timeutil import beijing_now
+
+        now = beijing_now()
+    shift: timedelta | None = None
+    page_now = now
+    if page_offset_minutes is not None:
+        shift = timedelta(minutes=int(page_offset_minutes) + _BEIJING_OFFSET_MINUTES)
+        page_now = now - shift
+    day, has_date_leg = _chat_label_date(raw, page_now)
+    if day is None:
+        if has_date_leg:
+            return None
+        day = page_now.date()
+    parsed = datetime(day.year, day.month, day.day, hour, minute)
+    return parsed + shift if shift is not None else parsed
+
+
+def self_message_in_window_predicate(
+    *,
+    stage: str,
+    delivered_on: date | None,
+    now: datetime | None = None,
+) -> Callable[[list[dict[str, Any]]], str] | None:
+    """Report a message we sent while this stage was the current node.
+
+    Wording-independent on purpose: an operator (or another tool) may have sent
+    the step with different copy, so any self message inside the stage window
+    means the node is already handled. Returns ``None`` when the stage has no
+    delivery calendar, in which case the caller keeps its text-based checks.
+    """
+    from assistant.domain.followup_stage import stage_window_dates
+
+    window = stage_window_dates(stage=stage, delivered_on=delivered_on)
+    if window is None:
+        return None
+    window_start, window_end = window
+
+    def predicate(messages: list[dict[str, Any]]) -> str:
+        for message in messages or []:
+            if not isinstance(message, dict) or not message.get("is_self"):
+                continue
+            sent_at = parse_chat_time_text(
+                str(message.get("time_text") or ""),
+                now=now,
+                page_offset_minutes=message.get("page_offset_minutes"),
+            )
+            if sent_at is None:
+                continue
+            if window_start <= sent_at.date() <= window_end:
+                return "self-message-in-window"
+        return ""
+
+    return predicate
+
+
 def thread_has_named_intro(probe: dict[str, Any] | None, creator_name: str) -> bool:
     from .message_templates import looks_like_intro
 
@@ -588,6 +933,56 @@ def _wait_for_new_message_conversation(
     }
 
 
+def _wait_for_page_flag(
+    store_id: str,
+    script: str,
+    *,
+    timeout: float,
+    interval: float = READY_POLL_INTERVAL_SECONDS,
+) -> bool:
+    """Poll one read-only readiness probe until it reports ``ok`` or times out."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        result = zclaw_exec(store_id, script, timeout=20, retries=0)
+        if isinstance(result, dict) and result.get("ok"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.05, interval))
+
+
+def _click_new_message_result(
+    store_id: str,
+    creator_key: str,
+    *,
+    timeout: float | None = None,
+    interval: float = 1.0,
+) -> dict[str, Any]:
+    """Click the search result row, retrying while the list re-renders.
+
+    The drawer refreshes its results asynchronously; in a batch run the next
+    creator's row can still be missing 2.5s after typing, which used to abort
+    the whole run. The script matches by creator name, so a retry can never
+    click the previous creator's leftover row.
+    """
+    effective_timeout = (
+        NEW_MESSAGE_RESULT_TIMEOUT_SECONDS if timeout is None else float(timeout)
+    )
+    deadline = time.monotonic() + max(0.0, effective_timeout)
+    last: dict[str, Any] = {}
+    while True:
+        result = zclaw_exec(
+            store_id,
+            CLICK_NEW_MESSAGE_RESULT_JS_TMPL.replace("%WANT%", _js_str(creator_key)),
+        )
+        if isinstance(result, dict) and result.get("ok"):
+            return result
+        last = result if isinstance(result, dict) else {"raw": str(result)[:200]}
+        if time.monotonic() >= deadline:
+            return last
+        time.sleep(max(0.2, interval))
+
+
 def _try_open_via_new_message(
     store_id: str,
     creator_key: str,
@@ -603,11 +998,22 @@ def _try_open_via_new_message(
     if not isinstance(opened_panel, dict) or not opened_panel.get("ok"):
         return {"ok": False, "error": "无法打开聊天数面板", "panel": opened_panel}
     if not opened_panel.get("already"):
-        time.sleep(max(1.0, wait))
+        time.sleep(max(0.5, min(wait, 1.5)))
+    if not _wait_for_page_flag(
+        store_id,
+        CHAT_PANEL_READY_JS,
+        timeout=CHAT_PANEL_READY_TIMEOUT_SECONDS,
+    ):
+        return {"ok": False, "error": "聊天数面板未出现", "panel": opened_panel}
     opened_drawer = zclaw_exec(store_id, CLICK_NEW_MESSAGE_BTN_JS)
     if not isinstance(opened_drawer, dict) or not opened_drawer.get("ok"):
         return {"ok": False, "error": "无法打开新消息抽屉", "drawer": opened_drawer}
-    time.sleep(max(1.0, wait))
+    if not _wait_for_page_flag(
+        store_id,
+        NEW_MESSAGE_DRAWER_READY_JS,
+        timeout=NEW_MESSAGE_DRAWER_TIMEOUT_SECONDS,
+    ):
+        return {"ok": False, "error": "新消息抽屉未出现", "drawer": opened_drawer}
     filled = zclaw_exec(
         store_id,
         FILL_NEW_MESSAGE_SEARCH_JS_TMPL.replace("%VALUE%", _js_str(name)),
@@ -615,11 +1021,8 @@ def _try_open_via_new_message(
     if not isinstance(filled, dict) or not filled.get("ok"):
         return {"ok": False, "error": "发送给输入失败", "fill": filled}
     time.sleep(max(1.0, wait))
-    clicked = zclaw_exec(
-        store_id,
-        CLICK_NEW_MESSAGE_RESULT_JS_TMPL.replace("%WANT%", _js_str(name)),
-    )
-    if not isinstance(clicked, dict) or not clicked.get("ok"):
+    clicked = _click_new_message_result(store_id, name)
+    if not clicked.get("ok"):
         return {"ok": False, "error": "结果行未找到或点击失败", "click": clicked}
     result_creator_id = str(clicked.get("result_creator_id") or "").strip()
     expected_creator_id = str(creator_id or result_creator_id).strip()

@@ -35,6 +35,7 @@ PROTECTED_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "operator_followup_send",
         "auto_approval_execute",
         "auto_approval_reconcile",
     }

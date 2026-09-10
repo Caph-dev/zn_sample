@@ -36,6 +36,7 @@ codereview/
 /plan/
 /plans/*
 !/plans/20260908-custom-auto-approval.md
+!/plans/20260910-creator-followup-automation.md
 /advisor-plans/
 
 # 其他

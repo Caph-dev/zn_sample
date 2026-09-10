@@ -403,9 +403,25 @@ def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
             .outerjoin(Shipment, Shipment.sample_case_id == SampleCase.id)
             .where(FollowupTask.id == task_id)
         ).first()
-    if row is None:
-        return HTMLResponse("待办不存在", status_code=404)
-    task, sample_case, shipment, _store = row
+        if row is None:
+            return HTMLResponse("待办不存在", status_code=404)
+        task, sample_case, shipment, _store = row
+        case_tasks = [
+            {
+                "id": case_task.id,
+                "stage": case_task.stage,
+                "status": case_task.status,
+                "scheduled_for": case_task.scheduled_for,
+                "sent_at": case_task.sent_at,
+                "send_result": case_task.send_result,
+            }
+            for case_task in session.scalars(
+                select(FollowupTask).where(
+                    FollowupTask.sample_case_id == sample_case.id,
+                    FollowupTask.stage != "confirm_delivery_time",
+                )
+            ).all()
+        ]
     attachment_url = (
         "/static/sop-images/2-查看到货+达人跟进-b05.png"
         if Path(task.attachment_key).name == "2-查看到货+达人跟进-b05.png" else ""
@@ -421,6 +437,7 @@ def followup_detail_page(task_id: int, request: Request) -> HTMLResponse:
         shipment,
         attachment_url=attachment_url,
         scheduled_label=scheduled_label,
+        case_tasks=case_tasks,
     )
     return _console_response(request, page="followup_detail", page_title="跟进预览", data=data)
 

@@ -8,6 +8,7 @@ from scripts.lib.feishu_bitable import (
     COOPERATION_STATUS_UNPUBLISHED,
 )
 
+from .followup_labels import COMPLETED_RESULTS
 from .timeutil import beijing_date, beijing_now
 
 
@@ -30,7 +31,6 @@ ACTION_KIND_LIST_ONLY = "list_only"
 ACTION_KIND_CONFIRM_DELIVERY_DATE = "confirm_delivery_date"
 ACTION_KIND_MARK_UNFULFILLED = "mark_unfulfilled"
 ACTION_KIND_ACKNOWLEDGE_CONTENT = "acknowledge_content"
-COMPLETED_LOCAL_RESULTS = frozenset({"marked-sent", "listed"})
 
 ACTION_KIND_BY_STAGE = {
     "arrival": ACTION_KIND_SEND_MESSAGE,
@@ -48,10 +48,10 @@ def action_kind_for_stage(stage: str) -> str:
 
 
 def followup_task_completed(task: dict) -> bool:
-    """Local completion: marked sent or handed to ops. Not a platform send."""
+    """Completion covers local marks and a platform-confirmed send."""
     if task.get("sent_at"):
         return True
-    return str(task.get("send_result") or "") in COMPLETED_LOCAL_RESULTS
+    return str(task.get("send_result") or "") in COMPLETED_RESULTS
 
 
 def days_since_delivery(delivered_at: datetime, today: date | None = None) -> int:
@@ -74,6 +74,59 @@ def latest_due_unpublished_stage(days: int) -> tuple[str, int] | None:
     if days < 15:
         return ("day_10_list", 10)
     return ("unfulfilled", 15)
+
+
+MESSAGE_STAGES = frozenset({"arrival", "day_3", "day_7"})
+STAGE_WINDOW_SCAN_DAYS = 60
+
+
+def stage_window_dates(
+    *,
+    stage: str,
+    delivered_on: date | None,
+) -> tuple[date, date] | None:
+    """Return the natural-day window in which ``stage`` is the current node.
+
+    Derived from :func:`latest_due_unpublished_stage` so the sendable check and
+    the duplicate check cannot drift apart: arrival covers D+0..D+2, day_3
+    D+3..D+6, day_7 D+7..D+9. Returns ``None`` for stages without a delivery
+    calendar (``content_found``) or when the delivery date is unknown.
+    """
+    if stage not in MESSAGE_STAGES or delivered_on is None:
+        return None
+    window_start: date | None = None
+    window_end: date | None = None
+    for elapsed_days in range(0, STAGE_WINDOW_SCAN_DAYS):
+        latest = latest_due_unpublished_stage(elapsed_days)
+        if latest is None or latest[0] != stage:
+            if window_start is not None:
+                break
+            continue
+        elapsed_date = delivered_on + timedelta(days=elapsed_days)
+        if window_start is None:
+            window_start = elapsed_date
+        window_end = elapsed_date
+    if window_start is None or window_end is None:
+        return None
+    return window_start, window_end
+
+
+def is_stale_followup_stage(*, stage: str, days: int | None) -> bool:
+    """True when a later calendar node is already due for this delivery age.
+
+    A message stage may only be sent while it is the latest due node: once the
+    next node is due, the older copy is out of sequence (a D0 "did it arrive?"
+    message sent six days later) and must not go out. Without a confirmed
+    delivery date there is no calendar to check, so the stage fails closed.
+    """
+    if stage not in MESSAGE_STAGES:
+        return False
+    if days is None:
+        return True
+    latest = latest_due_unpublished_stage(days)
+    if latest is None:
+        return True
+    return latest[0] != stage
 
 
 def _as_date(scheduled_for: str | date | None) -> date | None:

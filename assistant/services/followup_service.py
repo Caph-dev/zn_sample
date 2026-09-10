@@ -25,6 +25,7 @@ from assistant.domain.followup_stage import (
 from assistant.domain.followup_labels import (
     LISTED_RESULT,
     MARKED_SENT_RESULT,
+    UNFULFILLED_WRITTEN_RESULT,
     followup_review_label,
 )
 from assistant.domain.message_templates import TEMPLATE_VERSION, choose_template_key, render_followup_message
@@ -35,7 +36,8 @@ from assistant.domain.platform_status import (
 )
 from assistant.domain.policies import choose_followup_creator_type, choose_followup_language
 from assistant.domain.sku_images import resolve_followup_attachment
-from assistant.domain.timeutil import beijing_now
+from assistant.domain.timeutil import beijing_date, beijing_now
+from assistant.services.page_lock import STORE_BUSY_ERROR, blocking_jobs
 from scripts.lib.feishu_bitable import COOPERATION_STATUS_COMPLETED, COOPERATION_STATUS_UNPUBLISHED
 
 
@@ -276,6 +278,18 @@ class FollowupService:
                 )
                 if feishu_result.get("status") in {"written", "unchanged"}:
                     sample_case.feishu_cooperation_status = COOPERATION_STATUS_UNPUBLISHED
+                    # 写完就结掉这条待办：否则列表一直显示「标记未履约」可点，
+                    # 重复点击只会得到 unchanged，操作员会以为没写成功。
+                    task.send_result = UNFULFILLED_WRITTEN_RESULT
+                    task.last_error = ""
+                else:
+                    task.status = "needs_review"
+                    task.review_reason = "feishu_write_failed"
+                    task.requires_manual_confirmation = True
+                    task.last_error = str(
+                        feishu_result.get("error")
+                        or f"飞书合作状态未写成（{feishu_result.get('status')}）"
+                    )
             session.commit()
             return {"ok": True, "feishu": feishu_result}
 
@@ -286,7 +300,10 @@ class FollowupService:
             if task is None:
                 raise ValueError("followup-not-found")
             action_kind = task.action_kind or action_kind_for_stage(task.stage)
-            if action_kind != ACTION_KIND_SEND_MESSAGE:
+            if action_kind not in {
+                ACTION_KIND_SEND_MESSAGE,
+                ACTION_KIND_ACKNOWLEDGE_CONTENT,
+            }:
                 raise ValueError("not-message-task")
             if task.status == "needs_review":
                 raise ValueError("task-needs-review")
@@ -300,9 +317,26 @@ class FollowupService:
             shop_id = str(store.shop_id if store else "")
             body = str(task.message_preview)
             attachment_key = str(task.attachment_key or "")
+            stage = str(task.stage or "")
+            shipment = session.scalar(
+                select(Shipment).where(Shipment.sample_case_id == task.sample_case_id)
+            )
+            delivered_on = (
+                beijing_date(shipment.delivered_at)
+                if shipment is not None and shipment.delivered_at is not None
+                else None
+            )
+        blocking = blocking_jobs(self.session_factory)
+        if blocking:
+            raise ValueError(STORE_BUSY_ERROR)
         if not store_id:
             raise ValueError("missing-store")
-        from lib.im_api import send_direct_message
+        from lib.im_api import (
+            send_direct_message,
+            thread_contains_message_predicate,
+            thread_thanks_hold_reason,
+        )
+        from lib.im_dom import self_message_in_window_predicate
 
         result = send_direct_message(
             store_id,
@@ -312,24 +346,47 @@ class FollowupService:
             shop_id=shop_id,
             execute=False,
             write_source="api",
+            already_sent_predicate=thread_contains_message_predicate(body),
+            already_sent_message_predicate=self_message_in_window_predicate(
+                stage=stage,
+                delivered_on=delivered_on,
+            ),
+            hold_predicate=thread_thanks_hold_reason,
         )
         result["attachment_key"] = attachment_key
         result["execute"] = False
         with self.session_factory() as session:
             task = session.get(FollowupTask, task_id)
             if task is not None:
+                task.previewed_at = beijing_now()
+                status = str(result.get("status") or "")
                 if result.get("ok"):
-                    task.send_confirmation = str(result.get("status") or "dry-run")
+                    task.send_confirmation = status or "dry-run"
                     task.last_error = ""
+                elif status == "held":
+                    task.send_confirmation = "held"
+                    task.last_error = (
+                        "会话里已有感谢话术"
+                        f"（{result.get('reason') or 'unknown'}）；"
+                        "预演不会发送，请人工确认"
+                    )
                 else:
-                    task.last_error = str(result.get("error") or "preview-failed")
+                    task.last_error = str(
+                        result.get("error")
+                        or result.get("reason")
+                        or "preview-failed"
+                    )
                 session.commit()
         return result
 
     def mark_message_sent(self, task_id: int) -> dict:
+        """Mark either a follow-up reminder or a content-thanks DM as sent locally."""
         return self._mark_local_completion(
             task_id,
-            expected_action=ACTION_KIND_SEND_MESSAGE,
+            allowed_actions=(
+                ACTION_KIND_SEND_MESSAGE,
+                ACTION_KIND_ACKNOWLEDGE_CONTENT,
+            ),
             send_result=MARKED_SENT_RESULT,
             wrong_action_error="not-message-task",
         )
@@ -337,7 +394,7 @@ class FollowupService:
     def mark_list_handed_over(self, task_id: int) -> dict:
         return self._mark_local_completion(
             task_id,
-            expected_action=ACTION_KIND_LIST_ONLY,
+            allowed_actions=(ACTION_KIND_LIST_ONLY,),
             send_result=LISTED_RESULT,
             wrong_action_error="not-list-task",
         )
@@ -346,7 +403,7 @@ class FollowupService:
         self,
         task_id: int,
         *,
-        expected_action: str,
+        allowed_actions: tuple[str, ...],
         send_result: str,
         wrong_action_error: str,
     ) -> dict:
@@ -355,7 +412,7 @@ class FollowupService:
             if task is None:
                 raise ValueError("followup-not-found")
             action_kind = task.action_kind or action_kind_for_stage(task.stage)
-            if action_kind != expected_action:
+            if action_kind not in allowed_actions:
                 raise ValueError(wrong_action_error)
             if followup_task_completed(
                 {"sent_at": task.sent_at, "send_result": task.send_result}
@@ -382,28 +439,51 @@ class FollowupService:
         *,
         evidence_id: str,
     ) -> dict:
-        record_id = str(sample_case.feishu_record_id or "").strip()
-        if not record_id:
-            return {"status": "no-record", "error": "缺少飞书 record_id"}
-        try:
-            from lib.app_config import load_bitable_settings
-            from lib.feishu_bitable import (
-                DEFAULT_BITABLE_APP_ID,
-                FeishuBitableError,
-                get_bitable_access_token,
-                update_record_cooperation_status,
-            )
+        from lib.app_config import load_bitable_settings
+        from lib.feishu_bitable import (
+            DEFAULT_BITABLE_APP_ID,
+            FeishuBitableError,
+            get_bitable_access_token,
+            resolve_relation_record_id,
+            update_record_cooperation_status,
+        )
 
+        record_id = str(sample_case.feishu_record_id or "").strip()
+        try:
             settings = load_bitable_settings(default_app_id=DEFAULT_BITABLE_APP_ID)
             if not (settings.get("app_id") and settings.get("app_secret")):
                 return {"status": "skipped-no-credentials", "error": "未配置飞书密钥"}
             token = get_bitable_access_token()
+            matched_by = "record-id"
+            if not record_id:
+                # 2 号店样例本地没有 record_id：按 红人ID(达人名)+寄样产品 查行，
+                # 只有唯一命中才写，并把行号回填到 case。
+                lookup = resolve_relation_record_id(
+                    token,
+                    creator_handle=str(sample_case.creator_name or ""),
+                    sample_product=str(sample_case.sample_product_option or ""),
+                )
+                if lookup.get("status") != "matched":
+                    lookup["target_status"] = target_status
+                    lookup["evidence_id"] = evidence_id
+                    return lookup
+                record_id = str(lookup.get("record_id") or "").strip()
+                matched_by = str(lookup.get("matched_by") or "")
+                if not record_id:
+                    return {
+                        "status": "no-record",
+                        "error": "飞书匹配行缺少 record_id",
+                        "target_status": target_status,
+                        "evidence_id": evidence_id,
+                    }
+                sample_case.feishu_record_id = record_id
             result = update_record_cooperation_status(
                 token,
                 record_id,
                 target_status,
             )
             result["evidence_id"] = evidence_id
+            result["matched_by"] = matched_by
             return result
         except FeishuBitableError as error:
             return {"status": "error", "error": str(error)}
@@ -595,7 +675,9 @@ class FollowupService:
             task.message_preview = followup_review_label(review_reason) if review_reason else ""
         task.attachment_key = (
             attachment["path"]
-            if attachment["matched"] and action_kind == ACTION_KIND_SEND_MESSAGE
+            if attachment["matched"]
+            and task.stage == "arrival"
+            and action_kind == ACTION_KIND_SEND_MESSAGE
             else ""
         )
         task.requires_manual_confirmation = needs_review

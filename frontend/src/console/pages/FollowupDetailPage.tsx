@@ -2,6 +2,7 @@ import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
 import {Heading} from '@astryxdesign/core/Heading';
+import {Link} from '@astryxdesign/core/Link';
 import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList';
 import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
@@ -29,13 +30,26 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         <MetadataListItem label="订单号">{data.main_order_id}</MetadataListItem>
         <MetadataListItem label="物流单号">{data.tracking_display}</MetadataListItem>
         <MetadataListItem label="送达">
-          {data.delivered_at !== '' ? data.delivered_at : data.scheduled_label}
+          {data.delivered_text !== '' ? data.delivered_text : data.scheduled_label}
         </MetadataListItem>
         <MetadataListItem label="样品状态">{data.platform_status_text}</MetadataListItem>
         <MetadataListItem label="达人类型">{data.creator_type_label}</MetadataListItem>
         <MetadataListItem label="阶段">
           <StatusToken label={data.stage_label} tone={data.stage_tone} />
         </MetadataListItem>
+        {data.current_stage_label !== '' && (
+          <MetadataListItem label="当前应做">
+            <Stack direction="horizontal" gap={2}>
+              <StatusToken label={data.current_stage_label} tone="accent" />
+              <Text type="supporting">{data.current_stage_due}</Text>
+              {data.current_task_url !== '' ? (
+                <Link href={data.current_task_url}>{data.current_stage_note}</Link>
+              ) : (
+                <Text type="supporting">{data.current_stage_note}</Text>
+              )}
+            </Stack>
+          </MetadataListItem>
+        )}
         <MetadataListItem label="动作">
           <StatusToken label={data.action_label} tone={data.action_tone} />
         </MetadataListItem>
@@ -46,6 +60,21 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
             tooltip={data.status_tooltip}
           />
         </MetadataListItem>
+        {data.send_result_label !== '' && (
+          <MetadataListItem label="发送">{data.send_result_label}</MetadataListItem>
+        )}
+        {data.preview_label !== '' && (
+          <MetadataListItem label="预演">
+            <StatusToken
+              label={
+                data.preview_at === ''
+                  ? data.preview_label
+                  : `${data.preview_label} · ${data.preview_at}`
+              }
+              tone={data.preview_state === 'ok' ? 'success' : 'warning'}
+            />
+          </MetadataListItem>
+        )}
         {data.note !== '' && (
           <MetadataListItem label={data.status === 'needs_review' ? '原因' : '说明'}>
             {data.status === 'needs_review' ? data.review_label : data.note}
@@ -89,6 +118,37 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         </Stack>
       </Section>
 
+      {data.send_ready && (
+        <Section>
+          <Stack gap={2}>
+            <Heading level={2}>
+              {data.stage === 'content_found' ? '发送感谢私信' : '发送跟进私信'}
+            </Heading>
+            <Text>
+              真实发送不可撤销：按上方话术发送一次，B005 刚到货会随后补发配图。重复点击不会重复发送，
+              发送结果会显示在上方「发送」状态里。
+            </Text>
+            <form
+              method="post"
+              action="/api/jobs/followups/send"
+              data-job-form
+              data-job-label={data.stage === 'content_found' ? '发送感谢私信' : '发送跟进私信'}
+              data-confirm-token="y"
+              data-confirm-title="确认发送跟进私信"
+              data-confirm-description={`将给 ${data.creator_name} 真实发送一条私信，平台发送不可撤销。`}
+              data-confirm-action="发送"
+            >
+              <input type="hidden" name="task_id" value={data.id} />
+              <Button
+                type="submit"
+                label={data.stage === 'content_found' ? '发送感谢私信' : '发送这条跟进私信'}
+                variant="primary"
+              />
+            </form>
+          </Stack>
+        </Section>
+      )}
+
       {data.can_send && (
         <Section>
           <Stack gap={2}>
@@ -106,6 +166,36 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
                   </form>
                   <form method="post" action={`/api/followups/${data.id}/mark-sent`}>
                     <Button type="submit" label="标记已发跟进私信" variant="primary" />
+                  </form>
+                </Stack>
+              </>
+            )}
+          </Stack>
+        </Section>
+      )}
+
+      {data.can_acknowledge && (
+        <Section>
+          <Stack gap={2}>
+            <Heading level={2}>感谢私信进度</Heading>
+            {data.action_completed ? (
+              <Text>
+                已标记为「已发送内容感谢」（{data.send_result_label}）。这是本地记录，不是平台发送回执。
+              </Text>
+            ) : data.status === 'needs_review' ? (
+              <Text>先完成上方的人工确认，再预演或标记感谢私信。</Text>
+            ) : (
+              <>
+                <Text>
+                  可先预演打开会话核对（不会发送）。如果感谢私信已经人工发出（例如从旧流程发出），
+                  点右侧按钮只记本地完成，不会重复发送。
+                </Text>
+                <Stack direction="horizontal" gap={2}>
+                  <form method="post" action={`/api/followups/${data.id}/preview-send`}>
+                    <Button type="submit" label="预演感谢私信" variant="secondary" />
+                  </form>
+                  <form method="post" action={`/api/followups/${data.id}/mark-sent`}>
+                    <Button type="submit" label="标记感谢私信已发（本地）" variant="primary" />
                   </form>
                 </Stack>
               </>

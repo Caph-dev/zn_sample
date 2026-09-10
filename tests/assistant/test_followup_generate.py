@@ -33,7 +33,16 @@ class FollowupGenerateTests(unittest.TestCase):
         self.engine.dispose()
         self.temporary_directory.cleanup()
 
-    def add_case(self, *, curr_status: int, delivered_at=None, needs_confirmation=False, product_id="1732414717062320994", **values) -> None:
+    def add_case(
+        self,
+        *,
+        curr_status: int,
+        delivered_at=None,
+        needs_confirmation=False,
+        product_id="1732414717062320994",
+        creator_name="creator",
+        **values,
+    ) -> None:
         with self.session_factory() as session:
             store = Store(ziniao_store_id="store", store_name="store")
             session.add(store); session.flush()
@@ -41,7 +50,7 @@ class FollowupGenerateTests(unittest.TestCase):
             case = SampleCase(
                 store_id=store.id,
                 creator_id="creator",
-                creator_name="creator",
+                creator_name=creator_name,
                 apply_id=str(curr_status),
                 product_id=product_id,
                 curr_status=curr_status,
@@ -132,6 +141,37 @@ class FollowupGenerateTests(unittest.TestCase):
             self.assertEqual(task.attachment_key, "")
             self.assertIn("arrival_other", task.template_key)
             self.assertIn("excited to see your content", task.message_preview)
+
+    def test_arrival_hero_product_keeps_the_product_image(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task = session.scalar(select(FollowupTask))
+            self.assertEqual(task.stage, "arrival")
+            self.assertIn("arrival_hero", task.template_key)
+            self.assertTrue(
+                task.attachment_key.endswith("2-查看到货+达人跟进-b05.png")
+            )
+
+    def test_later_stage_drops_the_product_image(self) -> None:
+        # SOP：讲解图只随刚到货（D0）发；第 3 / 7 天只发话术。
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 12, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task = session.scalar(select(FollowupTask))
+            self.assertEqual(task.stage, "day_3")
+            self.assertIn("unpublished_3_video", task.template_key)
+            self.assertEqual(task.attachment_key, "")
 
     def test_dual_marked_creator_uses_video_followup_template(self) -> None:
         self.add_case(curr_status=40, delivered_at=datetime(2026, 8, 12, tzinfo=timezone.utc), is_video_creator="是", is_live_creator="是", language="en")
@@ -329,6 +369,150 @@ class FollowupGenerateTests(unittest.TestCase):
             result = FollowupService(self.session_factory).mark_unfulfilled(task_id)
         write_status.assert_not_called()
         self.assertEqual(result["feishu"]["status"], "not-requested")
+
+    def _unfulfilled_task_id(self) -> int:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+            feishu_record_id="rec-test",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 16, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            return int(session.scalar(select(FollowupTask.id)))
+
+    def test_mark_unfulfilled_completes_the_task_after_the_write(self) -> None:
+        task_id = self._unfulfilled_task_id()
+        with (
+            patch(
+                "lib.app_config.load_bitable_settings",
+                return_value={"app_id": "app", "app_secret": "secret"},
+            ),
+            patch("lib.feishu_bitable.get_bitable_access_token", return_value="token"),
+            patch(
+                "lib.feishu_bitable.update_record_cooperation_status",
+                return_value={"status": "written", "target_status": "未发布"},
+            ) as write_status,
+        ):
+            result = FollowupService(self.session_factory).mark_unfulfilled(
+                task_id, write_feishu=True
+            )
+        write_status.assert_called_once()
+        self.assertEqual(result["feishu"]["status"], "written")
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            sample_case = session.scalar(select(SampleCase))
+            # 写成功就结掉这条待办，否则列表会一直显示可点、重复点击只会拿到 unchanged。
+            self.assertEqual(task.send_result, "unfulfilled-written")
+            self.assertEqual(task.status, "pending")
+            self.assertEqual(task.last_error, "")
+            self.assertEqual(sample_case.feishu_cooperation_status, "未发布")
+
+    def test_mark_unfulfilled_keeps_review_when_the_write_is_refused(self) -> None:
+        task_id = self._unfulfilled_task_id()
+        with (
+            patch(
+                "lib.app_config.load_bitable_settings",
+                return_value={"app_id": "app", "app_secret": "secret"},
+            ),
+            patch("lib.feishu_bitable.get_bitable_access_token", return_value="token"),
+            patch(
+                "lib.feishu_bitable.update_record_cooperation_status",
+                return_value={"status": "preserved", "status_transition": "preserved:已发布"},
+            ),
+        ):
+            result = FollowupService(self.session_factory).mark_unfulfilled(
+                task_id, write_feishu=True
+            )
+        self.assertEqual(result["feishu"]["status"], "preserved")
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            self.assertEqual(task.status, "needs_review")
+            self.assertEqual(task.review_reason, "feishu_write_failed")
+            self.assertTrue(task.requires_manual_confirmation)
+            self.assertEqual(task.send_result, "")
+
+    def test_write_path_resolves_a_missing_record_id_by_handle(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+            creator_name="alice",
+            sample_product_option="B005",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 16, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task_id = int(session.scalar(select(FollowupTask.id)))
+        with (
+            patch(
+                "lib.app_config.load_bitable_settings",
+                return_value={"app_id": "app", "app_secret": "secret"},
+            ),
+            patch("lib.feishu_bitable.get_bitable_access_token", return_value="token"),
+            patch(
+                "lib.feishu_bitable.resolve_relation_record_id",
+                return_value={
+                    "status": "matched",
+                    "record_id": "rec-found",
+                    "matched_by": "handle+product",
+                },
+            ) as resolve_record,
+            patch(
+                "lib.feishu_bitable.update_record_cooperation_status",
+                return_value={"status": "written"},
+            ) as write_status,
+        ):
+            FollowupService(self.session_factory).mark_unfulfilled(task_id, write_feishu=True)
+        resolve_record.assert_called_once()
+        self.assertEqual(resolve_record.call_args.kwargs["creator_handle"], "alice")
+        self.assertEqual(resolve_record.call_args.kwargs["sample_product"], "B005")
+        self.assertEqual(write_status.call_args.args[1], "rec-found")
+        with self.session_factory() as session:
+            sample_case = session.scalar(select(SampleCase))
+            self.assertEqual(sample_case.feishu_record_id, "rec-found")
+
+    def test_write_path_stops_when_the_lookup_is_ambiguous(self) -> None:
+        self.add_case(
+            curr_status=40,
+            delivered_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            is_video_creator="是",
+            language="en",
+            creator_name="alice",
+            sample_product_option="B005",
+        )
+        FollowupService(self.session_factory).generate(datetime(2026, 8, 16, tzinfo=timezone.utc))
+        with self.session_factory() as session:
+            task_id = int(session.scalar(select(FollowupTask.id)))
+        with (
+            patch(
+                "lib.app_config.load_bitable_settings",
+                return_value={"app_id": "app", "app_secret": "secret"},
+            ),
+            patch("lib.feishu_bitable.get_bitable_access_token", return_value="token"),
+            patch(
+                "lib.feishu_bitable.resolve_relation_record_id",
+                return_value={
+                    "status": "ambiguous-record",
+                    "error": "同一红人ID+寄样产品有 2 行",
+                },
+            ),
+            patch(
+                "lib.feishu_bitable.update_record_cooperation_status",
+            ) as write_status,
+        ):
+            result = FollowupService(self.session_factory).mark_unfulfilled(
+                task_id, write_feishu=True
+            )
+        write_status.assert_not_called()
+        self.assertEqual(result["feishu"]["status"], "ambiguous-record")
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            sample_case = session.scalar(select(SampleCase))
+            self.assertEqual(task.status, "needs_review")
+            self.assertEqual(task.review_reason, "feishu_write_failed")
+            self.assertEqual(sample_case.feishu_record_id, "")
 
     def test_readonly_feishu_spanish_language_requires_matched_option(self) -> None:
         self.add_case(
@@ -732,10 +916,13 @@ class FollowupGenerateTests(unittest.TestCase):
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
             listing_data = console_data(listing)
-            self.assertEqual(listing_data["rows"][0]["action_label"], "已发跟进私信")
+            self.assertEqual(
+                listing_data["rows"][0]["action_label"], "已发跟进私信（本地标记）"
+            )
             detail = client.get(f"/followups/{task_id}")
             detail_data = console_data(detail)
             self.assertTrue(detail_data["action_completed"])
+            self.assertEqual(detail_data["send_result_label"], "本地人工标记")
             self.assertNotIn(">发送</button>", detail.text)
 
     def test_mark_listed_is_local_only(self) -> None:

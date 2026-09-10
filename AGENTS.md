@@ -19,6 +19,10 @@
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
    唯一隔离例外：「自动批准」页的自定义规则链走自有任务链（见下文「自动审批子页面」），
    仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
+   达人跟进详情页的「发送这条跟进私信 / 发送感谢私信」是同一个门闩的网页入口：固定单条 `task_id`、每次最多 1 条、任务运行中不可取消，底层仍走 `send_followup_message.py --execute --yes` 与原子认领。
+   同页「预演跟进私信 / 预演感谢私信」不是写操作（只打开会话核对身份，不发送），但同样占用店铺页面：
+   与 0/1/2/3 及发送任务共用同一互斥（`assistant/services/page_lock.py`），有页面任务在跑时返回 409 `store-busy`，不得并发点击。
+   预演与真发共用同一套重复/保留检查（会话指纹、阶段窗口内已有我方消息、感谢话术保留），预演只报告不写平台。
 
 2. **两阶段导航**  
    `open_sample_store.py` 默认只开店；目标店已运行绝不关闭/重开。  
@@ -53,7 +57,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）与物流写回/跟进动作，复用 `operator_launch`；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
+| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）、物流写回与跟进动作（含跟进详情页单条发送），复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -137,7 +141,7 @@
 | `--force` | 只绕过 16:00 |
 | `--observe-approve-network` | 仅单条 execute 被动观察；不重放、不登记未确认 endpoint |
 
-网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking` 四个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排，不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）和 `tracking`（达人跟进页物流写回）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
+网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking|followup_send` 五个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排（`followup_send` 走固定 handler 调 `send_followup_message.py`），不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）、`tracking`（达人跟进页物流写回）和 `followup_send`（达人跟进详情页单条发送，固定 `task_id`、限 1、键入 `y` 确认）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
 
 网页“运行准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。探活只在总览 / 运行准备页轮询；自动批准页只显示状态条 + 去准备页链接。
 
@@ -176,7 +180,19 @@
 
 **跟进日历（仅免费样品【处理中】`tab=40`；跟进不分商品，全部主推款都跟进）：** D0 / D+3 / D+7 发话术；D+10 只出名单；D+15 飞书合作状态写 **未发布**（业务含义=未履约，不是「待发布」）。刚到货话术分商品：B005 附讲解图，非 B005 只发话术；3/7 天话术通用。达人发视频/直播 → 平台已完成 + 文档原文感谢话术 + 飞书 **已完成**。达人类型用筛查导出「视频达人/直播达人」；视频+直播同时标记时跟进话术按视频达人，不拆两条。类型未知才人工。不要把【已发货】当已送达。不扫买返。
 
+**发送只认「当前最新应做阶段」（2026-09-10 加）：** 由到货日推算的当前节点之外一律不发——例如到货已 5 天时，5 天前的 D0 任务不得补发。判定用 `is_stale_followup_stage`（`assistant/domain/followup_stage.py`），脚本选择器与网页「发送」按钮共用；被拦下的过期任务转 `needs_review` + `stale_stage`（缺送达日转 `missing_delivery_time`），不发送。日历只在跑「生成今日跟进待办」时推进（不是 cron），所以每天/每次发送前应先跑一次生成，否则待办池会停在旧节点。
+
+**重复发送保护（2026-09-10 加，同日加窗口判定）：** 真发前先打开会话读线程文本与逐条消息，四层挡：① 会话指纹预检 `message_text_fingerprint`（本行话术去掉称呼后的前 60 个归一化字符）命中 → `already-sent`，文本与图片都不发，本地记 `send_confirmation=already-sent`；② 感谢话术保留 `thread_thanks_hold_reason`（`content-thanks-found`/`uncertain-thanks-found`）→ `held` + needs_review（先于窗口判定，命中即转人工，不自动记已发）；③ 窗口判定（与措辞无关）`self_message_in_window_predicate`（`scripts/lib/im_dom.py`）：本阶段「当前应做」的自然日窗口（`stage_window_dates`，arrival=D+0..2、day_3=D+3..6、day_7=D+7..9，与日历同源）内只要有一条**我方发出**的消息，不管谁写的、写什么，一律判 `already-sent`；④ execute 前原子认领 `send_result=sending`，重复/并发运行跳过；⑤ 发送后再读线程确认，确认不了 → `send-unknown` + needs_review，禁止自动重试。网页「预演」与真发共用 ①②③（预演只报告，不写平台；`content_found` 无到货日历，只有 ①②）。**页面契约（2026-09-10 实测）**：消息行是 `.chatd-message`，我方消息带 `chatd-message--right`（气泡 `chatd-bubble-main--self`），对方是 `--left`/`--other`；时间标签在行内 `.chatd-message-time .chatd-time`，按**页面地区 + 页面时区**渲染（同一天实测先英文后中文：`Sep 3 5:55 PM`/`Tuesday, 4:55 AM` → `上午1:43`/`昨天 上午5:46`/`星期二, 4:55 上午`/`9月1日 7:41`/`2025年9月16日 6:28`；2 号店页面时区是美西 GMT-7），**无标签的行沿用上一条的时间**，只有时刻没有日期 = 页面本地「今天」，图片消息是 `.chatd-imageMessage` 且无文本。探针带回 `page_offset_minutes`（`new Date().getTimezoneOffset()`），`inspected_messages` 把它挂到每条消息上，`parse_chat_time_text(..., page_offset_minutes=…)` 先换算成北京时刻再做自然日比较；不换算时中文标签根本解析不出来，窗口判定会静默漏判（2026-09-10 实测）。聊天数面板与「新消息」抽屉都是异步渲染：必须短轮询就绪（`_wait_for_page_flag` + `CHAT_PANEL_READY_JS`/`NEW_MESSAGE_DRAWER_READY_JS`，各 20s）再点下一步，固定 sleep 1s 实测不够（会报 `no-chat-panel`）；`INSPECT_IM_JS` 在导航后无 composer 时也不能抛错（`input` 为 null 要短路）。**局限**：页面地区/时区会变（同一天实测先英文后中文、页面时区美西），新格式要补进 `parse_chat_time_text` 与 `tests/test_im_dom.py`；解析不出时刻或日期的标签一律跳过（不猜），只覆盖已加载的消息（最近一屏），更早的历史要滚动才有；指纹仍只认我们自己模板的措辞——指纹与窗口都没命中时不要 execute，改用详情页「标记已发跟进私信 / 标记已发感谢私信」只记本地完成。
+
+**SQLite 写锁与任务心跳（2026-09-10 加）：** 连接固定 `PRAGMA busy_timeout=30000`（`assistant/database/engine.py`）；心跳失败只重试并记一条 warning，不打堆栈。`STALE_JOB_TIMEOUT_SECONDS=150` 必须明显大于 busy_timeout，否则长事务（生成待办 / 物流同步）期间正在跑的任务会被 `mark_stale_jobs_interrupted` 误判为中断。不要为 `database is locked` 去缩短超时，也不要指望心跳失败能自动区分「任务死了」和「写锁被占」。
+
+**跟进写飞书（2026-09-10 加）：** 合作状态只走 `FollowupService._write_cooperation_status`（未履约 `未发布` / 内容确认 `已完成`），转换守卫只允许 `待发布 → 未发布/已完成`，`未发布/已完成/已发布` 是保护值、其它状态一律拒绝——**不要为了让守卫放行去改判定，也不要替业务补数据**。飞书当前还是「待发货」的 D+15 行（业务没把状态补到「待发布」）**保持 pending 等业务改**，不要去点它把本地任务推成人工、更不要放宽守卫（2026-09-10 业务口径）。2 号店样例本地没有 `feishu_record_id`（实测 0/268）：写入前若为空，按 **红人ID（=达人名）+寄样产品** 查行（`resolve_relation_record_id`，`fetch_all` 翻页），**只有唯一命中才写并回填 case**；多行 → `ambiguous-record`、无行 → `no-record`，都转 needs_review `feishu_write_failed`，不新建、不猜。未履约写成功后写 `send_result=unfulfilled-written`（进 `COMPLETED_RESULTS`）结掉待办；写不成（守卫拒绝/多行/无行/接口错）同样转 needs_review，不自动重试。
+
 **跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。有简介时走 LLM JSON 的 `lang`（不看 `confidence`；`.env`：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，默认 DeepSeek `deepseek-v4-flash`）；空简介、识别失败或非法 lang 默认英语。`sync_shipped_tracking.py` 已是这个优先级。
+
+**提醒话术问候语（2026-09-10 修）：** D+3/D+7 统一成 `Hi {名}! ❤️`／`Hola {名}! ❤️`。原来 D+3 英文是 `Hi{名} ! ❤️`、西语 `Hola{名}! ❤️`（实测渲染成 `Himaideediaz ! ❤️`、`Holamaideediaz! ❤️`），SOP 与 `assistant/domain/message_templates.py` 已同步修正，回归测试 `tests/assistant/test_message_templates.py::test_reminder_templates_greet_with_clean_spacing`。**改话术必须 SOP 与模板同时改**。D0 与感谢话术里还有同类历史写法（`Hola{名} !`、`Hi {名}❤️`、`Hola{名}!`），本次未改。
+
+**D+10 名单口径（2026-09-10 收窄）：** 「报表 → D+10 待出名单」导出（`ExportService._rows("day_10_list")`）只收 **当前节点仍是 D+10** 的行：`task.status=pending`、case 仍处理中且非 stale、未记账，且按 `latest_due_unpublished_stage` 判定 10 ≤ 到货天数 < 15（满 15 天当前节点已是 unfulfilled，不再重复催）。已被取代（suppressed）或没有送达日的行不进名单——这类行在页面上也点不了「已出名单」。实测 10 → 8 行（去掉两条已转 unfulfilled 的旧行）。
 
 `detail_targets`：仅 `--with-detail` 只拉列表初判通过行；加 `--detail-all` 才拉全表。试跑限量用 `--max-rows`。
 

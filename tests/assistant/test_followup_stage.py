@@ -14,6 +14,7 @@ from assistant.domain.followup_stage import (
     days_since_delivery,
     latest_due_unpublished_stage,
     plan_followup_mutation,
+    stage_window_dates,
 )
 from assistant.domain.timeutil import beijing_date, beijing_now
 from scripts.lib.feishu_bitable import COOPERATION_STATUS_UNPUBLISHED
@@ -162,6 +163,48 @@ class FollowupStageTests(unittest.TestCase):
             COOPERATION_STATUS_UNPUBLISHED,
         )
         self.assertNotEqual(FEISHU_UNFULFILLED_COOPERATION_STATUS, "待发布")
+
+
+class FollowupStageWindowTests(unittest.TestCase):
+    """窗口与日历同源：窗口必须等于该节点「当前应做」的自然日区间。"""
+
+    def test_message_stages_get_their_calendar_window(self) -> None:
+        delivered_on = date(2026, 9, 8)
+
+        self.assertEqual(
+            stage_window_dates(stage="arrival", delivered_on=delivered_on),
+            (date(2026, 9, 8), date(2026, 9, 10)),
+        )
+        self.assertEqual(
+            stage_window_dates(stage="day_3", delivered_on=delivered_on),
+            (date(2026, 9, 11), date(2026, 9, 14)),
+        )
+        self.assertEqual(
+            stage_window_dates(stage="day_7", delivered_on=delivered_on),
+            (date(2026, 9, 15), date(2026, 9, 17)),
+        )
+
+    def test_window_days_match_the_latest_due_stage(self) -> None:
+        delivered_on = date(2026, 9, 8)
+        for stage in ("arrival", "day_3", "day_7"):
+            window = stage_window_dates(stage=stage, delivered_on=delivered_on)
+            self.assertIsNotNone(window)
+            window_start, window_end = window
+            for elapsed_days in range(0, 20):
+                expected = latest_due_unpublished_stage(elapsed_days)[0]
+                day = delivered_on + timedelta(days=elapsed_days)
+                with self.subTest(stage=stage, elapsed_days=elapsed_days):
+                    self.assertEqual(
+                        window_start <= day <= window_end,
+                        expected == stage,
+                    )
+
+    def test_stages_without_a_delivery_calendar_have_no_window(self) -> None:
+        delivered_on = date(2026, 9, 8)
+
+        self.assertIsNone(stage_window_dates(stage="content_found", delivered_on=delivered_on))
+        self.assertIsNone(stage_window_dates(stage="day_10_list", delivered_on=delivered_on))
+        self.assertIsNone(stage_window_dates(stage="arrival", delivered_on=None))
 
 
 if __name__ == "__main__":

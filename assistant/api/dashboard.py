@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request
 from sqlalchemy import func, select
 
 from assistant.database.models import FollowupTask, Job, SampleCase, Shipment
-from assistant.domain.followup_labels import COMPLETED_LOCAL_RESULTS
+from assistant.domain.followup_labels import COMPLETED_RESULTS
 from assistant.domain.followup_stage import ACTIVE_TASK_STATUSES
 from assistant.domain.platform_status import PLATFORM_STATUS_PROCESSING, PLATFORM_STATUS_SHIPPED
 
@@ -25,7 +25,7 @@ def dashboard_summary(session_factory) -> dict:
                     FollowupTask.stage == stage,
                     FollowupTask.status.in_(ACTIVE_TASK_STATUSES),
                     FollowupTask.sent_at.is_(None),
-                    ~FollowupTask.send_result.in_(COMPLETED_LOCAL_RESULTS),
+                    ~FollowupTask.send_result.in_(COMPLETED_RESULTS),
                 )
             )
             if processing_only:
@@ -58,7 +58,7 @@ def dashboard_summary(session_factory) -> dict:
             "day_7": count_tasks("day_7"),
             "day_10_list": count_tasks("day_10_list", processing_only=True),
             "unfulfilled": count_tasks("unfulfilled", processing_only=True),
-            "needs_review": int(session.scalar(select(func.count()).select_from(FollowupTask).where(FollowupTask.requires_manual_confirmation.is_(True), FollowupTask.status.in_(ACTIVE_TASK_STATUSES), FollowupTask.sent_at.is_(None), ~FollowupTask.send_result.in_(COMPLETED_LOCAL_RESULTS))) or 0),
+            "needs_review": int(session.scalar(select(func.count()).select_from(FollowupTask).where(FollowupTask.requires_manual_confirmation.is_(True), FollowupTask.status.in_(ACTIVE_TASK_STATUSES), FollowupTask.sent_at.is_(None), ~FollowupTask.send_result.in_(COMPLETED_RESULTS))) or 0),
             "logistics_exceptions": int(session.scalar(select(func.count()).select_from(Shipment).where((Shipment.status_category.in_(LOGISTICS_EXCEPTION_CATEGORIES)) | Shipment.needs_delivery_time_confirmation.is_(True))) or 0),
             "failed_jobs": int(session.scalar(select(func.count()).select_from(Job).where(Job.status == "failed")) or 0),
             "latest_jobs": latest_jobs,

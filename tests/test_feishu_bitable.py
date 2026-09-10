@@ -22,6 +22,7 @@ from lib.feishu_bitable import (  # noqa: E402
     index_pending_ship_records,
     pending_ship_lookup_key,
     resolve_duplicate_record,
+    resolve_relation_record_id,
     resolve_sample_product_for_row,
     search_pending_post_records,
     search_pending_ship_records,
@@ -274,6 +275,83 @@ class DuplicateRecordResolutionTests(unittest.TestCase):
                     creator_handle="alice",
                     sample_product="328",
                 )
+
+
+class ResolveRelationRecordIdTests(unittest.TestCase):
+    """写合作状态前按 红人ID（达人名）+寄样产品 定位飞书行。只接受唯一匹配。"""
+
+    @staticmethod
+    def _response(items, *, has_more=False, page_token=""):
+        return {
+            "code": 0,
+            "data": {"items": items, "has_more": has_more, "page_token": page_token},
+        }
+
+    def test_handle_and_product_unique_match_wins(self) -> None:
+        response = self._response(
+            [
+                {"record_id": "rec-b005", "fields": {"红人ID": "alice", "寄样产品": "B005"}},
+                {"record_id": "rec-328", "fields": {"红人ID": "alice", "寄样产品": "328"}},
+            ]
+        )
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            result = resolve_relation_record_id(
+                "token", creator_handle="alice", sample_product="B005"
+            )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["record_id"], "rec-b005")
+        self.assertEqual(result["matched_by"], "handle+product")
+
+    def test_two_rows_with_the_same_key_are_ambiguous(self) -> None:
+        response = self._response(
+            [
+                {"record_id": "rec-one", "fields": {"红人ID": "alice", "寄样产品": "B005"}},
+                {"record_id": "rec-two", "fields": {"红人ID": "alice", "寄样产品": "B005"}},
+            ]
+        )
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            result = resolve_relation_record_id(
+                "token", creator_handle="alice", sample_product="B005"
+            )
+        self.assertEqual(result["status"], "ambiguous-record")
+        self.assertNotIn("record_id", result)
+
+    def test_single_row_with_a_different_product_is_allowed_by_handle(self) -> None:
+        response = self._response(
+            [{"record_id": "rec-only", "fields": {"红人ID": "alice", "寄样产品": "2024"}}]
+        )
+        with patch("lib.feishu_bitable._http_json", return_value=response):
+            result = resolve_relation_record_id(
+                "token", creator_handle="alice", sample_product="B005"
+            )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["record_id"], "rec-only")
+        self.assertEqual(result["matched_by"], "handle-only")
+
+    def test_no_row_is_reported_instead_of_creating_one(self) -> None:
+        with patch("lib.feishu_bitable._http_json", return_value=self._response([])):
+            result = resolve_relation_record_id(
+                "token", creator_handle="alice", sample_product="B005"
+            )
+        self.assertEqual(result["status"], "no-record")
+
+    def test_second_page_row_prevents_a_false_unique_match(self) -> None:
+        responses = [
+            self._response(
+                [{"record_id": "rec-one", "fields": {"红人ID": "alice", "寄样产品": "B005"}}],
+                has_more=True,
+                page_token="next-page",
+            ),
+            self._response(
+                [{"record_id": "rec-two", "fields": {"红人ID": "alice", "寄样产品": "B005"}}]
+            ),
+        ]
+        with patch("lib.feishu_bitable._http_json", side_effect=responses) as request:
+            result = resolve_relation_record_id(
+                "token", creator_handle="alice", sample_product="B005"
+            )
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result["status"], "ambiguous-record")
 
 
 class BuildShippingFieldsTests(unittest.TestCase):
