@@ -22,7 +22,7 @@ import {ReadinessPanel} from './components/ReadinessPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
-import {buildStandardRule, normalizeRule, validateDraft} from './ruleModel';
+import {buildStandardRule, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
 import type {
   AutoApprovalBootstrap,
   ExecutionPayload,
@@ -43,10 +43,6 @@ function errorMessage(error: unknown): string {
     return String((error as {message: unknown}).message);
   }
   return String(error);
-}
-
-function ruleEquals(left: RuleDraft, right: RuleDraft): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function notifyJobMonitor(jobId: string | undefined) {
@@ -88,7 +84,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
     if (preview === null) {
       return false;
     }
-    return !ruleEquals(rule, preview.rule);
+    return !rulesEqual(rule, preview.rule);
   }, [rule, preview]);
 
   const refreshStore = useCallback(() => {
