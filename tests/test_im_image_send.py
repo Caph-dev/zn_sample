@@ -323,6 +323,92 @@ class SendDirectMessageImageHookTests(unittest.TestCase):
         send_text.assert_not_called()
         send_image.assert_not_called()
 
+    def test_window_predicate_short_circuits_before_sending(self) -> None:
+        messages = [
+            {"is_self": True, "time_text": "Sep 9 7:00 AM", "text": "another wording"},
+            {"is_self": False, "time_text": "Sep 9 8:00 AM", "text": "thanks!"},
+        ]
+        seen: list[list[dict]] = []
+
+        def window_predicate(items: list[dict]) -> str:
+            seen.append(items)
+            return "self-message-in-window" if items else ""
+
+        with (
+            patch(
+                "lib.im_dom.open_conversation_via_new_message",
+                return_value={
+                    "ok": True,
+                    "click": {"conversation_id": "conv-1", "result_creator_id": "cid-1"},
+                },
+            ),
+            patch(
+                "lib.im_dom.inspect_current_thread",
+                return_value={"thread_text": "unrelated", "messages": messages},
+            ),
+            patch("lib.im_api.send_message_via_sdk") as send_text,
+            patch("lib.im_api.send_image_message_via_sdk") as send_image,
+        ):
+            result = im_api.send_direct_message(
+                "store",
+                self.body,
+                creator_name="carol",
+                creator_id="cid-1",
+                execute=True,
+                already_sent_message_predicate=window_predicate,
+                image_path=Path("/tmp/does-not-need-to-exist-b05.png"),
+            )
+
+        self.assertEqual(seen, [messages])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "already-sent")
+        self.assertEqual(result["reason"], "self-message-in-window")
+        self.assertEqual(result["image_skipped"], "already-sent")
+        send_text.assert_not_called()
+        send_image.assert_not_called()
+
+    def test_template_hold_wins_over_the_window_predicate(self) -> None:
+        window_predicate_calls: list[list[dict]] = []
+        with (
+            patch(
+                "lib.im_dom.open_conversation_via_new_message",
+                return_value={
+                    "ok": True,
+                    "click": {"conversation_id": "conv-1", "result_creator_id": "cid-1"},
+                },
+            ),
+            patch(
+                "lib.im_dom.inspect_current_thread",
+                return_value={
+                    "thread_text": (
+                        "Hi carol! We just saw the video you created for us and "
+                        "really appreciate it."
+                    ),
+                    "messages": [
+                        {"is_self": True, "time_text": "Sep 9 7:00 AM", "text": ""}
+                    ],
+                },
+            ),
+            patch("lib.im_api.send_message_via_sdk") as send_text,
+        ):
+            result = im_api.send_direct_message(
+                "store",
+                self.body,
+                creator_name="carol",
+                creator_id="cid-1",
+                execute=True,
+                already_sent_message_predicate=lambda items: (
+                    window_predicate_calls.append(items) or "self-message-in-window"
+                ),
+                hold_predicate=im_api.thread_thanks_hold_reason,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(result["reason"], "content-thanks-found")
+        self.assertEqual(window_predicate_calls, [])
+        send_text.assert_not_called()
+
     def test_tail_only_thread_still_detects_the_sent_message(self) -> None:
         with (
             patch(

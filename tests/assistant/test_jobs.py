@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 import assistant.api.jobs as jobs_api
@@ -105,13 +106,24 @@ class JobWorkerTests(JobTestCase):
     def test_stale_running_becomes_interrupted(self) -> None:
         stale_job_id = self.add_job(
             status="running",
-            heartbeat_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+            heartbeat_at=datetime.now(timezone.utc)
+            - timedelta(seconds=worker_module.STALE_JOB_TIMEOUT_SECONDS + 1),
         )
         pending_job_id = self.add_job(status="pending")
 
         self.assertEqual(mark_stale_jobs_interrupted(self.session_factory), 1)
         self.assertEqual(self.get_job(stale_job_id).status, "interrupted")
         self.assertEqual(self.get_job(pending_job_id).status, "pending")
+
+    def test_recent_heartbeat_survives_a_long_write_lock(self) -> None:
+        """心跳被长事务推迟一分钟时，任务仍必须被视为在正常运行。"""
+        running_job_id = self.add_job(
+            status="running",
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+        )
+
+        self.assertEqual(mark_stale_jobs_interrupted(self.session_factory), 0)
+        self.assertEqual(self.get_job(running_job_id).status, "running")
 
     def test_runtime_reaper_unblocks_pending_job_after_stale_orphan(self) -> None:
         orphan_job_id = self.add_job(
@@ -499,6 +511,105 @@ class JobWorkerTests(JobTestCase):
             json.loads(job.result_summary),
             {"type_filled": 1, "cancelled": True},
         )
+
+
+class CountingStopEvent:
+    """Release a fixed number of waits before reporting "stop".
+
+    ``_heartbeat_loop`` waits once per beat plus once per retry, so counting
+    releases lets a test pin down exactly how many refreshes happen.
+    """
+
+    def __init__(self, released_waits: int) -> None:
+        self.remaining_released_waits = released_waits
+
+    def is_set(self) -> bool:
+        return self.remaining_released_waits <= 0
+
+    def set(self) -> None:
+        self.remaining_released_waits = 0
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self.remaining_released_waits <= 0:
+            return True
+        self.remaining_released_waits -= 1
+        return False
+
+
+class HeartbeatLoopTests(JobTestCase):
+    def test_heartbeat_retries_after_a_transient_lock(self) -> None:
+        job_id = self.add_job(status="running", heartbeat_at=datetime.now(timezone.utc))
+        refresh_calls: list[str] = []
+
+        def refresh_with_one_lock_error(session_factory, target_job_id: str) -> bool:
+            refresh_calls.append(target_job_id)
+            if len(refresh_calls) == 1:
+                raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+            return True
+
+        with (
+            patch.object(
+                worker_module,
+                "_refresh_heartbeat",
+                side_effect=refresh_with_one_lock_error,
+            ),
+            patch.object(worker_module.logger, "warning") as log_warning,
+        ):
+            _heartbeat_loop(
+                self.session_factory,
+                job_id,
+                CountingStopEvent(released_waits=2),
+                interval=0.0,
+                retry_delay=0.0,
+            )
+
+        self.assertEqual(refresh_calls, [job_id, job_id])
+        log_warning.assert_not_called()
+
+    def test_heartbeat_warns_once_without_traceback_when_the_lock_persists(self) -> None:
+        job_id = self.add_job(status="running", heartbeat_at=datetime.now(timezone.utc))
+        refresh_calls: list[str] = []
+
+        def always_locked(session_factory, target_job_id: str) -> bool:
+            refresh_calls.append(target_job_id)
+            raise OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+        with (
+            patch.object(worker_module, "_refresh_heartbeat", side_effect=always_locked),
+            self.assertLogs("assistant.jobs.worker", level="WARNING") as captured_logs,
+        ):
+            _heartbeat_loop(
+                self.session_factory,
+                job_id,
+                CountingStopEvent(released_waits=3),
+                interval=0.0,
+                retry_delay=0.0,
+                attempts=3,
+            )
+
+        self.assertEqual(refresh_calls, [job_id, job_id, job_id])
+        self.assertEqual(len(captured_logs.records), 1)
+        self.assertIn("job heartbeat delayed", captured_logs.records[0].getMessage())
+        self.assertIsNone(captured_logs.records[0].exc_info)
+
+    def test_heartbeat_stops_once_the_job_is_no_longer_running(self) -> None:
+        job_id = self.add_job(status="succeeded", heartbeat_at=datetime.now(timezone.utc))
+        refresh_calls: list[str] = []
+
+        def finished_job(session_factory, target_job_id: str) -> bool:
+            refresh_calls.append(target_job_id)
+            return False
+
+        with patch.object(worker_module, "_refresh_heartbeat", side_effect=finished_job):
+            _heartbeat_loop(
+                self.session_factory,
+                job_id,
+                CountingStopEvent(released_waits=3),
+                interval=0.0,
+                retry_delay=0.0,
+            )
+
+        self.assertEqual(refresh_calls, [job_id])
 
 
 class JobProgressTests(JobTestCase):

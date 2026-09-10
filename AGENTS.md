@@ -22,6 +22,7 @@
    达人跟进详情页的「发送这条跟进私信 / 发送感谢私信」是同一个门闩的网页入口：固定单条 `task_id`、每次最多 1 条、任务运行中不可取消，底层仍走 `send_followup_message.py --execute --yes` 与原子认领。
    同页「预演跟进私信 / 预演感谢私信」不是写操作（只打开会话核对身份，不发送），但同样占用店铺页面：
    与 0/1/2/3 及发送任务共用同一互斥（`assistant/services/page_lock.py`），有页面任务在跑时返回 409 `store-busy`，不得并发点击。
+   预演与真发共用同一套重复/保留检查（会话指纹、阶段窗口内已有我方消息、感谢话术保留），预演只报告不写平台。
 
 2. **两阶段导航**  
    `open_sample_store.py` 默认只开店；目标店已运行绝不关闭/重开。  
@@ -180,6 +181,10 @@
 **跟进日历（仅免费样品【处理中】`tab=40`；跟进不分商品，全部主推款都跟进）：** D0 / D+3 / D+7 发话术；D+10 只出名单；D+15 飞书合作状态写 **未发布**（业务含义=未履约，不是「待发布」）。刚到货话术分商品：B005 附讲解图，非 B005 只发话术；3/7 天话术通用。达人发视频/直播 → 平台已完成 + 文档原文感谢话术 + 飞书 **已完成**。达人类型用筛查导出「视频达人/直播达人」；视频+直播同时标记时跟进话术按视频达人，不拆两条。类型未知才人工。不要把【已发货】当已送达。不扫买返。
 
 **发送只认「当前最新应做阶段」（2026-09-10 加）：** 由到货日推算的当前节点之外一律不发——例如到货已 5 天时，5 天前的 D0 任务不得补发。判定用 `is_stale_followup_stage`（`assistant/domain/followup_stage.py`），脚本选择器与网页「发送」按钮共用；被拦下的过期任务转 `needs_review` + `stale_stage`（缺送达日转 `missing_delivery_time`），不发送。日历只在跑「生成今日跟进待办」时推进（不是 cron），所以每天/每次发送前应先跑一次生成，否则待办池会停在旧节点。
+
+**重复发送保护（2026-09-10 加，同日加窗口判定）：** 真发前先打开会话读线程文本与逐条消息，四层挡：① 会话指纹预检 `message_text_fingerprint`（本行话术去掉称呼后的前 60 个归一化字符）命中 → `already-sent`，文本与图片都不发，本地记 `send_confirmation=already-sent`；② 感谢话术保留 `thread_thanks_hold_reason`（`content-thanks-found`/`uncertain-thanks-found`）→ `held` + needs_review（先于窗口判定，命中即转人工，不自动记已发）；③ 窗口判定（与措辞无关）`self_message_in_window_predicate`（`scripts/lib/im_dom.py`）：本阶段「当前应做」的自然日窗口（`stage_window_dates`，arrival=D+0..2、day_3=D+3..6、day_7=D+7..9，与日历同源）内只要有一条**我方发出**的消息，不管谁写的、写什么，一律判 `already-sent`；④ execute 前原子认领 `send_result=sending`，重复/并发运行跳过；⑤ 发送后再读线程确认，确认不了 → `send-unknown` + needs_review，禁止自动重试。网页「预演」与真发共用 ①②③（预演只报告，不写平台；`content_found` 无到货日历，只有 ①②）。**页面契约（2026-09-10 实测）**：消息行是 `.chatd-message`，我方消息带 `chatd-message--right`（气泡 `chatd-bubble-main--self`），对方是 `--left`/`--other`；时间标签在行内 `.chatd-message-time .chatd-time`（`Sep 3 5:55 PM` / `Tuesday, 4:55 AM` / `昨天 5:46 AM`），**无标签的行沿用上一条的时间**，图片消息是 `.chatd-imageMessage` 且无文本。聊天数面板与「新消息」抽屉都是异步渲染：必须短轮询就绪（`_wait_for_page_flag` + `CHAT_PANEL_READY_JS`/`NEW_MESSAGE_DRAWER_READY_JS`，各 20s）再点下一步，固定 sleep 1s 实测不够（会报 `no-chat-panel`）；`INSPECT_IM_JS` 在导航后无 composer 时也不能抛错（`input` 为 null 要短路）。**局限**：时间标签按页面本地时区渲染，跨零点可能差一天（窗口是 3 天，可容忍）；只覆盖已加载的消息（最近一屏），更早的历史要滚动才有；指纹仍只认我们自己模板的措辞——指纹与窗口都没命中时不要 execute，改用详情页「标记已发跟进私信 / 标记已发感谢私信」只记本地完成。
+
+**SQLite 写锁与任务心跳（2026-09-10 加）：** 连接固定 `PRAGMA busy_timeout=30000`（`assistant/database/engine.py`）；心跳失败只重试并记一条 warning，不打堆栈。`STALE_JOB_TIMEOUT_SECONDS=150` 必须明显大于 busy_timeout，否则长事务（生成待办 / 物流同步）期间正在跑的任务会被 `mark_stale_jobs_interrupted` 误判为中断。不要为 `database is locked` 去缩短超时，也不要指望心跳失败能自动区分「任务死了」和「写锁被占」。
 
 **跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。有简介时走 LLM JSON 的 `lang`（不看 `confidence`；`.env`：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，默认 DeepSeek `deepseek-v4-flash`）；空简介、识别失败或非法 lang 默认英语。`sync_shipped_tracking.py` 已是这个优先级。
 

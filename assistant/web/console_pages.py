@@ -338,8 +338,11 @@ def _followup_preview_status(task: Any) -> tuple[str, str, str]:
     """Last preview/attempt outcome for the detail page (display only).
 
     ``send_confirmation == "dry-run"`` is written only by the preview endpoint,
-    so it can be reported as a successful preview. Any ``last_error`` is
-    surfaced as-is, because it may come from a preview or from a send attempt.
+    so it can be reported as a successful preview. ``already-sent`` means the
+    conversation already carries this copy (preview or send-time check), which
+    must be shown as a warning instead of an invitation to send again. Any
+    ``last_error`` is surfaced as-is, because it may come from a preview or
+    from a send attempt.
     """
     send_confirmation = str(task.send_confirmation or "")
     last_error = str(task.last_error or "")
@@ -349,6 +352,13 @@ def _followup_preview_status(task: Any) -> tuple[str, str, str]:
         if isinstance(previewed_at, datetime)
         else ""
     )
+    if send_confirmation == "already-sent" and not last_error:
+        return (
+            "issue",
+            "会话里已有我方发出的消息（本阶段窗口内）或同一话术："
+            "视为已发送，不要重复发送",
+            preview_at,
+        )
     if send_confirmation == "dry-run" and not last_error:
         return "ok", "预演成功：已打开会话并核对身份，未发送", preview_at
     if last_error:

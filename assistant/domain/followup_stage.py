@@ -77,6 +77,38 @@ def latest_due_unpublished_stage(days: int) -> tuple[str, int] | None:
 
 
 MESSAGE_STAGES = frozenset({"arrival", "day_3", "day_7"})
+STAGE_WINDOW_SCAN_DAYS = 60
+
+
+def stage_window_dates(
+    *,
+    stage: str,
+    delivered_on: date | None,
+) -> tuple[date, date] | None:
+    """Return the natural-day window in which ``stage`` is the current node.
+
+    Derived from :func:`latest_due_unpublished_stage` so the sendable check and
+    the duplicate check cannot drift apart: arrival covers D+0..D+2, day_3
+    D+3..D+6, day_7 D+7..D+9. Returns ``None`` for stages without a delivery
+    calendar (``content_found``) or when the delivery date is unknown.
+    """
+    if stage not in MESSAGE_STAGES or delivered_on is None:
+        return None
+    window_start: date | None = None
+    window_end: date | None = None
+    for elapsed_days in range(0, STAGE_WINDOW_SCAN_DAYS):
+        latest = latest_due_unpublished_stage(elapsed_days)
+        if latest is None or latest[0] != stage:
+            if window_start is not None:
+                break
+            continue
+        elapsed_date = delivered_on + timedelta(days=elapsed_days)
+        if window_start is None:
+            window_start = elapsed_date
+        window_end = elapsed_date
+    if window_start is None or window_end is None:
+        return None
+    return window_start, window_end
 
 
 def is_stale_followup_stage(*, stage: str, days: int | None) -> bool:

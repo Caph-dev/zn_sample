@@ -35,7 +35,7 @@ from assistant.domain.platform_status import (
 )
 from assistant.domain.policies import choose_followup_creator_type, choose_followup_language
 from assistant.domain.sku_images import resolve_followup_attachment
-from assistant.domain.timeutil import beijing_now
+from assistant.domain.timeutil import beijing_date, beijing_now
 from assistant.services.page_lock import STORE_BUSY_ERROR, blocking_jobs
 from scripts.lib.feishu_bitable import COOPERATION_STATUS_COMPLETED, COOPERATION_STATUS_UNPUBLISHED
 
@@ -304,12 +304,26 @@ class FollowupService:
             shop_id = str(store.shop_id if store else "")
             body = str(task.message_preview)
             attachment_key = str(task.attachment_key or "")
+            stage = str(task.stage or "")
+            shipment = session.scalar(
+                select(Shipment).where(Shipment.sample_case_id == task.sample_case_id)
+            )
+            delivered_on = (
+                beijing_date(shipment.delivered_at)
+                if shipment is not None and shipment.delivered_at is not None
+                else None
+            )
         blocking = blocking_jobs(self.session_factory)
         if blocking:
             raise ValueError(STORE_BUSY_ERROR)
         if not store_id:
             raise ValueError("missing-store")
-        from lib.im_api import send_direct_message
+        from lib.im_api import (
+            send_direct_message,
+            thread_contains_message_predicate,
+            thread_thanks_hold_reason,
+        )
+        from lib.im_dom import self_message_in_window_predicate
 
         result = send_direct_message(
             store_id,
@@ -319,6 +333,12 @@ class FollowupService:
             shop_id=shop_id,
             execute=False,
             write_source="api",
+            already_sent_predicate=thread_contains_message_predicate(body),
+            already_sent_message_predicate=self_message_in_window_predicate(
+                stage=stage,
+                delivered_on=delivered_on,
+            ),
+            hold_predicate=thread_thanks_hold_reason,
         )
         result["attachment_key"] = attachment_key
         result["execute"] = False
@@ -326,9 +346,17 @@ class FollowupService:
             task = session.get(FollowupTask, task_id)
             if task is not None:
                 task.previewed_at = beijing_now()
+                status = str(result.get("status") or "")
                 if result.get("ok"):
-                    task.send_confirmation = str(result.get("status") or "dry-run")
+                    task.send_confirmation = status or "dry-run"
                     task.last_error = ""
+                elif status == "held":
+                    task.send_confirmation = "held"
+                    task.last_error = (
+                        "会话里已有感谢话术"
+                        f"（{result.get('reason') or 'unknown'}）；"
+                        "预演不会发送，请人工确认"
+                    )
                 else:
                     task.last_error = str(
                         result.get("error")

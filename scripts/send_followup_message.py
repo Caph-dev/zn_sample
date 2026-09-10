@@ -12,7 +12,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,7 @@ def select_sendable_tasks(
     )
     from assistant.domain.platform_status import PLATFORM_STATUS_PROCESSING
     from assistant.domain.policies import message_send_idempotency_key
+    from assistant.domain.timeutil import beijing_date
 
     query = (
         select(FollowupTask, SampleCase, Store, Shipment)
@@ -173,6 +174,11 @@ def select_sendable_tasks(
                 "creator_id": str(sample_case.creator_id or ""),
                 "creator_name": str(sample_case.creator_name or ""),
                 "product_id": str(sample_case.product_id or ""),
+                "delivered_on": (
+                    beijing_date(delivered_at).isoformat()
+                    if delivered_at is not None
+                    else ""
+                ),
                 "store_ziniao_id": str(store.ziniao_store_id or ""),
                 "feishu_record_id": str(sample_case.feishu_record_id or ""),
                 "message": str(task.message_preview or ""),
@@ -222,6 +228,21 @@ def resolve_attachment_path(row: dict[str, Any]) -> Path | None:
     if not path.is_absolute():
         path = ROOT / path
     return path if path.is_file() else None
+
+
+def row_window_predicate(row: dict[str, Any]):
+    """Duplicate check that ignores wording: any self message in the stage window.
+
+    Returns ``None`` when the row has no delivery calendar (content_found) or no
+    confirmed delivery date, so the caller keeps its text-based checks.
+    """
+    from lib.im_dom import self_message_in_window_predicate
+
+    delivered_on = str(row.get("delivered_on") or "").strip()
+    return self_message_in_window_predicate(
+        stage=str(row.get("stage") or ""),
+        delivered_on=date.fromisoformat(delivered_on) if delivered_on else None,
+    )
 
 
 def find_running_jobs(
@@ -657,6 +678,7 @@ def run(args: argparse.Namespace) -> int:
             execute=bool(args.execute),
             wait=float(args.send_wait),
             already_sent_predicate=thread_contains_message_predicate(row["message"]),
+            already_sent_message_predicate=row_window_predicate(row),
             hold_predicate=thread_thanks_hold_reason,
             image_path=attachment,
         )

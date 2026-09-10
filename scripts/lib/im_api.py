@@ -539,6 +539,7 @@ def send_direct_message(
     wait: float = 2.5,
     write_source: str = "api",
     already_sent_predicate: Callable[[str], bool] | None = None,
+    already_sent_message_predicate: Callable[[list[dict[str, Any]]], str] | None = None,
     hold_predicate: Callable[[str], str] | None = None,
     image_path: str | Path | None = None,
     image_chunk_chars: int = DEFAULT_IMAGE_CHUNK_CHARS,
@@ -549,6 +550,8 @@ def send_direct_message(
     the IM SDK or click the send button. ``execute=True`` is required to send.
     ``hold_predicate`` returns a non-empty reason when the thread shows the job
     is moot (for example an already-sent thanks message); the send is skipped.
+    ``already_sent_message_predicate`` 看的是逐条消息（方向 + 时间），用于
+    「本阶段窗口内已有我方消息」这种与措辞无关的重复判定，同样只跳过、不发送。
     ``image_path`` 只在文本确认发送后、且 ``write_source="api"`` 时追加发送；
     ``shop_id`` 仅为兼容既有调用方保留；打开会话不使用它，也不导航到其它页面。
     """
@@ -557,6 +560,7 @@ def send_direct_message(
         fill_or_send_message,
         im_thread_text_with_tail,
         inspect_current_thread,
+        inspected_messages,
         open_conversation_via_new_message,
     )
 
@@ -598,6 +602,19 @@ def send_direct_message(
                 "reason": hold_reason,
                 "message": normalized_body,
                 "image_planned": image_planned,
+            }
+    if already_sent_message_predicate is not None:
+        window_reason = str(
+            already_sent_message_predicate(inspected_messages(probe)) or ""
+        ).strip()
+        if window_reason:
+            return {
+                "ok": True,
+                "status": "already-sent",
+                "reason": window_reason,
+                "message": normalized_body,
+                "image_planned": image_planned,
+                "image_skipped": "already-sent" if image_planned else "",
             }
     if not execute:
         return {

@@ -32,6 +32,7 @@ from send_followup_message import (  # noqa: E402
     record_stale_stage,
     release_stale_claims,
     resolve_attachment_path,
+    row_window_predicate,
     run,
     select_sendable_tasks,
     write_pre_execute_backup,
@@ -146,6 +147,7 @@ class SendFollowupSelectionTests(unittest.TestCase):
         self.assertEqual(row["stage"], "arrival")
         self.assertEqual(row["creator_id"], "id-creator")
         self.assertEqual(row["store_ziniao_id"], "store-1")
+        self.assertEqual(row["delivered_on"], TODAY.isoformat())
         self.assertEqual(
             row["idempotency_key"],
             "store-1|id-creator|1732414717062320994|arrival|2026-09-10",
@@ -669,6 +671,117 @@ class SendFollowupMutexTests(FollowupClaimTestBase):
             ),
             [],
         )
+
+
+class SendFollowupWindowPredicateTests(unittest.TestCase):
+    """窗口内已有我方消息即视为已发，与话术措辞无关。"""
+
+    def test_arrival_row_matches_a_self_message_inside_the_window(self) -> None:
+        predicate = row_window_predicate(
+            {"stage": "arrival", "delivered_on": "2026-09-08"}
+        )
+        self.assertIsNotNone(predicate)
+
+        self.assertEqual(
+            predicate([{"is_self": True, "time_text": "Sep 9 7:00 AM", "text": "Hi"}]),
+            "self-message-in-window",
+        )
+        self.assertEqual(
+            predicate([{"is_self": True, "time_text": "Sep 20 7:00 AM"}]),
+            "",
+        )
+        self.assertEqual(
+            predicate([{"is_self": False, "time_text": "Sep 9 7:00 AM"}]),
+            "",
+        )
+
+    def test_rows_without_a_delivery_calendar_get_no_predicate(self) -> None:
+        self.assertIsNone(
+            row_window_predicate({"stage": "content_found", "delivered_on": "2026-09-08"})
+        )
+        self.assertIsNone(row_window_predicate({"stage": "arrival", "delivered_on": ""}))
+        self.assertIsNone(row_window_predicate({}))
+
+
+class SendFollowupRunWindowGuardTests(FollowupClaimTestBase):
+    def add_delivery_today(self) -> date:
+        from assistant.domain.timeutil import beijing_now
+
+        delivered_on = beijing_now().date()
+        with self.session_factory() as session:
+            case = session.scalars(select(SampleCase)).first()
+            session.add(
+                Shipment(
+                    sample_case_id=case.id,
+                    delivered_at=datetime.combine(
+                        delivered_on, time(1, 0), tzinfo=timezone.utc
+                    ),
+                    status_category="delivered",
+                )
+            )
+            session.commit()
+        return delivered_on
+
+    def run_dry(self) -> tuple[int, dict]:
+        import send_followup_message
+
+        captured: dict = {}
+
+        def fake_send_direct_message(store_id, body, **kwargs):
+            captured.update(kwargs)
+            captured["store_id"] = store_id
+            return {"ok": True, "status": "dry-run"}
+
+        args = SendFollowupGateTests()._args(execute=False, task_id=self.task_id)
+        with (
+            patch.object(send_followup_message, "load_dotenv"),
+            patch.object(send_followup_message, "configure_logging"),
+            patch.object(send_followup_message, "set_verbose"),
+            patch.object(send_followup_message, "find_running_jobs", return_value=[]),
+            patch.object(
+                send_followup_message, "resolve_store_id", return_value="store-1"
+            ),
+            patch.object(
+                send_followup_message,
+                "send_direct_message",
+                side_effect=fake_send_direct_message,
+            ),
+            patch(
+                "assistant.database.engine.create_database_engine",
+                return_value=self.engine,
+            ),
+            patch(
+                "assistant.paths.database_path",
+                return_value=self.database_file,
+            ),
+        ):
+            exit_code = run(args)
+        return exit_code, captured
+
+    def test_run_passes_the_window_guard_with_the_delivery_date(self) -> None:
+        delivered_on = self.add_delivery_today()
+
+        exit_code, captured = self.run_dry()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["store_id"], "store-1")
+        window_predicate = captured["already_sent_message_predicate"]
+        self.assertIsNotNone(window_predicate)
+        today_label = f"{delivered_on.strftime('%A')}, 9:00 AM"
+        self.assertEqual(
+            window_predicate([{"is_self": True, "time_text": today_label}]),
+            "self-message-in-window",
+        )
+        self.assertEqual(
+            window_predicate([{"is_self": False, "time_text": today_label}]),
+            "",
+        )
+
+    def test_run_without_a_delivery_date_passes_no_window_guard(self) -> None:
+        exit_code, captured = self.run_dry()
+
+        self.assertEqual(exit_code, 4)
+        self.assertEqual(captured, {})
 
 
 if __name__ == "__main__":

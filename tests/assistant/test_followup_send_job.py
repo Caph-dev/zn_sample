@@ -24,6 +24,7 @@ from assistant.database.models import (  # noqa: E402
     FollowupTask,
     Job,
     SampleCase,
+    Shipment,
     Store,
 )
 from assistant.domain.followup_labels import followup_action_display  # noqa: E402
@@ -769,10 +770,88 @@ class FollowupPreviewStatusTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "held")
         task = self.load_task()
-        self.assertEqual(task.last_error, "content-thanks-found")
+        self.assertEqual(task.send_confirmation, "held")
+        self.assertIn("content-thanks-found", task.last_error)
+        self.assertIn("已有感谢话术", task.last_error)
         payload = self.payload()
         self.assertEqual(payload["preview_state"], "issue")
         self.assertIn("content-thanks-found", payload["preview_label"])
+
+    def test_preview_passes_the_duplicate_guards_to_the_send_helper(self) -> None:
+        from lib.im_api import thread_thanks_hold_reason
+
+        captured_kwargs: dict = {}
+
+        def fake_send_direct_message(store_id, body, **kwargs):
+            captured_kwargs.update(kwargs)
+            captured_kwargs["body"] = body
+            return {"ok": True, "status": "dry-run"}
+
+        with patch("lib.im_api.send_direct_message", side_effect=fake_send_direct_message):
+            FollowupService(self.session_factory).preview_followup_message(self.task_id)
+
+        already_sent_predicate = captured_kwargs["already_sent_predicate"]
+        self.assertTrue(already_sent_predicate(captured_kwargs["body"]))
+        self.assertFalse(already_sent_predicate("an unrelated reply from the creator"))
+        self.assertIs(captured_kwargs["hold_predicate"], thread_thanks_hold_reason)
+
+    def test_preview_of_an_already_sent_thread_is_flagged(self) -> None:
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={"ok": True, "status": "already-sent"},
+        ):
+            result = FollowupService(self.session_factory).preview_followup_message(
+                self.task_id
+            )
+        self.assertEqual(result["status"], "already-sent")
+        task = self.load_task()
+        self.assertEqual(task.send_confirmation, "already-sent")
+        self.assertEqual(task.last_error, "")
+        payload = self.payload()
+        self.assertEqual(payload["preview_state"], "issue")
+        self.assertIn("不要重复发送", payload["preview_label"])
+
+    def test_preview_passes_the_window_guard_when_a_delivery_date_exists(self) -> None:
+        with self.session_factory() as session:
+            session.add(
+                Shipment(
+                    sample_case_id=self.sample_case_id,
+                    delivered_at=datetime(2026, 9, 8, 1, 0, tzinfo=timezone.utc),
+                    status_category="delivered",
+                )
+            )
+            session.commit()
+        captured_kwargs: dict = {}
+
+        def fake_send_direct_message(store_id, body, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {"ok": True, "status": "dry-run"}
+
+        with patch("lib.im_api.send_direct_message", side_effect=fake_send_direct_message):
+            FollowupService(self.session_factory).preview_followup_message(self.task_id)
+
+        window_predicate = captured_kwargs["already_sent_message_predicate"]
+        self.assertIsNotNone(window_predicate)
+        self.assertEqual(
+            window_predicate([{"is_self": True, "time_text": "Sep 9 7:00 AM"}]),
+            "self-message-in-window",
+        )
+        self.assertEqual(
+            window_predicate([{"is_self": True, "time_text": "Sep 20 7:00 AM"}]),
+            "",
+        )
+
+    def test_preview_without_a_delivery_date_passes_no_window_guard(self) -> None:
+        captured_kwargs: dict = {}
+
+        def fake_send_direct_message(store_id, body, **kwargs):
+            captured_kwargs.update(kwargs)
+            return {"ok": True, "status": "dry-run"}
+
+        with patch("lib.im_api.send_direct_message", side_effect=fake_send_direct_message):
+            FollowupService(self.session_factory).preview_followup_message(self.task_id)
+
+        self.assertIsNone(captured_kwargs["already_sent_message_predicate"])
 
     def test_preview_timestamp_is_shown(self) -> None:
         self.record(send_confirmation="dry-run", previewed_at=datetime(2026, 9, 10, 12, 34))
