@@ -1,0 +1,268 @@
+# 达人跟进自动化开发计划（Phase 1–4）
+
+日期：2026-09-10
+分支：`creator-followup-page`
+状态：待实施。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
+
+权威口径：`样品申请筛查sop/2-查看到货+达人跟进.md`（项目约定 + 2026-08-26 文档更新）。
+飞书 wiki 正文里的旧日历（到货第五天 / 每隔两天）与 B006-A 一律忽略，不进入代码、话术与验收。
+
+## 0. 已确认决策（2026-09-10）
+
+| # | 问题 | 决策 |
+|---|------|------|
+| 1 | D0 / D+3 / D+7 与感谢私信 | **脚本自动发送**，不再只做「人工发、系统记录」 |
+| 2 | B005 配图 | 平台 IM 应允许发图片，**优先 SDK**；SDK 不支持时**先停止并汇报**，不擅自改 DOM 上传 |
+| 3 | D+10 名单交付 | 当前版本只做**本地留痕 + CSV** |
+| 4 | D+15 未履约 | **允许批量写飞书** |
+| 5 | 内容巡检数据源 | **TikHub API**（与 SOP 第 5 步内容审核同源） |
+| 6 | 触发方式 | **人工启动脚本**（与 0/1/2/3 一致），不做定时 |
+| 7 | 网页角色 | 操作台**新增「发送」按钮**（受限写路径，每次 1 条）；其余能力保持只读/预演 |
+| 8 | 感谢私信前置 | **业务员确认内容后**再发送 |
+| 9 | 巡检频率 | **每天一次全量**（处理中到货达人） |
+| 10 | D+15 批量门闩 | `--execute --yes` + 显式上调 `--execute-limit` + 写前备份 |
+
+决策 6–10 于 2026-09-10 补充确认，详见 §9；仅剩 TikHub 每日配额的具体数字待实现时按第 5 步现状核对。
+
+## 1. 目标与边界
+
+### 1.1 目标
+
+把 SOP 2「达人跟进」从「本地预览 + 人工执行」推进到「脚本自动执行」，形成可审计闭环：
+
+1. 到货当天 D0、第 3 天、第 7 天：自动发送跟进私信（语言 × 视频/直播类型；B005 刚到货附图）。
+2. 达人出视频/直播：内容巡检出候选 → 业务员确认 → 自动发送感谢私信 + 可选写飞书「已完成」。
+3. 第 10 天仍未发布：导出名单 CSV，本地留痕。
+4. 第 15 天仍未履约：批量把飞书合作状态改为「未发布」。
+5. 送达日确认、页面对账与可观测性补齐。
+
+### 1.2 非目标
+
+- 不改正式 SOP 1（筛查/批准）与既有 0/1/2/3 入口行为。
+- 不实现 wiki 旧日历（D+5 / 每隔两天 / 循环发送）与 B006-A。
+- 除「发送跟进私信」这一个受限按钮外，不新增任何网页写路径；发送仍由后端固定任务调用既有脚本，网页不可覆盖 store / limit / source 等参数（决策 7）。
+- 不自动拒绝、不自动补发历史阶段（只做当前最新该做的一步）。
+- 不做买返样品跟进；跟进池仍只扫免费样品【处理中】（`tab=40`）。
+
+### 1.3 非协商纪律（沿用仓库规则）
+
+- 真实发送/写飞书必须 `--execute --yes`（+ `--write-feishu`），`--execute-limit` 默认 1，不得新增参数绕过。
+- 执行前写 `*_pre_execute.*` 备份；`shadow` 禁止配合 `--execute`。
+- 发送结果未知（`send-unknown`）不重试、不写飞书、不自动补发。
+- 平台发送不可撤销；网页不给运行中的写任务提供取消按钮。
+- 语言判定优先级：飞书「使用语言」> 详情简介 `detect_creator_lang`（LLM `lang`，不看 confidence）> 空/失败默认英语。
+- 类型判定：手工设置 > 视频/直播标记；视频+直播同时标记按视频达人话术，不拆两条。
+
+## 2. 已核实的现状（2026-09-10）
+
+### 2.1 已经具备
+
+- **日历与待办生成**：`assistant/domain/followup_stage.py` 的 `latest_due_unpublished_stage` / `plan_followup_mutation`；`FollowupService.generate()`（`assistant/services/followup_service.py`）按【处理中】+ 到货自然日生成唯一最新阶段，旧阶段 `suppressed_by_later_stage`，已确认内容则生成 `content_found`。
+- **话术与附件**：`assistant/domain/message_templates.py`（`TEMPLATE_VERSION=1`，阶段 × video/live × en/es × B005），`attachment_key` + 详情页展示 B005 讲解图。
+- **语言/类型策略**：`assistant/domain/policies.py`（含 `message_send_idempotency_key`，目前尚未实装到发送）。
+- **任务与页面**：`assistant/api/followups.py`（预演/本地标记/内容确认/未履约）、`assistant/web/routes.py`（`/followups`、`/followups/{id}`）、React 页面与 bootstrap 数据（`assistant/web/console_pages.py`、`frontend/src/console/pages/`）。
+- **物流同步**：`daily_refresh`（物流同步 + 待办生成）与 `shipment_sync` 已能更新到货状态与 `delivered_at`。
+- **内容能力**：第 5 步内容审核库 `scripts/lib/tiktok_creator_videos.py` + `scripts/lib/creator_video_review.py`（TikHub + 视觉证据 + 系统级故障熔断）；`ContentThanksService` 已完成候选匹配、内容判定、话术与线程检查（`assistant/services/content_thanks_service.py`）。
+- **飞书写入**：`update_record_cooperation_status`（已完成 / 未发布）与显式开关。
+
+### 2.2 缺口（本计划要解决的）
+
+| # | 缺口 | 证据 |
+|---|------|------|
+| G1 | 没有阶段私信真实发送路径 | `FollowupService.preview_followup_message` 固定 `execute=False`；`send_sample_intro.py` 是批准后介绍、`sync_shipped_tracking.py` 是物流单号，都不覆盖 D0/D+3/D+7 |
+| G2 | IM SDK 只发纯文本，B005 图片发不了 | `scripts/lib/im_api.py::send_direct_message` 只接受 `body` 文本 |
+| G3 | 内容发现靠人工确认，没有每日巡检 | 无跟进侧巡检任务；`content_thanks_preview` 只预演且 execute/write 硬禁用 |
+| G4 | 发送结果与「本地人工标记」混淆 | `send_result` 只有 `marked-sent` / `listed`；没有平台确认/未知的区分 |
+| G5 | D+10 无交付留痕 | 导出 CSV 已有，但无批次记录 |
+| G6 | D+15 只能逐条 | 页面逐条勾选写飞书 |
+| G7 | 送达日确认无入口 | `confirm_delivery_time` 哨兵任务停在 `needs_review`，物流详情只读 |
+| G8 | 列表不可分页/搜索/批量 | `/followups` 全量渲染 |
+
+测试基线（2026-09-10）：`.venv/bin/python -m unittest discover -s tests -q` → `Ran 642 tests ... OK`。
+
+## 3. Phase 1（P0）— 跟进私信真实发送
+
+### 3.1 交付物
+
+1. 新脚本 `scripts/send_followup_message.py`（唯一真发路径）。
+2. `scripts/lib/im_api.py` 扩展：图片消息能力（依赖 3.3 spike 结论）。
+3. `followup_tasks` 发送结果语义扩展 + 标签更新（`assistant/domain/followup_labels.py`）。
+4. 操作台发送入口：新任务类型 + 详情页「发送」按钮 + 确认弹窗（见 3.6）。
+5. 详情页发送状态展示（只读）。
+6. 单测 + 1 号店限量实测清单。
+7. AGENTS.md 同步：登记新任务类型与保护集，并在决策 7 授权范围内更新网页写路径契约。
+
+### 3.2 脚本契约（对齐既有 CLI 纪律）
+
+| 参数 | 约束 |
+|------|------|
+| `--store-id` / `--store-name` | 显式 > running 唯一 > 测试默认 1 号店；多店/生产必须显式 |
+| `--stage` | `arrival\|day_3\|day_7\|content_found`；不传按到期任务批次 |
+| `--creator-id` / `--creator-name` | 指定单条达人；与 `--stage` 组合用于定向实测 |
+| `--execute --yes` | 唯一真发门闩，缺一退出码 2 |
+| `--execute-limit` | 默认 1；正整数；批量须显式调大 |
+| `--write-feishu` | 仅 `content_found` 语义需要（合作状态→已完成）；默认关 |
+| 页面前提 | 与 `send_sample_intro.py` 相同：已登录 + 停在样品申请页，或显式 `--from-seller-home` |
+
+发送流程（逐条，串行）：
+
+1. **选任务**：`status=pending`、未完成、`scheduled_for <= 今天`、平台【处理中】、有 `template_key`、非 `needs_review`。
+2. **幂等预检**：本地 `sent_at` / `send_result=platform-sent` 直接跳过；平台侧用线程文本指纹二次确认。
+3. **预演**：`send_direct_message(..., execute=False)` 打开会话并核对 `composer_identity_matches`；失败即停，不发送。
+4. **备份**：`*_pre_execute.*`（任务快照 + 渲染后话术 + 目标达人 + 幂等键）。
+5. **发送**：`send_direct_message(..., execute=True, write_source="api")`，`already_sent_predicate` 传入话术指纹（复用 `thread_has_named_intro` 思路，新增通用指纹函数）。
+6. **落库**：
+   - 确认已发 → `sent_at`、`send_result=platform-sent`、`send_confirmation=<指纹>`；
+   - 结果未知 → `send_result=send-unknown`、`status=needs_review`、`review_reason=send_unknown_needs_review`（**移出自动发送池**，不重试）；
+   - 失败（未发送）→ `last_error`，保持 `pending`，下次人工决定。
+7. **可选飞书**：仅当确认已发且 `--write-feishu`。
+
+### 3.3 B005 图片 spike（先做，带停止点）
+
+- 只读探查 SDK：确认当前 IM SDK 是否暴露图片消息能力（消息类型、上传接口、大小/格式限制）。
+- 支持 → 实现附件发送：D0 + B005 + `attachment_key` 存在时随文发送图片。
+- **不支持 → 停止**，输出结论（SDK 版本、缺失能力、可行替代）并向业务汇报，不擅自做 DOM 上传或第三方图床。
+- 若后续改为 DOM 上传，须另开计划并补「上传后核对预览/实际消息」的确认步骤。
+
+### 3.4 数据与语义
+
+- 复用 `followup_tasks` 现有字段（`sent_at` / `send_result` / `send_confirmation` / `last_error`），不新建表。
+- `send_result` 取值：
+  - `platform-sent`（新）：平台发送后经线程确认；
+  - `send-unknown`（新）：已发出但未确认，禁止自动重试；
+  - `marked-sent`（保留）：网页人工标记，不等同平台发送；
+  - `listed`（保留）：D+10 已出名单。
+- 标签同步更新 `FOLLOWUP_ACTION_COMPLETED_LABELS` / 详情页文案，明确区分「平台已发送 / 本地人工标记 / 未确认」。
+- 幂等键使用既有 `message_send_idempotency_key`（`policies.py`），不再另造。
+
+### 3.5 互斥与安全
+
+- 同一时刻只允许一个占用店铺/会话的写任务：启动前解析 running 店；检测到 `operator_pipeline` / `operator_tracking` / `auto_approval_execute` 等写任务运行中直接拒绝。
+- 与 16:00 无关（跟进私信不受物流时间门限制）。
+- 每条发送前检查取消信号；批量中途取消只保留已确认结果。
+
+### 3.6 操作台发送入口（新增受限写路径）
+
+决策 7 允许操作台出现一个受限写入口，约束如下：
+
+- **固定任务**：新增任务类型 `operator_followup_send`，handler 用启动操作台的 `sys.executable` 调用 `send_followup_message.py`；不接受 shell 字符串，不执行 `.command` / `.bat`。
+- **参数白名单**：服务端只接受两种固定请求——单条 `task_id`（详情页）或「到期一条」（列表页至多 1 条）；`store` 由 running 唯一店解析，`limit` 固定 1，网页不提供输入框，不得覆盖 store / limit / source。
+- **确认门**：沿用现有确认弹窗 + 键入 `y`；缺确认不创建任务。
+- **任务保护**：登记进 `ZINIAO_JOB_TYPES` 与 `PROTECTED_JOB_TYPES`；运行中不提供取消按钮；与 `operator_tracking` / `operator_pipeline` / `auto_approval_execute` 互斥。
+- **按钮位置**：
+  - 详情页：「发送这条跟进私信」（`send_message` 阶段）、「发送感谢私信」（`content_found` 阶段，须先完成内容确认）；
+  - 列表页：只保留「生成今日跟进待办」，V1 不做批量发送（批量需要放宽 limit，不开放）。
+- **结果展示**：任务事件 + 详情页发送状态（平台已发送 / 本地人工标记 / 未确认）。
+- **验收**：一次点击最多发送 1 条；重复点击由幂等键与本地状态去重。
+
+### 3.7 验收（DoD）
+
+- 1 号店选 1 条真实 D0 任务：预演 → 发送 → 平台确认 → 本地 `platform-sent`；重复运行不重发。
+- 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归。
+- 操作台按钮：缺确认不建任务、运行中无取消、点击一次最多一条。
+- 网页只新增发送入口；其余仍只有预演与本地标记；详情页能看到平台发送状态。
+
+## 4. Phase 2（P0/P1）— 内容巡检 + 感谢私信
+
+### 4.1 每日内容巡检（只读）
+
+- 新任务类型 `followup_content_scan`：对【处理中】且已到货的达人抓 TikTok 最近视频/直播。
+- 复用第 5 步 `review_creator_rows` / `tiktok_creator_videos` 与 TikHub 配置。
+- 熔断沿用：错误串含 `code=100000` / `Please remove the plugin` 连续 3 行即停，剩余标 `needs_review`，只记一条汇总。
+- 产出候选（含证据链接），落 `ContentEvidence(content_status="suspect")`，**不改任务状态**。
+- 候选在跟进列表/详情页以筛选（如 `status=content_candidate`）呈现。
+
+### 4.2 确认与感谢私信
+
+- 业务员在详情页确认内容（保留现有 confirm-content 流程；可预填巡检证据链接与内容类型）。
+- 确认后详情页出现「发送感谢私信」按钮（复用 3.6 的受限写入口），按内容类型发送 `video_found_*` / `live_found_*` 感谢话术；语言判定沿用同一策略；「业务员确认后才发」由决策 8 固定。
+- `content_thanks_preview` 从「硬禁用」升级为「默认关闭 + 门闩」：
+  - job 参数显式开启执行；仍 `--execute --yes` 语义等价；
+  - `--write-feishu` 独立开关写「已完成」；
+  - 不确定匹配、线程可疑、类型未知仍 hold，不发送。
+
+### 4.3 验收
+
+- 1 号店 1 条：巡检命中 → 人工确认 → 发送感谢私信 → （可选）飞书已完成。
+- 熔断、hold、already-sent 路径有单测。
+- 关闭开关时行为与现状一致（只预演）。
+
+## 5. Phase 3（P1）— D+10 / D+15 / 列表可用性
+
+### 5.1 D+10 本地留痕
+
+- 导出 CSV 到 `user_data_dir()/exports/`（现有导出链路），文件名含批次时间与行数。
+- 新增批次元数据：导出任务的 `result_summary` 记录文件路径、行数、生成时间（不新建表）。
+- 列表页支持批量「标记已出名单」；批次与本地任务 `send_result=listed` 对账。
+
+### 5.2 D+15 批量写飞书
+
+- 脚本参数：`--stage unfulfilled --execute --yes --write-feishu`，批量须显式上调 `--execute-limit`。
+- 逐行校验：已有内容证据拒绝、无 `feishu_record_id` 跳过、非 unfulfilled 阶段跳过。
+- 写前备份全量行；逐行结果落 `last_error` / 日志；失败不自动重试；结束输出成功/跳过/失败清单。
+- 完成后本地状态与飞书状态对账提示。
+
+### 5.3 列表可用性
+
+- 分页（服务端 `LIMIT/OFFSET`）、达人搜索（creator_name/creator_id）、批量选择（跳过、标记已出名单）。
+- 保持 superseded 默认隐藏，状态筛选可显式包含。
+
+## 6. Phase 4（P2）— 送达日确认与可观测性
+
+### 6.1 送达日人工确认
+
+- 详情页或物流详情页新增「确认实际送达日」表单 → API 写 `Shipment.delivered_at`。
+- 必须人工选择日期，**禁止把 ETA / `predict_delivery_time_text` 当送达**。
+- 写入后解决 `confirm_delivery_time` 哨兵任务（suppressed）并重排日历；页面提示「下次生成待办时按新日期计算」。
+- 校验：日期不得晚于今天（北京时间）、不得早于发货事件。
+
+### 6.2 可观测性
+
+- 跟进时间线：任务生成 / 预演 / 发送 / 飞书写入 / 内容证据的只读视图（数据来自任务字段 + ContentEvidence）。
+- 运行准备页：IM 链路只读探活（Bridge + 会话路径），不得并发探测，busy 时读缓存。
+
+## 7. 验收与测试总表
+
+| Phase | 关键验收 | 新增测试重点 |
+|-------|----------|--------------|
+| 1 | 1 号店 D0 实发 1 条并确认；重跑不重发 | 门闩/限量/幂等/备份/send-unknown/标签 |
+| 2 | 巡检 → 确认 → 感谢私信 1 条 | 熔断/hold/类型与语言/候选筛选 |
+| 3 | 批量未履约写飞书（限量实测）；D+10 留痕文件 | 批量校验/拒绝路径/对账 |
+| 4 | 人工送达日 → 哨兵解决 → 日历重排 | 日期校验/ETA 拒绝/状态迁移 |
+
+统一要求：
+
+- 每个 Phase 合并前跑 `.venv/bin/python -m unittest discover -s tests -q` 全绿（基线 642）。
+- 实店动作一律 `--execute-limit=1` 起步，验收记录写入导出或任务事件。
+- 不改动 `plans/` 之外的既有计划；AGENTS.md 必须同步本次契约变化：新增任务类型 `followup_content_scan`、`operator_followup_send` 登记进 `ZINIAO_JOB_TYPES` 与 `PROTECTED_JOB_TYPES`，并把「网页不是新的业务写路径」更新为「唯一受限写入口：跟进私信发送」（决策 7）。
+
+## 8. 风险与依赖
+
+| 风险 | 影响 | 处置 |
+|------|------|------|
+| IM SDK 图片能力未知 | B005 附图发送无法实现 | Phase 1 spike 先行；不支持即停止汇报（已确认决策 2） |
+| TikHub 配额/费用 | 内容巡检不可持续 | 按第 5 步同一配置与预算；必要时限量（见 §9） |
+| 反爬熔断误伤 | 巡检/详情接口系统级失败 | 沿用 `SYSTEMIC_DETAIL_FAILURE_LIMIT` 熔断与汇总日志 |
+| 会话路径互斥 | 与批准/物流脚本冲突 | 单店写任务串行 + 启动前 running 校验 |
+| `send-unknown` 误判 | 重复发送或漏发 | 线程指纹 + `needs_review` 人工处置；绝不自动重试 |
+| 时区/自然日 | 阶段错位 | 全部 `Asia/Shanghai`；D0 只用 Delivered 事件北京自然日 |
+
+## 9. 确认结果（2026-09-10）
+
+| 原问题 | 结论 |
+|--------|------|
+| 触发方式 | 人工启动脚本，与 0/1/2/3 一致；不加定时设施 |
+| 网页角色 | 操作台新增受限「发送」按钮（每次 1 条）；其余保持只读/预演 |
+| 感谢私信前置 | 业务员确认内容后再发送（不接受巡检命中即自动发送） |
+| 巡检频率 | 每天一次全量（处理中到货达人） |
+| D+15 批量门闩 | `--execute --yes` + 显式上调 `--execute-limit` + 写前备份 |
+
+剩余待实现时核对：TikHub 每日配额的具体数字（按第 5 步现有配置与预算执行；若超预算再与业务确认限量），以及操作台新按钮的文案与位置在实现 PR 中评审。
+
+## 10. 实施顺序
+
+`Phase 1.3 spike（图片 SDK）→ Phase 1 发送主干 + 操作台发送入口 → Phase 2 巡检+感谢 → Phase 3 批量与留痕 → Phase 4 送达日与可观测性`
+
+- Phase 2 依赖 Phase 1 的发送管线与结果语义。
+- Phase 3 的批量写飞书可独立于 Phase 2，先行合入亦可。
+- Phase 4 与其余无强依赖，可并行。
