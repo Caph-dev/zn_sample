@@ -279,7 +279,7 @@ export function summaryRows(rule: RuleDraft): SummaryRow[] {
   }
   rows.push({
     label: '指标口径',
-    value: '履约：详情预计发布率优先，否则列表履约率；GPM：详情官方值优先，列表值为近似',
+    value: '履约（预计发布率）、GPM、客单价均详情值优先；缺失时回退列表履约率、列表近似 GPM、GMV÷件数',
   });
   return rows;
 }

@@ -319,6 +319,34 @@ class RuleEvaluationTests(unittest.TestCase):
         self.assertEqual(check["source"], "detail-est-post-rate")
         self.assertEqual(check["status"], "passed")
 
+    def test_aov_prefers_detail_value(self) -> None:
+        payload = rule_payload(basic={"aov": {"enabled": True, "min": 10, "max": 25}})
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(aov_n=90.0, aov_detail_n=18.75),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        check = next(item for item in result["checks"] if item["key"] == "aov")
+        self.assertEqual(check["source"], "detail")
+        self.assertEqual(check["value"], 18.75)
+        self.assertEqual(check["status"], "passed")
+
+    def test_aov_falls_back_to_derived_value(self) -> None:
+        payload = rule_payload(basic={"aov": {"enabled": True, "min": 10, "max": 25}})
+        rule = validate_custom_rule(payload, allowed_product_ids=ALLOWED)
+        result = evaluate_custom_row(
+            base_row(aov_n=90.0, aov_detail_n=None),
+            rule,
+            hero_keys=ALLOWED,
+            allowed_product_ids=ALLOWED,
+        )
+        check = next(item for item in result["checks"] if item["key"] == "aov")
+        self.assertEqual(check["source"], "derived")
+        self.assertEqual(check["value"], 90.0)
+        self.assertEqual(check["status"], "failed")
+
     def test_video_live_either_and_both(self) -> None:
         payload = rule_payload(
             basic={},

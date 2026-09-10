@@ -491,7 +491,7 @@ def rule_summary_lines(
         )
     else:
         lines.append("内容审核：未执行（风险：不核对近期带货内容）")
-    lines.append("履约口径：详情预计发布率优先，否则列表履约率；GPM 详情官方值优先，列表值为近似")
+    lines.append("指标口径：履约（预计发布率）、GPM、客单价均详情值优先；缺失时回退列表履约率、列表近似 GPM、GMV÷件数")
     return lines
 
 
@@ -606,16 +606,18 @@ def evaluate_custom_row(
             )
         )
     if basic["aov"].enabled:
+        detail_aov = row.get("aov_detail_n")
+        aov_value = detail_aov if detail_aov is not None else row.get("aov_n")
         absorb(
             triage(
                 "aov",
                 "客单价",
-                row.get("aov_n"),
-                test_passed=row.get("aov_n") is not None
+                aov_value,
+                test_passed=aov_value is not None
                 and float(basic["aov"].min_value)
-                <= float(row["aov_n"])
+                <= float(aov_value)
                 <= float(basic["aov"].max_value),
-                source="detail" if row.get("aov_detail_n") is not None else "derived",
+                source="detail" if detail_aov is not None else "derived",
                 detail=f"范围 [{basic['aov'].min_value:g}, {basic['aov'].max_value:g}] USD",
             )
         )
