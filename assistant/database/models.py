@@ -131,6 +131,7 @@ class FollowupTask(TimestampMixin, Base):
     send_result: Mapped[str] = mapped_column(Text, default="")
     send_confirmation: Mapped[str] = mapped_column(Text, default="")
     last_error: Mapped[str] = mapped_column(Text, default="")
+    previewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ContentEvidence(TimestampMixin, Base):

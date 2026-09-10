@@ -36,6 +36,7 @@ from assistant.domain.platform_status import (
 from assistant.domain.policies import choose_followup_creator_type, choose_followup_language
 from assistant.domain.sku_images import resolve_followup_attachment
 from assistant.domain.timeutil import beijing_now
+from assistant.services.page_lock import STORE_BUSY_ERROR, blocking_jobs
 from scripts.lib.feishu_bitable import COOPERATION_STATUS_COMPLETED, COOPERATION_STATUS_UNPUBLISHED
 
 
@@ -303,6 +304,9 @@ class FollowupService:
             shop_id = str(store.shop_id if store else "")
             body = str(task.message_preview)
             attachment_key = str(task.attachment_key or "")
+        blocking = blocking_jobs(self.session_factory)
+        if blocking:
+            raise ValueError(STORE_BUSY_ERROR)
         if not store_id:
             raise ValueError("missing-store")
         from lib.im_api import send_direct_message
@@ -321,11 +325,16 @@ class FollowupService:
         with self.session_factory() as session:
             task = session.get(FollowupTask, task_id)
             if task is not None:
+                task.previewed_at = beijing_now()
                 if result.get("ok"):
                     task.send_confirmation = str(result.get("status") or "dry-run")
                     task.last_error = ""
                 else:
-                    task.last_error = str(result.get("error") or "preview-failed")
+                    task.last_error = str(
+                        result.get("error")
+                        or result.get("reason")
+                        or "preview-failed"
+                    )
                 session.commit()
         return result
 

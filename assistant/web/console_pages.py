@@ -317,6 +317,28 @@ def _followup_send_ready(task: Any, sample_case: Any) -> bool:
     )
 
 
+def _followup_preview_status(task: Any) -> tuple[str, str, str]:
+    """Last preview/attempt outcome for the detail page (display only).
+
+    ``send_confirmation == "dry-run"`` is written only by the preview endpoint,
+    so it can be reported as a successful preview. Any ``last_error`` is
+    surfaced as-is, because it may come from a preview or from a send attempt.
+    """
+    send_confirmation = str(task.send_confirmation or "")
+    last_error = str(task.last_error or "")
+    previewed_at = getattr(task, "previewed_at", None)
+    preview_at = (
+        previewed_at.strftime("%Y-%m-%d %H:%M")
+        if isinstance(previewed_at, datetime)
+        else ""
+    )
+    if send_confirmation == "dry-run" and not last_error:
+        return "ok", "预演成功：已打开会话并核对身份，未发送", preview_at
+    if last_error:
+        return "issue", f"最近一次尝试未通过：{last_error}", preview_at
+    return "", "", ""
+
+
 def followup_detail_data(
     task: Any,
     sample_case: Any,
@@ -326,6 +348,7 @@ def followup_detail_data(
     scheduled_label: str,
 ) -> dict:
     payload = _followup_row(task, sample_case)
+    preview_state, preview_label, preview_at = _followup_preview_status(task)
     payload.update(
         {
             "product_id": sample_case.product_id,
@@ -347,6 +370,9 @@ def followup_detail_data(
             ),
             "send_result": task.send_result or "",
             "send_result_label": followup_send_result_label(task.send_result),
+            "preview_state": preview_state,
+            "preview_label": preview_label,
+            "preview_at": preview_at,
             "send_ready": _followup_send_ready(task, sample_case),
             "can_send": task.action_kind == "send_message",
             "can_acknowledge": task.action_kind == ACTION_KIND_ACKNOWLEDGE_CONTENT,

@@ -145,6 +145,20 @@ class FollowupSendApiTests(unittest.TestCase):
         self.assertEqual(busy.status_code, 409)
         self.assertEqual(busy.json()["detail"], "followup-send-busy")
 
+    def test_preview_conflicts_with_a_running_page_job(self) -> None:
+        with self.session_factory() as session:
+            session.add(
+                Job(id="job-9", job_type="operator_tracking", status="running")
+            )
+            session.commit()
+        response = self.client.post(
+            f"/api/followups/{self.task_id}/preview-send",
+            data={},
+            headers={"Origin": "http://127.0.0.1:8765"},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "store-busy")
+
 
 class FollowupSendHandlerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -239,6 +253,9 @@ class FollowupSendPayloadTests(unittest.TestCase):
             "status": "pending",
             "sent_at": None,
             "send_result": "",
+            "send_confirmation": "",
+            "last_error": "",
+            "previewed_at": None,
             "requires_manual_confirmation": False,
             "scheduled_for": date(2026, 9, 10),
             "template_key": "arrival_hero_video_en",
@@ -435,6 +452,172 @@ class FollowupAcknowledgeTests(unittest.TestCase):
             list_task_id = task.id
         with self.assertRaises(ValueError):
             FollowupService(self.session_factory).mark_message_sent(list_task_id)
+
+
+class FollowupPreviewStatusTests(unittest.TestCase):
+    """The detail page shows the last preview/attempt outcome for a task."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.engine = create_database_engine(
+            Path(self.temporary_directory.name) / "test.sqlite3"
+        )
+        Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        with self.session_factory() as session:
+            store = Store(ziniao_store_id="store-1", store_name="store")
+            session.add(store)
+            session.flush()
+            sample_case = SampleCase(
+                store_id=store.id,
+                creator_id="creator-1",
+                creator_name="creator",
+                apply_id="apply-1",
+                product_id="1732414717062320994",
+                platform_status="processing",
+            )
+            session.add(sample_case)
+            session.flush()
+            task = FollowupTask(
+                sample_case_id=sample_case.id,
+                stage="arrival",
+                scheduled_for=date(2026, 9, 10),
+                status="pending",
+                action_kind="send_message",
+                template_key="arrival_hero_video_en",
+                message_preview="Hi creator! Just checking in.",
+            )
+            session.add(task)
+            session.commit()
+            self.task_id = task.id
+            self.sample_case_id = sample_case.id
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        self.temporary_directory.cleanup()
+
+    def load_task(self) -> FollowupTask:
+        with self.session_factory() as session:
+            return session.get(FollowupTask, self.task_id)
+
+    def payload(self, task: FollowupTask | None = None) -> dict:
+        with self.session_factory() as session:
+            resolved_task = task or session.get(FollowupTask, self.task_id)
+            sample_case = session.get(SampleCase, self.sample_case_id)
+            return followup_detail_data(
+                resolved_task,
+                sample_case,
+                None,
+                attachment_url="",
+                scheduled_label="",
+            )
+
+    def record(self, **values) -> None:
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, self.task_id)
+            for key, value in values.items():
+                setattr(task, key, value)
+            session.commit()
+
+    def add_job(self, *, job_type: str, status: str) -> None:
+        with self.session_factory() as session:
+            session.add(
+                Job(
+                    id=f"job-{job_type}-{status}",
+                    job_type=job_type,
+                    status=status,
+                    result_summary="{}",
+                )
+            )
+            session.commit()
+
+    def test_untouched_task_has_no_preview_line(self) -> None:
+        payload = self.payload()
+        self.assertEqual(payload["preview_state"], "")
+        self.assertEqual(payload["preview_label"], "")
+
+    def test_successful_preview_is_reported(self) -> None:
+        self.record(send_confirmation="dry-run")
+        payload = self.payload()
+        self.assertEqual(payload["preview_state"], "ok")
+        self.assertIn("预演成功", payload["preview_label"])
+
+    def test_failure_reason_is_reported(self) -> None:
+        self.record(last_error="target-conversation-not-visible")
+        payload = self.payload()
+        self.assertEqual(payload["preview_state"], "issue")
+        self.assertIn("target-conversation-not-visible", payload["preview_label"])
+
+    def test_preview_success_clears_the_previous_error(self) -> None:
+        self.record(last_error="missing-store")
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={"ok": True, "status": "dry-run"},
+        ):
+            result = FollowupService(self.session_factory).preview_followup_message(
+                self.task_id
+            )
+        self.assertTrue(result["ok"])
+        task = self.load_task()
+        self.assertEqual(task.send_confirmation, "dry-run")
+        self.assertEqual(task.last_error, "")
+        self.assertEqual(self.payload()["preview_state"], "ok")
+
+    def test_held_preview_records_the_hold_reason(self) -> None:
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={
+                "ok": False,
+                "status": "held",
+                "reason": "content-thanks-found",
+            },
+        ):
+            result = FollowupService(self.session_factory).preview_followup_message(
+                self.task_id
+            )
+        self.assertEqual(result["status"], "held")
+        task = self.load_task()
+        self.assertEqual(task.last_error, "content-thanks-found")
+        payload = self.payload()
+        self.assertEqual(payload["preview_state"], "issue")
+        self.assertIn("content-thanks-found", payload["preview_label"])
+
+    def test_preview_timestamp_is_shown(self) -> None:
+        self.record(send_confirmation="dry-run", previewed_at=datetime(2026, 9, 10, 12, 34))
+        payload = self.payload()
+        self.assertEqual(payload["preview_at"], "2026-09-10 12:34")
+
+    def test_preview_is_blocked_while_a_page_job_runs(self) -> None:
+        self.add_job(job_type="operator_tracking", status="running")
+        with patch("lib.im_api.send_direct_message") as send_message:
+            with self.assertRaises(ValueError) as context:
+                FollowupService(self.session_factory).preview_followup_message(
+                    self.task_id
+                )
+        self.assertEqual(str(context.exception), "store-busy")
+        send_message.assert_not_called()
+
+    def test_preview_resumes_after_the_job_finishes(self) -> None:
+        self.add_job(job_type="operator_tracking", status="succeeded")
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={"ok": True, "status": "dry-run"},
+        ):
+            result = FollowupService(self.session_factory).preview_followup_message(
+                self.task_id
+            )
+        self.assertTrue(result["ok"])
+
+    def test_preview_ignores_jobs_that_do_not_touch_the_page(self) -> None:
+        self.add_job(job_type="report_export", status="running")
+        with patch(
+            "lib.im_api.send_direct_message",
+            return_value={"ok": True, "status": "dry-run"},
+        ):
+            result = FollowupService(self.session_factory).preview_followup_message(
+                self.task_id
+            )
+        self.assertTrue(result["ok"])
 
 
 if __name__ == "__main__":

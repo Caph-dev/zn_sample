@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from assistant.database.models import FollowupTask, SampleCase
 from assistant.jobs.locks import create_or_get_pending_job
 from assistant.services.followup_service import FollowupService
+from assistant.services.page_lock import STORE_BUSY_ERROR
 
 
 router = APIRouter()
@@ -161,6 +162,8 @@ async def preview_send(task_id: int, request: Request):
             request.app.state.session_factory
         ).preview_followup_message(task_id)
     except ValueError as error:
+        if str(error) == STORE_BUSY_ERROR:
+            raise HTTPException(409, STORE_BUSY_ERROR) from error
         raise HTTPException(400, str(error)) from error
     return _local_response(task_id, is_json, extra=result)
 

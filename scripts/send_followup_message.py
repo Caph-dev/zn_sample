@@ -180,26 +180,9 @@ def find_running_jobs(
     ignore_job_id: str = "",
 ) -> list[dict[str, Any]]:
     """Return pending/running jobs that occupy the store page (mutex guard)."""
-    from sqlalchemy import select
+    from assistant.services.page_lock import blocking_jobs
 
-    from assistant.database.models import Job
-    from assistant.jobs.registry import ZINIAO_JOB_TYPES
-
-    blocking_types = tuple(ZINIAO_JOB_TYPES | {"followup_generate"})
-    with session_factory() as session:
-        jobs = session.scalars(
-            select(Job)
-            .where(
-                Job.status.in_(("pending", "running")),
-                Job.job_type.in_(blocking_types),
-                Job.id != str(ignore_job_id or ""),
-            )
-            .order_by(Job.created_at.desc())
-        ).all()
-        return [
-            {"id": job.id, "job_type": job.job_type, "status": job.status}
-            for job in jobs
-        ]
+    return blocking_jobs(session_factory, ignore_job_id=ignore_job_id)
 
 
 def claim_task(session_factory, task_id: int) -> bool:

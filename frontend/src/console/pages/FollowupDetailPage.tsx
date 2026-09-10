@@ -49,6 +49,18 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         {data.send_result_label !== '' && (
           <MetadataListItem label="发送">{data.send_result_label}</MetadataListItem>
         )}
+        {data.preview_label !== '' && (
+          <MetadataListItem label="预演">
+            <StatusToken
+              label={
+                data.preview_at === ''
+                  ? data.preview_label
+                  : `${data.preview_label} · ${data.preview_at}`
+              }
+              tone={data.preview_state === 'ok' ? 'success' : 'warning'}
+            />
+          </MetadataListItem>
+        )}
         {data.note !== '' && (
           <MetadataListItem label={data.status === 'needs_review' ? '原因' : '说明'}>
             {data.status === 'needs_review' ? data.review_label : data.note}

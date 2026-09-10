@@ -63,7 +63,7 @@ class MigrationIntegrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0005_auto_approval",
+                        "0006_followup_previewed_at",
                     )
 
                 for table_name, model_table in Base.metadata.tables.items():
