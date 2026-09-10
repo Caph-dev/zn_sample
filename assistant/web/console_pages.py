@@ -10,6 +10,7 @@ from datetime import date, datetime
 from typing import Any, Iterable, Sequence
 
 from assistant.domain.followup_labels import (
+    COMPLETED_RESULTS,
     CREATOR_TYPE_LABELS,
     FOLLOWUP_ACTION_LABELS,
     FOLLOWUP_LANGUAGE_LABELS,
@@ -20,6 +21,7 @@ from assistant.domain.followup_labels import (
     FOLLOWUP_STATUS_LABELS,
     FOLLOWUP_STATUS_TONES,
     REVIEW_REASON_LABELS,
+    SENDING_RESULT,
     SUPERSEDED_REASON,
     followup_action_completed,
     followup_action_display,
@@ -29,6 +31,12 @@ from assistant.domain.followup_labels import (
     followup_status_display,
     followup_status_label,
 )
+from assistant.domain.followup_stage import (
+    ACTION_KIND_ACKNOWLEDGE_CONTENT,
+    ACTION_KIND_SEND_MESSAGE,
+)
+from assistant.domain.platform_status import PLATFORM_STATUS_PROCESSING
+from assistant.domain.timeutil import beijing_now
 
 
 JOB_TYPE_LABELS = {
@@ -43,6 +51,7 @@ JOB_TYPE_LABELS = {
     "operator_screen": "只出名单",
     "operator_pipeline": "筛查批准写飞书发私信",
     "operator_tracking": "获取物流信息写飞书发单号",
+    "operator_followup_send": "发送跟进私信",
     "auto_approval_preview": "自动审批 · 只读筛查",
     "auto_approval_execute": "自动审批 · 执行批准",
     "auto_approval_reconcile": "自动审批 · 补写核对",
@@ -149,7 +158,13 @@ def job_detail_data(job: Any) -> dict:
             "error_summary": job.error_summary or "",
             "error_code": job.error_code or "",
             "is_operator_job": job.job_type
-            in {"operator_prepare", "operator_screen", "operator_pipeline", "operator_tracking"},
+            in {
+                "operator_prepare",
+                "operator_screen",
+                "operator_pipeline",
+                "operator_tracking",
+                "operator_followup_send",
+            },
             "is_active": job.status in {"pending", "running"},
         }
     )
@@ -269,6 +284,39 @@ def followups_data(
     }
 
 
+def _followup_send_ready(task: Any, sample_case: Any) -> bool:
+    """Mirror the send script selector so the real-send button only shows when valid.
+
+    The script re-validates everything before sending; this is display-only.
+    """
+    if str(task.status) != "pending":
+        return False
+    if task.sent_at is not None:
+        return False
+    send_result = str(task.send_result or "")
+    if send_result in COMPLETED_RESULTS or send_result == SENDING_RESULT:
+        return False
+    if bool(task.requires_manual_confirmation):
+        return False
+    if task.scheduled_for is None or task.scheduled_for > beijing_now().date():
+        return False
+    if not str(task.template_key or "").strip():
+        return False
+    if not str(task.message_preview or "").strip():
+        return False
+    if str(task.action_kind or "") not in {
+        ACTION_KIND_SEND_MESSAGE,
+        ACTION_KIND_ACKNOWLEDGE_CONTENT,
+    }:
+        return False
+    if str(task.stage) == "content_found":
+        return True
+    return (
+        str(sample_case.platform_status or "") == PLATFORM_STATUS_PROCESSING
+        and not bool(sample_case.platform_status_stale)
+    )
+
+
 def followup_detail_data(
     task: Any,
     sample_case: Any,
@@ -299,6 +347,7 @@ def followup_detail_data(
             ),
             "send_result": task.send_result or "",
             "send_result_label": followup_send_result_label(task.send_result),
+            "send_ready": _followup_send_ready(task, sample_case),
             "can_send": task.action_kind == "send_message",
             "can_list": task.action_kind == "list_only",
             "is_unfulfilled_stage": task.stage == "unfulfilled",

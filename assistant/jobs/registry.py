@@ -17,6 +17,7 @@ ZINIAO_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "operator_followup_send",
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
@@ -35,6 +36,7 @@ REGISTERED_JOB_TYPES = frozenset(
         "operator_screen",
         "operator_pipeline",
         "operator_tracking",
+        "operator_followup_send",
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
@@ -45,6 +47,7 @@ WRITE_JOB_TYPES = frozenset(
     {
         "operator_pipeline",
         "operator_tracking",
+        "operator_followup_send",
         "auto_approval_execute",
         "auto_approval_reconcile",
     }
@@ -99,6 +102,9 @@ def get_handler(job_type: str) -> JobHandler | None:
     }:
         from assistant.jobs.handlers.operator import run_operator_job
         return run_operator_job
+    if job_type == "operator_followup_send":
+        from assistant.jobs.handlers.followup_send import run_followup_send
+        return run_followup_send
     if job_type in {
         "auto_approval_preview",
         "auto_approval_execute",

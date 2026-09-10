@@ -45,6 +45,7 @@ def select_sendable_tasks(
     stage: str = "",
     creator_id: str = "",
     creator_name: str = "",
+    task_id: int | None = None,
     limit: int = DEFAULT_EXECUTE_LIMIT,
 ) -> list[dict[str, Any]]:
     """Select due follow-up tasks that may be sent now (read-only query)."""
@@ -98,6 +99,8 @@ def select_sendable_tasks(
         query = query.where(
             func.lower(SampleCase.creator_name) == str(creator_name).lower()
         )
+    if task_id is not None:
+        query = query.where(FollowupTask.id == int(task_id))
     query = query.order_by(FollowupTask.scheduled_for, FollowupTask.id).limit(
         max(1, int(limit))
     )
@@ -166,7 +169,11 @@ def resolve_attachment_path(row: dict[str, Any]) -> Path | None:
     return path if path.is_file() else None
 
 
-def find_running_jobs(session_factory) -> list[dict[str, Any]]:
+def find_running_jobs(
+    session_factory,
+    *,
+    ignore_job_id: str = "",
+) -> list[dict[str, Any]]:
     """Return pending/running jobs that occupy the store page (mutex guard)."""
     from sqlalchemy import select
 
@@ -180,6 +187,7 @@ def find_running_jobs(session_factory) -> list[dict[str, Any]]:
             .where(
                 Job.status.in_(("pending", "running")),
                 Job.job_type.in_(blocking_types),
+                Job.id != str(ignore_job_id or ""),
             )
             .order_by(Job.created_at.desc())
         ).all()
@@ -384,7 +392,10 @@ def run(args: argparse.Namespace) -> int:
         expire_on_commit=False,
     )
 
-    running_jobs = find_running_jobs(session_factory)
+    running_jobs = find_running_jobs(
+        session_factory,
+        ignore_job_id=str(args.ignore_job_id or ""),
+    )
     if running_jobs:
         detail = "、".join(
             f"{item['job_type']}({item['status']})" for item in running_jobs[:3]
@@ -415,6 +426,7 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
+    task_id = int(args.task_id) if args.task_id else None
     today = beijing_now().date()
     with session_factory() as session:
         rows = select_sendable_tasks(
@@ -423,9 +435,21 @@ def run(args: argparse.Namespace) -> int:
             stage=args.stage or "",
             creator_id=args.creator_id or "",
             creator_name=args.creator_name or "",
-            limit=limit,
+            task_id=task_id,
+            limit=1 if task_id else limit,
         )
     if not rows:
+        if task_id:
+            logger.error(
+                f"[选人] task={task_id} 当前不可发送（已发/待确认/未到期/平台状态不符）。"
+            )
+            print(
+                json.dumps(
+                    {"selected": 0, "sent": 0, "skipped": 0, "task_id": task_id},
+                    ensure_ascii=False,
+                )
+            )
+            return 4
         logger.info("[选人] 没有到期的跟进私信任务。")
         print(
             json.dumps(
@@ -435,11 +459,16 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
 
-    store_id = resolve_store_id(
-        store_id=args.store_id,
-        store_name=args.store_name,
-        default_store_id=None if args.no_default_store else DEFAULT_TEST_STORE_ID,
-    )
+    try:
+        store_id = resolve_store_id(
+            store_id=args.store_id,
+            store_name=args.store_name,
+            default_store_id=None if args.no_default_store else DEFAULT_TEST_STORE_ID,
+        )
+    except RuntimeError as error:
+        logger.error(f"[店铺] {error}")
+        print(json.dumps({"error": "store-resolution-failed", "detail": str(error)}, ensure_ascii=False))
+        return 2
 
     summary: dict[str, Any] = {
         "selected": len(rows),
@@ -477,6 +506,9 @@ def run(args: argparse.Namespace) -> int:
                 f"[跳过] {row['creator_name']} 任务属于店 {row_store}，"
                 f"与当前解析的 {store_id} 不一致。"
             )
+            if task_id:
+                failed += 1
+                break
             continue
 
         if args.execute and not claim_task(session_factory, row["task_id"]):
@@ -559,6 +591,17 @@ def main() -> int:
     )
     parser.add_argument("--creator-id", default=None, help="只处理该达人")
     parser.add_argument("--creator-name", default=None, help="只处理该达人名")
+    parser.add_argument(
+        "--task-id",
+        type=int,
+        default=0,
+        help="只处理该跟进任务（网页「发送」入口使用）；不可发送时退出码 4",
+    )
+    parser.add_argument(
+        "--ignore-job-id",
+        default="",
+        help="互斥检查时忽略该任务（网页入口传入自己的任务 ID）",
+    )
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--execute-limit", type=int, default=DEFAULT_EXECUTE_LIMIT)

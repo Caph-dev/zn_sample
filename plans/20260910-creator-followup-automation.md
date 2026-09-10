@@ -2,7 +2,7 @@
 
 日期：2026-09-10
 分支：`creator-followup-page`
-状态：Phase 1 离线主干已实现并加固（发送脚本、图片 SDK 通道、结果语义、原子认领与互斥、离线单测；全量 684 tests OK）。未执行任何真实发送或写飞书；限量实发验收须另行授权。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
+状态：Phase 1 已完成（发送脚本、图片 SDK 通道、结果语义、原子认领与互斥、操作台单条发送入口、离线单测；全量 703 tests OK）。未执行任何真实发送或写飞书；限量实发验收须另行授权。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
 
 权威口径：`样品申请筛查sop/2-查看到货+达人跟进.md`（项目约定 + 2026-08-26 文档更新）。
 飞书 wiki 正文里的旧日历（到货第五天 / 每隔两天）与 B006-A 一律忽略，不进入代码、话术与验收。
@@ -87,7 +87,7 @@
 1. 新脚本 `scripts/send_followup_message.py`（唯一真发路径）。
 2. `scripts/lib/im_api.py` 扩展：图片消息能力（spike 结论：SDK 支持，走 Context Provider 的 `sendImageMessageWithFiles`，见 3.3）。
 3. `followup_tasks` 发送结果语义扩展 + 标签更新（`assistant/domain/followup_labels.py`）。
-4. 操作台发送入口：新任务类型 + 详情页「发送」按钮 + 确认弹窗（见 3.6）。
+4. 操作台发送入口：新任务类型 + 详情页「发送」按钮 + 确认弹窗（已完成，见 3.6）。
 5. 详情页发送状态展示（只读）。
 6. 单测 + 1 号店限量实测清单。
 7. AGENTS.md 同步：登记新任务类型与保护集，并在决策 7 授权范围内更新网页写路径契约。
@@ -185,24 +185,21 @@ while (stack.length) {
 - 与 16:00 无关（跟进私信不受物流时间门限制）。
 - 每条发送前检查取消信号；批量中途取消只保留已确认结果。
 
-### 3.6 操作台发送入口（新增受限写路径）
+### 3.6 操作台发送入口（新增受限写路径，2026-09-10 已完成）
 
-决策 7 允许操作台出现一个受限写入口，约束如下：
+决策 7 允许操作台出现一个受限写入口，实现与约束如下：
 
-- **固定任务**：新增任务类型 `operator_followup_send`，handler 用启动操作台的 `sys.executable` 调用 `send_followup_message.py`；不接受 shell 字符串，不执行 `.command` / `.bat`。
-- **参数白名单**：服务端只接受两种固定请求——单条 `task_id`（详情页）或「到期一条」（列表页至多 1 条）；`store` 由 running 唯一店解析，`limit` 固定 1，网页不提供输入框，不得覆盖 store / limit / source。
+- **固定任务**：任务类型 `operator_followup_send`，handler `assistant/jobs/handlers/followup_send.py` 用启动操作台的 `sys.executable` 调用 `scripts/send_followup_message.py --execute --yes --task-id <id> --ignore-job-id <job>`；不接受 shell 字符串，不执行 `.command` / `.bat`。已登记进 `ZINIAO_JOB_TYPES`、`WRITE_JOB_TYPES`、`OPERATOR_JOB_TYPES` 与启动器 `PROTECTED_JOB_TYPES`。
+- **参数白名单**：端点 `POST /api/jobs/followups/send` 只接受 表单 `task_id`（服务端校验其存在）；`store` 由脚本解析 running 唯一店，`limit` 固定 1，网页不提供输入框，不得覆盖 store / limit / source。同一时刻只允许一个待执行任务；若已存在针对其他任务的待执行任务返回 409。
 - **确认门**：沿用现有确认弹窗 + 键入 `y`；缺确认不创建任务。
-- **任务保护**：登记进 `ZINIAO_JOB_TYPES` 与 `PROTECTED_JOB_TYPES`；运行中不提供取消按钮；与 `operator_tracking` / `operator_pipeline` / `auto_approval_execute` 互斥。
-- **按钮位置**：
-  - 详情页：「发送这条跟进私信」（`send_message` 阶段）、「发送感谢私信」（`content_found` 阶段，须先完成内容确认）；
-  - 列表页：只保留「生成今日跟进待办」，V1 不做批量发送（批量需要放宽 limit，不开放）。
-- **结果展示**：任务事件 + 详情页发送状态（平台已发送 / 本地人工标记 / 未确认）。
-- **验收**：一次点击最多发送 1 条；重复点击由幂等键与本地状态去重。
+- **按钮位置**：详情页 `send_ready` 时显示「发送这条跟进私信」（`send_message` 阶段）或「发送感谢私信」（`content_found` 阶段，须先完成内容确认）；`send_ready` 镜像脚本选人条件（到期、pending、非待确认、有模板、平台处理中），仅用于展示，最终仍由脚本复验。
+- **结果展示**：任务事件 + 详情页发送状态（平台已发送 / 本地人工标记 / 未确认 / 发送中）。
+- **验收**：一次点击最多发送 1 条；重复点击命中任务去重；脚本 `--task-id` 不可发送时退出码 4 使任务显式失败。
 
 ### 3.7 验收（DoD）
 
 - 1 号店选 1 条真实 D0 任务：预演 → 发送 → 平台确认 → 本地 `platform-sent`；重复运行不重发。
-- 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归；以及原子认领（双运行只发一次）、陈旧认领转人工、页面任务互斥（退出码 3）。
+- 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归；以及原子认领（双运行只发一次）、陈旧认领转人工、页面任务互斥（退出码 3）；操作台端点（缺确认/缺 task_id/未知任务/重复点击去重/跨任务 409）、handler 固定 argv 与失败码。
 - 操作台按钮：缺确认不建任务、运行中无取消、点击一次最多一条。
 - 网页只新增发送入口；其余仍只有预演与本地标记；详情页能看到平台发送状态。
 
@@ -276,7 +273,7 @@ while (stack.length) {
 
 统一要求：
 
-- 每个 Phase 合并前跑 `.venv/bin/python -m unittest discover -s tests -q` 全绿（基线 642）。
+- 每个 Phase 合并前跑 `.venv/bin/python -m unittest discover -s tests -q` 全绿（本阶段完成时 703）。
 - 实店动作一律 `--execute-limit=1` 起步，验收记录写入导出或任务事件。
 - 不改动 `plans/` 之外的既有计划；AGENTS.md 必须同步本次契约变化：新增任务类型 `followup_content_scan`、`operator_followup_send` 登记进 `ZINIAO_JOB_TYPES` 与 `PROTECTED_JOB_TYPES`，并把「网页不是新的业务写路径」更新为「唯一受限写入口：跟进私信发送」（决策 7）。
 

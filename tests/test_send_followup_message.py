@@ -182,6 +182,16 @@ class SendFollowupSelectionTests(unittest.TestCase):
         self.add_task(creator_name="claimed", send_result="sending")
         self.assertEqual(self.select(), [])
 
+    def test_task_id_filter_selects_one_task(self) -> None:
+        self.add_task(creator_name="alpha")
+        self.add_task(creator_name="beta")
+        with self.session_factory() as session:
+            task_ids = {
+                row["creator_name"]: row["task_id"] for row in self.select()
+            }
+        rows = self.select(task_id=task_ids["beta"])
+        self.assertEqual([row["creator_name"] for row in rows], ["beta"])
+
 
 class SendFollowupRecordingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -326,6 +336,8 @@ class SendFollowupGateTests(unittest.TestCase):
             "stage": None,
             "creator_id": None,
             "creator_name": None,
+            "task_id": 0,
+            "ignore_job_id": "",
             "execute": True,
             "yes": False,
             "execute_limit": 1,
@@ -496,6 +508,37 @@ class SendFollowupMutexTests(FollowupClaimTestBase):
             ),
         ):
             self.assertEqual(run(args), 3)
+
+    def test_unknown_task_exits_four(self) -> None:
+        import send_followup_message
+
+        args = SendFollowupGateTests()._args(execute=False, task_id=999999)
+        with (
+            patch.object(send_followup_message, "load_dotenv"),
+            patch.object(send_followup_message, "configure_logging"),
+            patch.object(send_followup_message, "set_verbose"),
+            patch.object(send_followup_message, "find_running_jobs", return_value=[]),
+            patch(
+                "assistant.database.engine.create_database_engine",
+                return_value=self.engine,
+            ),
+            patch(
+                "assistant.paths.database_path",
+                return_value=self.database_file,
+            ),
+        ):
+            self.assertEqual(run(args), 4)
+
+    def test_running_jobs_can_ignore_its_own_job(self) -> None:
+        self.add_job("operator_followup_send", "running")
+        self.assertEqual(len(find_running_jobs(self.session_factory)), 1)
+        self.assertEqual(
+            find_running_jobs(
+                self.session_factory,
+                ignore_job_id="job-operator_followup_send-running",
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

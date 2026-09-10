@@ -92,6 +92,37 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
         </Stack>
       </Section>
 
+      {data.send_ready && (
+        <Section>
+          <Stack gap={2}>
+            <Heading level={2}>
+              {data.stage === 'content_found' ? '发送感谢私信' : '发送跟进私信'}
+            </Heading>
+            <Text>
+              真实发送不可撤销：按上方话术发送一次，B005 刚到货会随后补发配图。重复点击不会重复发送，
+              发送结果会显示在上方「发送」状态里。
+            </Text>
+            <form
+              method="post"
+              action="/api/jobs/followups/send"
+              data-job-form
+              data-job-label={data.stage === 'content_found' ? '发送感谢私信' : '发送跟进私信'}
+              data-confirm-token="y"
+              data-confirm-title="确认发送跟进私信"
+              data-confirm-description={`将给 ${data.creator_name} 真实发送一条私信，平台发送不可撤销。`}
+              data-confirm-action="发送"
+            >
+              <input type="hidden" name="task_id" value={data.id} />
+              <Button
+                type="submit"
+                label={data.stage === 'content_found' ? '发送感谢私信' : '发送这条跟进私信'}
+                variant="primary"
+              />
+            </form>
+          </Stack>
+        </Section>
+      )}
+
       {data.can_send && (
         <Section>
           <Stack gap={2}>

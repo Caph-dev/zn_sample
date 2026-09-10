@@ -19,6 +19,7 @@
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
    唯一隔离例外：「自动批准」页的自定义规则链走自有任务链（见下文「自动审批子页面」），
    仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
+   达人跟进详情页的「发送这条跟进私信 / 发送感谢私信」是同一个门闩的网页入口：固定单条 `task_id`、每次最多 1 条、任务运行中不可取消，底层仍走 `send_followup_message.py --execute --yes` 与原子认领。
 
 2. **两阶段导航**  
    `open_sample_store.py` 默认只开店；目标店已运行绝不关闭/重开。  
@@ -53,7 +54,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）与物流写回/跟进动作，复用 `operator_launch`；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
+| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）、物流写回与跟进动作（含跟进详情页单条发送），复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -137,7 +138,7 @@
 | `--force` | 只绕过 16:00 |
 | `--observe-approve-network` | 仅单条 execute 被动观察；不重放、不登记未确认 endpoint |
 
-网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking` 四个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排，不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）和 `tracking`（达人跟进页物流写回）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
+网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking|followup_send` 五个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排（`followup_send` 走固定 handler 调 `send_followup_message.py`），不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）、`tracking`（达人跟进页物流写回）和 `followup_send`（达人跟进详情页单条发送，固定 `task_id`、限 1、键入 `y` 确认）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
 
 网页“运行准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。探活只在总览 / 运行准备页轮询；自动批准页只显示状态条 + 去准备页链接。
 

@@ -172,6 +172,7 @@ export interface FollowupDetailData extends FollowupRow {
   review_label: string;
   send_result: string;
   send_result_label: string;
+  send_ready: boolean;
   can_send: boolean;
   can_list: boolean;
   is_unfulfilled_stage: boolean;
