@@ -6,8 +6,13 @@ from datetime import datetime
 
 EMPTY_STATUS_DISPLAY = "-"
 MARKED_SENT_RESULT = "marked-sent"
+PLATFORM_SENT_RESULT = "platform-sent"
+SEND_UNKNOWN_RESULT = "send-unknown"
+SENDING_RESULT = "sending"
 LISTED_RESULT = "listed"
-COMPLETED_LOCAL_RESULTS = frozenset({MARKED_SENT_RESULT, LISTED_RESULT})
+COMPLETED_RESULTS = frozenset(
+    {MARKED_SENT_RESULT, PLATFORM_SENT_RESULT, LISTED_RESULT}
+)
 SUPERSEDED_REASON = "superseded_by_later_stage"
 
 FOLLOWUP_STATUS_LABELS = {
@@ -62,6 +67,14 @@ FOLLOWUP_ACTION_COMPLETED_LABELS = {
     "list_only": "已出名单给业务",
 }
 
+FOLLOWUP_SEND_RESULT_LABELS = {
+    PLATFORM_SENT_RESULT: "平台已确认发送",
+    MARKED_SENT_RESULT: "本地人工标记",
+    SEND_UNKNOWN_RESULT: "发送结果未确认",
+    SENDING_RESULT: "发送中",
+    LISTED_RESULT: "已出名单给业务",
+}
+
 CREATOR_TYPE_LABELS = {
     "video": "视频达人",
     "live": "直播达人",
@@ -76,6 +89,9 @@ REVIEW_REASON_LABELS = {
     "missing_template": "当前动作没有可用话术",
     "missing_language": "语言无法可靠确认，请先选定英语或西班牙语",
     "low_confidence_language": "语言置信度不足，请先选定英语或西班牙语",
+    "send_unknown_needs_review": "发送结果未确认；请先人工核对会话，勿自动重发",
+    "send_interrupted": "上次发送未完成（进程中断）；请先人工核对会话，勿自动重发",
+    "image_send_failed": "配图发送失败；请人工在会话里补发图片，勿重发话术",
 }
 
 SUPPRESSED_REASON_LABELS = {
@@ -109,7 +125,7 @@ def followup_action_completed(
     sent_at: datetime | None = None,
     send_result: str = "",
 ) -> bool:
-    return sent_at is not None or send_result in COMPLETED_LOCAL_RESULTS
+    return sent_at is not None or send_result in COMPLETED_RESULTS
 
 
 def followup_action_display(
@@ -119,10 +135,19 @@ def followup_action_display(
     send_result: str = "",
 ) -> str:
     if followup_action_completed(sent_at=sent_at, send_result=send_result):
+        if action_kind == "send_message":
+            if send_result == PLATFORM_SENT_RESULT:
+                return "已发跟进私信（平台确认）"
+            if send_result == MARKED_SENT_RESULT:
+                return "已发跟进私信（本地标记）"
         completed_label = FOLLOWUP_ACTION_COMPLETED_LABELS.get(action_kind)
         if completed_label:
             return completed_label
     return FOLLOWUP_ACTION_LABELS.get(action_kind, action_kind or "")
+
+
+def followup_send_result_label(send_result: str) -> str:
+    return FOLLOWUP_SEND_RESULT_LABELS.get(send_result, send_result or "")
 
 
 def followup_action_tone(

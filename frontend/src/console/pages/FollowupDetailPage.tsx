@@ -46,6 +46,9 @@ export function FollowupDetailPage({data}: {data: FollowupDetailData}) {
             tooltip={data.status_tooltip}
           />
         </MetadataListItem>
+        {data.send_result_label !== '' && (
+          <MetadataListItem label="发送">{data.send_result_label}</MetadataListItem>
+        )}
         {data.note !== '' && (
           <MetadataListItem label={data.status === 'needs_review' ? '原因' : '说明'}>
             {data.status === 'needs_review' ? data.review_label : data.note}

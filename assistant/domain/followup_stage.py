@@ -8,6 +8,7 @@ from scripts.lib.feishu_bitable import (
     COOPERATION_STATUS_UNPUBLISHED,
 )
 
+from .followup_labels import COMPLETED_RESULTS
 from .timeutil import beijing_date, beijing_now
 
 
@@ -30,7 +31,6 @@ ACTION_KIND_LIST_ONLY = "list_only"
 ACTION_KIND_CONFIRM_DELIVERY_DATE = "confirm_delivery_date"
 ACTION_KIND_MARK_UNFULFILLED = "mark_unfulfilled"
 ACTION_KIND_ACKNOWLEDGE_CONTENT = "acknowledge_content"
-COMPLETED_LOCAL_RESULTS = frozenset({"marked-sent", "listed"})
 
 ACTION_KIND_BY_STAGE = {
     "arrival": ACTION_KIND_SEND_MESSAGE,
@@ -48,10 +48,10 @@ def action_kind_for_stage(stage: str) -> str:
 
 
 def followup_task_completed(task: dict) -> bool:
-    """Local completion: marked sent or handed to ops. Not a platform send."""
+    """Completion covers local marks and a platform-confirmed send."""
     if task.get("sent_at"):
         return True
-    return str(task.get("send_result") or "") in COMPLETED_LOCAL_RESULTS
+    return str(task.get("send_result") or "") in COMPLETED_RESULTS
 
 
 def days_since_delivery(delivered_at: datetime, today: date | None = None) -> int:

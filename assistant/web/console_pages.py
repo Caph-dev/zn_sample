@@ -25,6 +25,7 @@ from assistant.domain.followup_labels import (
     followup_action_display,
     followup_action_tone,
     followup_language_label,
+    followup_send_result_label,
     followup_status_display,
     followup_status_label,
 )
@@ -296,6 +297,8 @@ def followup_detail_data(
                 task.review_reason,
                 task.review_reason or "需要人工确认后再继续。",
             ),
+            "send_result": task.send_result or "",
+            "send_result_label": followup_send_result_label(task.send_result),
             "can_send": task.action_kind == "send_message",
             "can_list": task.action_kind == "list_only",
             "is_unfulfilled_stage": task.stage == "unfulfilled",

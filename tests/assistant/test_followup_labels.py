@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from assistant.domain.followup_labels import (
     followup_action_display,
     followup_language_label,
+    followup_send_result_label,
     followup_stage_list_rank,
     followup_status_display,
 )
@@ -40,7 +41,14 @@ class FollowupLabelTests(unittest.TestCase):
                 "send_message",
                 send_result="marked-sent",
             ),
-            "已发跟进私信",
+            "已发跟进私信（本地标记）",
+        )
+        self.assertEqual(
+            followup_action_display(
+                "send_message",
+                send_result="platform-sent",
+            ),
+            "已发跟进私信（平台确认）",
         )
         self.assertEqual(
             followup_action_display(
@@ -48,6 +56,13 @@ class FollowupLabelTests(unittest.TestCase):
                 sent_at=datetime(2026, 8, 27, tzinfo=timezone.utc),
             ),
             "已发跟进私信",
+        )
+        self.assertEqual(
+            followup_action_display(
+                "send_message",
+                send_result="send-unknown",
+            ),
+            "待发跟进私信",
         )
         self.assertEqual(
             followup_action_display("list_only"),
@@ -59,6 +74,13 @@ class FollowupLabelTests(unittest.TestCase):
         )
         self.assertNotIn("D+3", followup_action_display("send_message"))
         self.assertNotIn("D+7", followup_action_display("send_message"))
+
+    def test_send_result_labels_distinguish_platform_and_local(self) -> None:
+        self.assertEqual(followup_send_result_label("platform-sent"), "平台已确认发送")
+        self.assertEqual(followup_send_result_label("marked-sent"), "本地人工标记")
+        self.assertEqual(followup_send_result_label("send-unknown"), "发送结果未确认")
+        self.assertEqual(followup_send_result_label(""), "")
+        self.assertEqual(followup_send_result_label("custom"), "custom")
 
     def test_list_order_puts_later_calendar_stages_first(self) -> None:
         self.assertLess(

@@ -732,10 +732,13 @@ class FollowupGenerateTests(unittest.TestCase):
         with TestClient(app, base_url="http://127.0.0.1:8765") as client:
             listing = client.get("/followups")
             listing_data = console_data(listing)
-            self.assertEqual(listing_data["rows"][0]["action_label"], "已发跟进私信")
+            self.assertEqual(
+                listing_data["rows"][0]["action_label"], "已发跟进私信（本地标记）"
+            )
             detail = client.get(f"/followups/{task_id}")
             detail_data = console_data(detail)
             self.assertTrue(detail_data["action_completed"])
+            self.assertEqual(detail_data["send_result_label"], "本地人工标记")
             self.assertNotIn(">发送</button>", detail.text)
 
     def test_mark_listed_is_local_only(self) -> None:
