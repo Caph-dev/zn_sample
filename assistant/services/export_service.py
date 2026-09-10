@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
 
 from assistant.database.models import FollowupTask, SampleCase, Shipment, Store
-from assistant.domain.followup_stage import followup_task_completed
+from assistant.domain.followup_stage import (
+    days_since_delivery,
+    followup_task_completed,
+    latest_due_unpublished_stage,
+)
 from assistant.domain.timeutil import beijing_now
 from assistant.paths import user_data_dir
 
@@ -27,6 +31,20 @@ def serialize_csv_cell_value(value: object) -> object:
     if isinstance(value, str) and value.startswith(SPREADSHEET_FORMULA_PREFIXES):
         return f"'{value}"
     return value
+
+
+def _is_current_day_10_node(*, shipment, today: date) -> bool:
+    """True while the delivery calendar says D+10 is the step to do now.
+
+    Same rule the send script and the detail page use (``latest_due_unpublished_stage``):
+    once 15 days passed, the current node is the unfulfilled write, so the creator
+    must drop out of the D+10 list instead of being chased a second time.
+    """
+    if shipment is None or shipment.delivered_at is None:
+        return False
+    days = days_since_delivery(shipment.delivered_at, today=today)
+    latest = latest_due_unpublished_stage(days)
+    return bool(latest and latest[0] == "day_10_list")
 
 
 class ExportService:
@@ -68,9 +86,17 @@ class ExportService:
                 .outerjoin(Shipment, Shipment.sample_case_id == SampleCase.id)
             ).all()
             rows = []
+            today = beijing_now().date()
             for task, sample_case, shipment, store in results:
                 if kind == "day_10_list" and not (
                     task.stage == "day_10_list"
+                    # 名单只给业务当前就该处理的行：已被更晚节点取代（suppressed）或
+                    # 到货已满 15 天（当前节点已是 unfulfilled）的不再出现。
+                    and task.status == "pending"
+                    and _is_current_day_10_node(
+                        shipment=shipment,
+                        today=today,
+                    )
                     and sample_case.platform_status == "processing"
                     and not sample_case.platform_status_stale
                     and not followup_task_completed(

@@ -192,6 +192,8 @@
 
 **提醒话术问候语（2026-09-10 修）：** D+3/D+7 统一成 `Hi {名}! ❤️`／`Hola {名}! ❤️`。原来 D+3 英文是 `Hi{名} ! ❤️`、西语 `Hola{名}! ❤️`（实测渲染成 `Himaideediaz ! ❤️`、`Holamaideediaz! ❤️`），SOP 与 `assistant/domain/message_templates.py` 已同步修正，回归测试 `tests/assistant/test_message_templates.py::test_reminder_templates_greet_with_clean_spacing`。**改话术必须 SOP 与模板同时改**。D0 与感谢话术里还有同类历史写法（`Hola{名} !`、`Hi {名}❤️`、`Hola{名}!`），本次未改。
 
+**D+10 名单口径（2026-09-10 收窄）：** 「报表 → D+10 待出名单」导出（`ExportService._rows("day_10_list")`）只收 **当前节点仍是 D+10** 的行：`task.status=pending`、case 仍处理中且非 stale、未记账，且按 `latest_due_unpublished_stage` 判定 10 ≤ 到货天数 < 15（满 15 天当前节点已是 unfulfilled，不再重复催）。已被取代（suppressed）或没有送达日的行不进名单——这类行在页面上也点不了「已出名单」。实测 10 → 8 行（去掉两条已转 unfulfilled 的旧行）。
+
 `detail_targets`：仅 `--with-detail` 只拉列表初判通过行；加 `--detail-all` 才拉全表。试跑限量用 `--max-rows`。
 
 ---

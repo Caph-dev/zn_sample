@@ -4,7 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +15,7 @@ import assistant.api.exports as exports_api
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, FollowupTask, Job, SampleCase, Shipment, Store
+from assistant.domain.timeutil import beijing_now
 from assistant.jobs.locks import create_or_get_pending_job
 from assistant.jobs.worker import _claim_next_job
 from assistant.services.export_service import (
@@ -22,6 +23,11 @@ from assistant.services.export_service import (
     ExportService,
     serialize_csv_cell_value,
 )
+
+
+def _delivered_days_ago(days: int) -> datetime:
+    """送达时刻放在 ``days`` 个北京自然日之前，让日历节点可预期。"""
+    return beijing_now() - timedelta(days=days)
 
 
 class ExportTests(unittest.TestCase):
@@ -45,13 +51,66 @@ class ExportTests(unittest.TestCase):
                         main_order_id=f"order-{status}",
                     )
                     session.add(case); session.flush()
-                    session.add(Shipment(sample_case_id=case.id, tracking_display=f"track-{status}"))
+                    session.add(Shipment(sample_case_id=case.id, tracking_display=f"track-{status}", delivered_at=_delivered_days_ago(12)))
                     session.add(FollowupTask(sample_case_id=case.id, stage="day_10_list", scheduled_for=date(2026, 8, 1)))
                 session.commit()
             path = ExportService(factory, exports_directory=root / "exports").export("day_10_list")
             text = path.read_text(encoding="utf-8-sig")
             self.assertIn("order-40", text); self.assertIn("track-40", text)
             self.assertNotIn("order-30", text)
+            engine.dispose()
+
+    def test_day_10_export_keeps_only_the_current_node_task(self) -> None:
+        """已被取代、或到货已满 15 天（当前节点=未履约）的行不进名单。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = create_database_engine(root / "test.sqlite3")
+            Base.metadata.create_all(engine)
+            factory = sessionmaker(bind=engine, expire_on_commit=False)
+            with factory() as session:
+                store = Store(ziniao_store_id="store", store_name="store"); session.add(store); session.flush()
+                setups = [
+                    ("current-node", 12, "pending"),
+                    ("superseded", 12, "suppressed"),
+                    ("past-node", 16, "pending"),
+                    ("no-delivery-date", None, "pending"),
+                ]
+                for name, delivered_days, status in setups:
+                    case = SampleCase(
+                        store_id=store.id,
+                        creator_id=name,
+                        creator_name=name,
+                        apply_id=name,
+                        product_id="1732414717062320994",
+                        curr_status=40,
+                        platform_status="processing",
+                    )
+                    session.add(case); session.flush()
+                    session.add(
+                        Shipment(
+                            sample_case_id=case.id,
+                            delivered_at=(
+                                _delivered_days_ago(delivered_days)
+                                if delivered_days is not None
+                                else None
+                            ),
+                        )
+                    )
+                    session.add(
+                        FollowupTask(
+                            sample_case_id=case.id,
+                            stage="day_10_list",
+                            scheduled_for=date(2026, 8, 1),
+                            status=status,
+                        )
+                    )
+                session.commit()
+            path = ExportService(factory, exports_directory=root / "exports").export("day_10_list")
+            text = path.read_text(encoding="utf-8-sig")
+            self.assertIn("current-node", text)
+            self.assertNotIn("superseded", text)
+            self.assertNotIn("past-node", text)
+            self.assertNotIn("no-delivery-date", text)
             engine.dispose()
 
     def test_day_10_export_filename_uses_beijing_yyyymmdd(self) -> None:
@@ -106,6 +165,12 @@ class ExportTests(unittest.TestCase):
                 )
                 session.add(sample_case)
                 session.flush()
+                session.add(
+                    Shipment(
+                        sample_case_id=sample_case.id,
+                        delivered_at=_delivered_days_ago(12),
+                    )
+                )
                 session.add(
                     FollowupTask(
                         sample_case_id=sample_case.id,
