@@ -1002,7 +1002,7 @@ class JobApiTests(JobTestCase):
                 "id", "job_type", "status", "store_id",
                 "progress_current", "progress_total", "progress_message",
                 "error_code", "error_summary", "result_summary",
-                "created_at", "finished_at",
+                "created_at", "finished_at", "log_path",
             },
         )
 

@@ -236,7 +236,17 @@ class FollowupSendHandlerTests(unittest.TestCase):
         ):
             with self.assertRaises(HandlerFailure) as context:
                 handler.run_followup_send("job-1", self.session_factory)
-        self.assertEqual(context.exception.error_code, "followup-send-failed-4")
+        # 退出码 4 = 任务不可发送（已发/未到期），不能显示成「发送失败」。
+        self.assertEqual(context.exception.error_code, "followup-send-not-sendable")
+        self.assertIn("没有重复发送", context.exception.summary)
+
+    def test_script_exit_codes_map_to_truthful_messages(self) -> None:
+        self.assertEqual(handler.describe_script_failure(2)[0], "followup-send-gate")
+        self.assertEqual(handler.describe_script_failure(3)[0], "followup-send-store-busy")
+        self.assertEqual(handler.describe_script_failure(4)[0], "followup-send-not-sendable")
+        fallback_code, fallback_message = handler.describe_script_failure(1)
+        self.assertEqual(fallback_code, "followup-send-failed-1")
+        self.assertIn("任务日志", fallback_message)
 
     def test_handler_rejects_a_missing_task_id(self) -> None:
         with self.session_factory() as session:

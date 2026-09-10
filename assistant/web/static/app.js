@@ -359,6 +359,9 @@
       if (job.error_code) {
         target.append(createElement("small", "text-secondary", `参考信息：${job.error_code}`));
       }
+      if (job.log_path) {
+        target.append(createElement("small", "text-secondary", `任务日志：${job.log_path}`));
+      }
       return;
     }
 

@@ -49,6 +49,7 @@ def _job_payload(job: Job) -> dict:
         "error_code": job.error_code,
         "error_summary": job.error_summary,
         "result_summary": job.result_summary,
+        "log_path": job.log_path or "",
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }

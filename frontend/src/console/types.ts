@@ -113,6 +113,7 @@ export interface JobDetailData extends JobRow {
   progress_message: string;
   error_summary: string;
   error_code: string;
+  log_path: string;
   is_operator_job: boolean;
   is_active: boolean;
 }

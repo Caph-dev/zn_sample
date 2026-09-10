@@ -14,6 +14,35 @@ from assistant.jobs.registry import HandlerFailure
 from assistant.paths import ensure_user_dirs
 
 
+# 脚本退出码 → 页面文案。4 是「任务本身不可发送」（已发/未到期/平台状态不符），
+# 不是发送失败：页面不能显示成「没有发送成功」，否则操作员会以为要重试。
+SCRIPT_EXIT_CODE_MESSAGES = {
+    2: (
+        "followup-send-gate",
+        "缺少发送确认或店铺未解析成功，本次未发送。",
+    ),
+    3: (
+        "followup-send-store-busy",
+        "店铺页面正被其它任务占用，本次未发送；请等任务结束后重试。",
+    ),
+    4: (
+        "followup-send-not-sendable",
+        "该任务当前不可发送（可能已发送、未到期或平台状态不符），没有重复发送。",
+    ),
+}
+
+
+def describe_script_failure(return_code: int) -> tuple[str, str]:
+    """Map one script exit code to a UI error code and a truthful message."""
+    mapped = SCRIPT_EXIT_CODE_MESSAGES.get(int(return_code))
+    if mapped is not None:
+        return mapped
+    return (
+        f"followup-send-failed-{int(return_code)}",
+        f"跟进私信没有发送成功（代号 {int(return_code)}）。请查看任务日志。",
+    )
+
+
 def _load_task_id(session_factory, job_id: str) -> int:
     with session_factory() as session:
         job = session.get(Job, job_id)
@@ -100,10 +129,8 @@ def run_followup_send(job_id: str, session_factory) -> str:
 
     return_code = _run_script(task_id=task_id, job_id=job_id, log_path=log_path)
     if return_code != 0:
-        raise HandlerFailure(
-            f"followup-send-failed-{return_code}",
-            f"跟进私信没有发送成功（代号 {return_code}）。请查看任务日志。",
-        )
+        error_code, error_message = describe_script_failure(return_code)
+        raise HandlerFailure(error_code, error_message)
 
     update_progress(
         session_factory,
