@@ -25,6 +25,7 @@ from assistant.domain.followup_stage import (
 from assistant.domain.followup_labels import (
     LISTED_RESULT,
     MARKED_SENT_RESULT,
+    UNFULFILLED_WRITTEN_RESULT,
     followup_review_label,
 )
 from assistant.domain.message_templates import TEMPLATE_VERSION, choose_template_key, render_followup_message
@@ -277,6 +278,18 @@ class FollowupService:
                 )
                 if feishu_result.get("status") in {"written", "unchanged"}:
                     sample_case.feishu_cooperation_status = COOPERATION_STATUS_UNPUBLISHED
+                    # 写完就结掉这条待办：否则列表一直显示「标记未履约」可点，
+                    # 重复点击只会得到 unchanged，操作员会以为没写成功。
+                    task.send_result = UNFULFILLED_WRITTEN_RESULT
+                    task.last_error = ""
+                else:
+                    task.status = "needs_review"
+                    task.review_reason = "feishu_write_failed"
+                    task.requires_manual_confirmation = True
+                    task.last_error = str(
+                        feishu_result.get("error")
+                        or f"飞书合作状态未写成（{feishu_result.get('status')}）"
+                    )
             session.commit()
             return {"ok": True, "feishu": feishu_result}
 
@@ -426,28 +439,51 @@ class FollowupService:
         *,
         evidence_id: str,
     ) -> dict:
-        record_id = str(sample_case.feishu_record_id or "").strip()
-        if not record_id:
-            return {"status": "no-record", "error": "缺少飞书 record_id"}
-        try:
-            from lib.app_config import load_bitable_settings
-            from lib.feishu_bitable import (
-                DEFAULT_BITABLE_APP_ID,
-                FeishuBitableError,
-                get_bitable_access_token,
-                update_record_cooperation_status,
-            )
+        from lib.app_config import load_bitable_settings
+        from lib.feishu_bitable import (
+            DEFAULT_BITABLE_APP_ID,
+            FeishuBitableError,
+            get_bitable_access_token,
+            resolve_relation_record_id,
+            update_record_cooperation_status,
+        )
 
+        record_id = str(sample_case.feishu_record_id or "").strip()
+        try:
             settings = load_bitable_settings(default_app_id=DEFAULT_BITABLE_APP_ID)
             if not (settings.get("app_id") and settings.get("app_secret")):
                 return {"status": "skipped-no-credentials", "error": "未配置飞书密钥"}
             token = get_bitable_access_token()
+            matched_by = "record-id"
+            if not record_id:
+                # 2 号店样例本地没有 record_id：按 红人ID(达人名)+寄样产品 查行，
+                # 只有唯一命中才写，并把行号回填到 case。
+                lookup = resolve_relation_record_id(
+                    token,
+                    creator_handle=str(sample_case.creator_name or ""),
+                    sample_product=str(sample_case.sample_product_option or ""),
+                )
+                if lookup.get("status") != "matched":
+                    lookup["target_status"] = target_status
+                    lookup["evidence_id"] = evidence_id
+                    return lookup
+                record_id = str(lookup.get("record_id") or "").strip()
+                matched_by = str(lookup.get("matched_by") or "")
+                if not record_id:
+                    return {
+                        "status": "no-record",
+                        "error": "飞书匹配行缺少 record_id",
+                        "target_status": target_status,
+                        "evidence_id": evidence_id,
+                    }
+                sample_case.feishu_record_id = record_id
             result = update_record_cooperation_status(
                 token,
                 record_id,
                 target_status,
             )
             result["evidence_id"] = evidence_id
+            result["matched_by"] = matched_by
             return result
         except FeishuBitableError as error:
             return {"status": "error", "error": str(error)}

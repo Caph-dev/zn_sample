@@ -393,8 +393,13 @@ def search_relation_records(
     app_token: str = DEFAULT_APP_TOKEN,
     table_id: str = DEFAULT_TABLE_ID,
     page_size: int = 20,
+    fetch_all: bool = False,
 ) -> list[dict[str, Any]]:
-    """按红人ID（可选再加寄样产品）搜行。"""
+    """按红人ID（可选再加寄样产品）搜行。
+
+    ``fetch_all`` 供「能不能确定只有一行」的判定使用：默认只取第一页，
+    分页没取完时唯一性结论不可靠。
+    """
     handle = (creator_handle or "").strip()
     if not handle:
         return []
@@ -406,16 +411,104 @@ def search_relation_records(
         conditions.append(
             {"field_name": "寄样产品", "operator": "is", "value": [product]}
         )
-    payload = _http_json(
-        "POST",
-        f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
-        headers={"Authorization": f"Bearer {access_token}"},
-        body={
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        body: dict[str, Any] = {
             "page_size": page_size,
             "filter": {"conjunction": "and", "conditions": conditions},
-        },
+        }
+        if page_token:
+            body["page_token"] = page_token
+        payload = _http_json(
+            "POST",
+            f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=body,
+        )
+        data = payload.get("data") or {}
+        items.extend(
+            record for record in (data.get("items") or []) if isinstance(record, dict)
+        )
+        if not fetch_all or not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
+def resolve_relation_record_id(
+    access_token: str,
+    *,
+    creator_handle: str,
+    sample_product: str = "",
+) -> dict[str, Any]:
+    """Resolve 红人ID（达人名）+寄样产品 → exactly one row for a status write.
+
+    2 号店进店的样例没有在本地留下 ``record_id``，写合作状态前必须查行。只接受
+    唯一匹配：多行（业务建过重复行）或没有行（SOP 2 不新建）都返回错误交给人工，
+    绝不猜一行去写。寄样产品优先精确匹配；本地没填产品或与飞书写法不一致、且该
+    达人只有一行时按 ``handle-only`` 放行，口径记在结果的 ``matched_by`` 里。
+    """
+    handle = (creator_handle or "").strip()
+    if not handle:
+        return {"status": "no-record", "error": "缺少红人ID（达人名）"}
+    rows = search_relation_records(
+        access_token,
+        creator_handle=handle,
+        fetch_all=True,
     )
-    return list(((payload.get("data") or {}).get("items") or []))
+    if not rows:
+        return {
+            "status": "no-record",
+            "error": "飞书没有匹配行；SOP 2 不新建",
+            "creator_handle": handle,
+        }
+
+    product = (sample_product or "").strip()
+    if product:
+        wanted_key = pending_ship_lookup_key(handle, product)
+        matching_rows = [
+            row
+            for row in rows
+            if pending_ship_lookup_key(
+                _field_plain((row.get("fields") or {}).get("红人ID")),
+                _field_plain((row.get("fields") or {}).get("寄样产品")),
+            )
+            == wanted_key
+        ]
+        if len(matching_rows) == 1:
+            return {
+                "status": "matched",
+                "record_id": str(matching_rows[0].get("record_id") or ""),
+                "matched_by": "handle+product",
+            }
+        if len(matching_rows) > 1:
+            return {
+                "status": "ambiguous-record",
+                "error": f"同一红人ID+寄样产品有 {len(matching_rows)} 行",
+                "creator_handle": handle,
+            }
+        if len(rows) > 1:
+            return {
+                "status": "ambiguous-record",
+                "error": f"寄样产品对不上，且该红人ID有 {len(rows)} 行",
+                "creator_handle": handle,
+            }
+        # 只有一行、寄样产品写法不同：按达人名放行（上面已记 matched_by）。
+
+    if len(rows) != 1:
+        return {
+            "status": "ambiguous-record",
+            "error": f"该红人ID有 {len(rows)} 行，无法确定写哪一行",
+            "creator_handle": handle,
+        }
+    return {
+        "status": "matched",
+        "record_id": str(rows[0].get("record_id") or ""),
+        "matched_by": "handle-only",
+    }
 
 
 def pending_ship_lookup_key(creator_handle: str, sample_product: str) -> tuple[str, str]:
