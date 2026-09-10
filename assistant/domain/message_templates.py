@@ -210,6 +210,10 @@ _UNCERTAIN_THANKS_PAIRS = (
     ("apreciamos muchisimo", ""),
 )
 
+# 同事风格的感谢要落在同一段话里才算数；否则旧消息里的 "thank you" 会与本轮
+# 无关的 "video" 拼成假阳性，把正常提醒挡成待人工确认。
+UNCERTAIN_THANKS_PROXIMITY_CHARS = 120
+
 
 def _fold_thanks_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(text or "").lower())
@@ -223,13 +227,25 @@ def looks_like_content_thanks(text: str) -> bool:
 
 
 def looks_like_uncertain_thanks(text: str) -> bool:
-    """Colleague-style thanks that is not the SOP fingerprint."""
+    """Colleague-style thanks that is not the SOP fingerprint.
+
+    The thanks and the product/content word must appear close together: an old
+    "thank you for collaborating" plus a "video" mentioned in a different
+    message must not park an unrelated reminder for human review.
+    """
     if looks_like_content_thanks(text):
         return False
     blob = _fold_thanks_text(text)
     for left, right in _UNCERTAIN_THANKS_PAIRS:
-        if left in blob and (not right or right in blob):
-            return True
+        left_index = blob.find(left)
+        while left_index != -1:
+            if not right:
+                return True
+            window_start = max(0, left_index - UNCERTAIN_THANKS_PROXIMITY_CHARS)
+            window_end = left_index + len(left) + UNCERTAIN_THANKS_PROXIMITY_CHARS
+            if right in blob[window_start:window_end]:
+                return True
+            left_index = blob.find(left, left_index + 1)
     return False
 
 
