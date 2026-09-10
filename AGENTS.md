@@ -186,7 +186,7 @@
 
 **SQLite 写锁与任务心跳（2026-09-10 加）：** 连接固定 `PRAGMA busy_timeout=30000`（`assistant/database/engine.py`）；心跳失败只重试并记一条 warning，不打堆栈。`STALE_JOB_TIMEOUT_SECONDS=150` 必须明显大于 busy_timeout，否则长事务（生成待办 / 物流同步）期间正在跑的任务会被 `mark_stale_jobs_interrupted` 误判为中断。不要为 `database is locked` 去缩短超时，也不要指望心跳失败能自动区分「任务死了」和「写锁被占」。
 
-**跟进写飞书（2026-09-10 加）：** 合作状态只走 `FollowupService._write_cooperation_status`（未履约 `未发布` / 内容确认 `已完成`），转换守卫只允许 `待发布 → 未发布/已完成`，`未发布/已完成/已发布` 是保护值、其它状态一律拒绝——**不要为了让守卫放行去改判定，也不要替业务补数据**。2 号店样例本地没有 `feishu_record_id`（实测 0/268）：写入前若为空，按 **红人ID（=达人名）+寄样产品** 查行（`resolve_relation_record_id`，`fetch_all` 翻页），**只有唯一命中才写并回填 case**；多行 → `ambiguous-record`、无行 → `no-record`，都转 needs_review `feishu_write_failed`，不新建、不猜。未履约写成功后写 `send_result=unfulfilled-written`（进 `COMPLETED_RESULTS`）结掉待办；写不成（守卫拒绝/多行/无行/接口错）同样转 needs_review，不自动重试。
+**跟进写飞书（2026-09-10 加）：** 合作状态只走 `FollowupService._write_cooperation_status`（未履约 `未发布` / 内容确认 `已完成`），转换守卫只允许 `待发布 → 未发布/已完成`，`未发布/已完成/已发布` 是保护值、其它状态一律拒绝——**不要为了让守卫放行去改判定，也不要替业务补数据**。飞书当前还是「待发货」的 D+15 行（业务没把状态补到「待发布」）**保持 pending 等业务改**，不要去点它把本地任务推成人工、更不要放宽守卫（2026-09-10 业务口径）。2 号店样例本地没有 `feishu_record_id`（实测 0/268）：写入前若为空，按 **红人ID（=达人名）+寄样产品** 查行（`resolve_relation_record_id`，`fetch_all` 翻页），**只有唯一命中才写并回填 case**；多行 → `ambiguous-record`、无行 → `no-record`，都转 needs_review `feishu_write_failed`，不新建、不猜。未履约写成功后写 `send_result=unfulfilled-written`（进 `COMPLETED_RESULTS`）结掉待办；写不成（守卫拒绝/多行/无行/接口错）同样转 needs_review，不自动重试。
 
 **跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。有简介时走 LLM JSON 的 `lang`（不看 `confidence`；`.env`：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，默认 DeepSeek `deepseek-v4-flash`）；空简介、识别失败或非法 lang 默认英语。`sync_shipped_tracking.py` 已是这个优先级。
 
