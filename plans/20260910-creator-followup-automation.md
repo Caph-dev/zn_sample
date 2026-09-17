@@ -2,7 +2,9 @@
 
 日期：2026-09-10
 分支：`creator-followup-page`
-状态：Phase 1 已完成（发送脚本、图片 SDK 通道、结果语义、原子认领与互斥、操作台单条发送入口、离线单测；全量 711 tests OK）。真实发送前新增「会话已有感谢话术 → 保留并转人工」（`held` / `content_thanks_already_sent`）与 `content_found` 任务本地标记（`mark-sent` 接受 `acknowledge_content`），避免与人工已发的感谢私信重复。未执行任何真实发送或写飞书；限量实发验收须另行授权。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
+状态：Phase 1 已完成（发送脚本、图片 SDK 通道、结果语义、原子认领与互斥、操作台单条发送入口、离线单测；完成时全量 711 tests OK，2026-09-16 复核 797 tests OK）。真实发送前新增「会话已有感谢话术 → 保留并转人工」（`held` / `content_thanks_already_sent`）与 `content_found` 任务本地标记（`mark-sent` 接受 `acknowledge_content`），避免与人工已发的感谢私信重复。
+
+**实店执行记录（2026-09-10，2 号店 `27506607043054`；2026-09-16 据任务表与导出更正本节）：** 已真实发送 9 条（day_3 ×4、day_7 ×4、content_found 感谢 ×1，全部平台确认 `platform-sent`，逐条有 `followup_send_*_pre_execute.json` 备份）；飞书真实写入 2 笔（D+15 未履约「未发布」×1、内容确认「已完成」×1）；操作台发送入口成功 1 次、被正确拒绝 1 次（退出码 4）。**`arrival`（含 B005 配图）尚无一次真实发送**；B005 图片通道、`send-unknown`、并发认领/页面互斥等仍待实店验收。本文不构成执行真实发送私信、写飞书或平台审批的授权；任何真实发送仍须 `--execute --yes`（+ `--write-feishu`）门闩并默认限量。
 
 权威口径：`样品申请筛查sop/2-查看到货+达人跟进.md`（项目约定 + 2026-08-26 文档更新）。
 飞书 wiki 正文里的旧日历（到货第五天 / 每隔两天）与 B006-A 一律忽略，不进入代码、话术与验收。
@@ -198,10 +200,11 @@ while (stack.length) {
 
 ### 3.7 验收（DoD）
 
-- 1 号店选 1 条真实 D0 任务：预演 → 发送 → 平台确认 → 本地 `platform-sent`；重复运行不重发。
+- 1 号店选 1 条真实 D0 任务：预演 → 发送 → 平台确认 → 本地 `platform-sent`；重复运行不重发。**未完成（2026-09-16）：实店实发只覆盖 day_3 ×4、day_7 ×4、content_found ×1 共 9 条；arrival 0 条——两条 arrival 任务（`_chattyfaye_` / `yenyelviraramreza`）是人工本地 `marked-sent`，不等于平台发送，B005 配图通道因此也未验。**
 - 离线单测覆盖：门闩（缺 `--yes` exit 2）、限量、幂等跳过、`send-unknown` 进 `needs_review`、备份文件生成、模板/语言/类型回归；以及原子认领（双运行只发一次）、陈旧认领转人工、页面任务互斥（退出码 3）；操作台端点（缺确认/缺 task_id/未知任务/重复点击去重/跨任务 409）、handler 固定 argv 与失败码。
 - 操作台按钮：缺确认不建任务、运行中无取消、点击一次最多一条。
 - 网页只新增发送入口；其余仍只有预演与本地标记；详情页能看到平台发送状态。
+- **统计口径：`platform-sent`（平台发送后线程确认）≠ `marked-sent`（网页人工本地标记）。** 截至 2026-09-10 实店为 9 条 `platform-sent` + 3 条 `marked-sent`（`emuazeb` content_found；`_chattyfaye_` / `yenyelviraramreza` arrival）；报「发送覆盖」时只能用 `platform-sent`。
 
 ## 4. Phase 2（P0/P1）— 内容巡检 + 感谢私信
 
@@ -273,14 +276,16 @@ while (stack.length) {
 
 | Phase | 关键验收 | 新增测试重点 |
 |-------|----------|--------------|
-| 1 | 1 号店 D0 实发 1 条（含 B005 配图）并确认；重跑不重发 | 门闩/限量/幂等/备份/send-unknown/标签/图片分片与失败可观测性 |
+| 1 | 1 号店 D0 实发 1 条（含 B005 配图）并确认；重跑不重发（**未完成**：实发覆盖 day_3/day_7/content_found 共 9 条，含图 arrival 0 条） | 门闩/限量/幂等/备份/send-unknown/标签/图片分片与失败可观测性 |
 | 2 | 巡检 → 确认 → 感谢私信 1 条 | 内容计数分支（0/仅视频/仅直播/两者/读取失败）/hold/类型与语言/候选筛选 |
 | 3 | 批量未履约写飞书（限量实测）；D+10 留痕文件 | 批量校验/拒绝路径/对账 |
 | 4 | 人工送达日 → 哨兵解决 → 日历重排 | 日期校验/ETA 拒绝/状态迁移 |
 
+实店验收进度（2026-09-16 复核，2 号店 `27506607043054`）：**Phase 1 部分完成**——day_3 ×4、day_7 ×4、content_found 感谢 ×1 已实发并平台确认（逐条 `_pre_execute` 备份）；飞书真实写入 2 笔（未履约「未发布」×1、内容确认「已完成」×1）；D+10 出名单 1 条 + 导出 2 次；操作台发送入口 1 成功 + 1 次退出码 4 拒绝。**arrival（含 B005 配图）、`send-unknown`、并发认领/页面互斥、自动批准页执行链路（`auto_approval_executions=0`）、Phase 2–4 的实店验收均未开始。** 口径提醒：`marked-sent`（`emuazeb` / `_chattyfaye_` / `yenyelviraramreza`）是网页人工本地标记，不计入平台发送覆盖。
+
 统一要求：
 
-- 每个 Phase 合并前跑 `.venv/bin/python -m unittest discover -s tests -q` 全绿（本阶段完成时 703）。
+- 每个 Phase 合并前跑 `.venv/bin/python -m unittest discover -s tests -q` 全绿（本阶段完成时 703；2026-09-16 复核 797）。
 - 实店动作一律 `--execute-limit=1` 起步，验收记录写入导出或任务事件。
 - 不改动 `plans/` 之外的既有计划；AGENTS.md 必须同步本次契约变化：新增任务类型 `followup_content_scan`、`operator_followup_send` 登记进 `ZINIAO_JOB_TYPES` 与 `PROTECTED_JOB_TYPES`，并把「网页不是新的业务写路径」更新为「唯一受限写入口：跟进私信发送」（决策 7）。
 
