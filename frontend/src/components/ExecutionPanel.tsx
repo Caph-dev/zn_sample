@@ -1,6 +1,7 @@
 import {AlertDialog} from '@astryxdesign/core/AlertDialog';
 import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
+import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
 import {List, ListItem} from '@astryxdesign/core/List';
 import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList';
@@ -13,6 +14,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
+import {isValidExecutionLimit} from '../executionLimitMemory';
 import type {ExecutionPayload, PreviewPayload} from '../types';
 
 interface ExecutionPanelProps {
@@ -108,7 +110,7 @@ export function ExecutionPanel({
     if (preview.status !== 'completed' || !preview.integrity_complete || !preview.is_fresh) {
       return false;
     }
-    if (selection.length === 0 || selection.length > limit) {
+    if (!isValidExecutionLimit(limit) || selection.length === 0 || selection.length > limit) {
       return false;
     }
     return confirmText.trim().toLowerCase() === 'y';
@@ -132,6 +134,7 @@ export function ExecutionPanel({
     .map((row) => `${row.creator_name}（${row.apply_id}）`);
   const summaryRows = preview.rule_summary.map(splitSummaryLine);
   const feishuTarget = '达人关系管理(新) / 达人管理总表';
+  const effectiveWriteFeishu = execution?.write_feishu ?? writeFeishu;
 
   return (
     <Section>
@@ -149,23 +152,48 @@ export function ExecutionPanel({
           </MetadataList>
         </Stack>
 
-        <Stack direction="horizontal" gap={3} vAlign="center">
-          <NumberInput
-            label="本次限量（最多批准 N 条）"
-            value={limit}
-            onChange={onLimitChange}
-            min={1}
-            description="正整数（≥1），无上限；所选条数不得超过它"
-            isDisabled={execution !== null}
-          />
-          <Switch
-            label="批准后写入飞书（达人关系管理(新)）"
-            value={writeFeishu}
-            onChange={onWriteFeishuChange}
-            description="写表目标：达人关系管理(新) / 达人管理总表；默认关闭"
-            isDisabled={execution !== null}
-          />
-        </Stack>
+        <Section variant="muted" padding={4}>
+          <Grid columns={{minWidth: 280, max: 2}} gap={6} align="start">
+            <Stack gap={3}>
+              <Stack gap={1}>
+                <Heading level={3}>批准数量</Heading>
+                <Text type="supporting">设置本次操作的批准上限，不会自动增加已选名单。</Text>
+              </Stack>
+              <NumberInput
+                label="本次限量（最多批准 N 条）"
+                value={limit}
+                onChange={onLimitChange}
+                min={1}
+                description="已选条数需要 ≤ 本次限量"
+                isDisabled={execution !== null}
+              />
+              <Text type="supporting">当前已选 {selection.length} 条申请</Text>
+            </Stack>
+            <Stack gap={3}>
+              <Stack gap={1}>
+                <Heading level={3}>飞书写入</Heading>
+                <Text type="supporting">仅在平台批准成功后写入，不发送私信。</Text>
+              </Stack>
+              <Switch
+                label="批准后写入飞书"
+                value={effectiveWriteFeishu}
+                onChange={onWriteFeishuChange}
+                labelPosition="start"
+                labelSpacing="spread"
+                description={execution !== null
+                  ? `本批次设置：${effectiveWriteFeishu ? '已开启' : '已关闭'}，不可更改。`
+                  : effectiveWriteFeishu
+                    ? '已开启（默认）；仅需平台批准时可手动关闭。'
+                    : '已关闭；本次仅批准，不写入飞书。'}
+                isDisabled={execution !== null}
+              />
+              <Stack gap={1}>
+                <Text type="supporting">写入目标</Text>
+                <Text>{feishuTarget}</Text>
+              </Stack>
+            </Stack>
+          </Grid>
+        </Section>
 
         <Stack gap={2}>
           <Heading level={3}>已选可批准名单（按此顺序执行）</Heading>
@@ -224,7 +252,7 @@ export function ExecutionPanel({
           onOpenChange={setDialogOpen}
           title="确认执行限量批准"
           description={
-            `店铺：${preview.store_id}；限量 ${limit} 条；写飞书：${writeFeishu ? '开（' + feishuTarget + '）' : '关'}。` +
+            `店铺：${preview.store_id}；限量 ${limit} 条；写飞书：${effectiveWriteFeishu ? '开（' + feishuTarget + '）' : '关'}。` +
             `名单：${selectedNames.join('、') || '无'}。` +
             '本次按自定义标准，不代表完整 SOP 通过。平台同意不可撤销，批准前已生成本地备份。'
           }

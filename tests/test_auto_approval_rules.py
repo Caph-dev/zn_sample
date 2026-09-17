@@ -48,12 +48,56 @@ def base_row(**overrides) -> dict:
         "creator_id": "creator-1",
         "creator_name": "creator_test",
         "product_id": "1732414717062320994",
+        "sku_desc": "3PCS (Best Seller),XL",
         "fulfillment_n": 86.0,
         "est_post_rate_n": None,
         "can_be_approved": True,
     }
     row.update(overrides)
     return row
+
+
+class ProductSkuTests(unittest.TestCase):
+    def evaluate(self, **overrides):
+        rule = validate_custom_rule(rule_payload(), allowed_product_ids=ALLOWED)
+        return evaluate_custom_row(base_row(**overrides), rule, hero_keys=ALLOWED, allowed_product_ids=ALLOWED)
+
+    def test_six_piece_b005_fails_even_with_passing_metrics(self):
+        for description in ("6PCS(Full Color Value Pack),L", "6pcs,L", "prefix6PcSsuffix"):
+            with self.subTest(description=description):
+                result = self.evaluate(sku_desc=description)
+                self.assertEqual(result["overall"], "failed")
+                self.assertFalse(result["custom_eligible"])
+                self.assertEqual(result["checks"][-1]["value"], description)
+
+    def test_missing_b005_sku_requires_review_not_title_inference(self):
+        for description in (None, "", "  ", "-", {}, []):
+            with self.subTest(description=description):
+                result = self.evaluate(sku_desc=description, product_title="3PCS", sku_id="12345")
+                self.assertEqual(result["overall"], "needs_review")
+                self.assertFalse(result["custom_eligible"])
+
+    def test_other_products_are_unrestricted(self):
+        for description in ("6PCS,L", None):
+            result = self.evaluate(product_id="999999", sku_desc=description)
+            self.assertTrue(result["custom_eligible"])
+            self.assertFalse(any(check["key"] == "b005_sku" for check in result["checks"]))
+
+    def test_only_current_sku_counts_and_other_checks_still_apply(self):
+        self.assertTrue(self.evaluate(product_title="6PCS Bra", sibling_sku="6PCS,L")["custom_eligible"])
+        self.assertFalse(self.evaluate(fulfillment_n=80)["custom_eligible"])
+
+    def test_old_or_changed_sku_evidence_is_rejected(self):
+        rule = validate_custom_rule(rule_payload(), allowed_product_ids=ALLOWED)
+        row = base_row()
+        result = self.evaluate()
+        row.update(custom_eligible=True, custom_overall="passed", custom_checks=result["checks"])
+        self.assertTrue(verify_row_evidence(row, rule, hero_keys=ALLOWED, allowed_product_ids=ALLOWED)[0])
+        row["custom_checks"] = [check for check in result["checks"] if check["key"] != "b005_sku"]
+        self.assertEqual(verify_row_evidence(row, rule, hero_keys=ALLOWED, allowed_product_ids=ALLOWED)[1], "b005-sku-evidence-invalid")
+        row["custom_checks"] = result["checks"]
+        row["sku_desc"] = "6PCS,L"
+        self.assertFalse(verify_row_evidence(row, rule, hero_keys=ALLOWED, allowed_product_ids=ALLOWED)[0])
 
 
 class RuleValidationTests(unittest.TestCase):

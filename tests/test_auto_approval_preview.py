@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -57,6 +58,7 @@ def _pending_rows(count: int) -> list[dict]:
             "creator_id": f"creator-{index}",
             "creator_name": f"creator_{index}",
             "product_id": HERO_PRODUCT_ID,
+            "sku_desc": "3PCS (Best Seller),M",
             "can_be_approved": True,
             "follower_num": "5000",
             "gmv": "$2,000",
@@ -83,6 +85,55 @@ class SystemicDetailErrorTests(unittest.TestCase):
         self.assertFalse(
             is_systemic_detail_error("详情页资料读取失败：数据加载失败，请稍后刷新")
         )
+
+
+class ExecuteSkuRecheckTests(unittest.TestCase):
+    def test_live_six_piece_or_missing_sku_never_reaches_approval(self) -> None:
+        rules_payload = {
+            **RULE_PAYLOAD,
+            "basic": {"fulfillment": {"enabled": True, "min": 85}},
+            "video_live": {"enabled": False},
+        }
+        rule = auto_approval.validate_custom_rule(rules_payload, allowed_product_ids={HERO_PRODUCT_ID})
+        row = auto_approval.enrich_row(_pending_rows(1)[0])
+        evaluation = auto_approval.evaluate_custom_row(
+            row, rule, hero_keys={HERO_PRODUCT_ID}, allowed_product_ids={HERO_PRODUCT_ID},
+        )
+        row.update(custom_eligible=True, custom_overall="passed", custom_checks=evaluation["checks"])
+        preview = {
+            "schema_version": 1,
+            "mode": "custom",
+            "store_id": "store-test",
+            "rule": rule.to_dict(),
+            "rule_hash": auto_approval.rule_hash(rule),
+            "integrity_complete": True,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "allowed_product_ids": [HERO_PRODUCT_ID],
+            "rows": [row],
+        }
+        for live_description in ("6PCS,L", None, ""):
+            with self.subTest(sku=live_description), tempfile.TemporaryDirectory() as directory:
+                args = Namespace(
+                    yes=True, limit=1, store_id="store-test", rules="rules", preview="preview",
+                    apply_ids="ids", from_seller_home=False, config=None, write_feishu=False,
+                    backup_out=Path(directory) / "backup", out=Path(directory) / "result.json",
+                    execution_id="execution-test", preview_id="preview-test",
+                )
+                with (
+                    patch.object(auto_approval, "_load_json", side_effect=[rules_payload, preview, [row["apply_id"]]]),
+                    patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+                    patch.object(auto_approval, "check_pending_application_api", return_value={
+                        "ok": True, "state": "pending-approvable", "sku_desc": live_description,
+                    }),
+                    patch.object(auto_approval, "approve_application_api") as approve,
+                    patch.object(auto_approval, "create_creator_relation_record") as write_feishu,
+                    patch.object(auto_approval, "_write_backup", return_value={}),
+                ):
+                    self.assertEqual(auto_approval._run_execute(args), 0)
+                approve.assert_not_called()
+                write_feishu.assert_not_called()
+                result = json.loads(args.out.read_text(encoding="utf-8"))
+                self.assertEqual(result["items"][0]["action"], "skipped-b005-sku")
 
 
 class PreviewFailFastTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from assistant.services.auto_approval_service import (
     load_rule_draft,
     save_rule_draft,
 )
+from lib.auto_approval_sku import evaluate_product_sku
 
 ALLOWED_PRODUCTS = [{"product_id": "1732414717062320994", "sku": "B005"}]
 
@@ -95,6 +97,11 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     overall="passed",
                     content_verdict="not_checked",
                     custom_eligible=True,
+                    metrics_json=json.dumps({"sku_desc": "3PCS (Best Seller),XL"}),
+                    checks_json=json.dumps([evaluate_product_sku({
+                        "product_id": "1732414717062320994",
+                        "sku_desc": "3PCS (Best Seller),XL",
+                    })]),
                 )
             )
             session.commit()
@@ -119,6 +126,49 @@ class ExecutionBoundaryTests(unittest.TestCase):
         with self.assertRaises(AutoApprovalServiceError) as context:
             self._create(confirmation="n")
         self.assertEqual(context.exception.code, "confirmation-required")
+
+    def test_legacy_b005_candidate_without_sku_evidence_cannot_execute(self) -> None:
+        from sqlalchemy import select
+
+        with self.session_factory() as session:
+            candidate = session.scalar(select(AutoApprovalCandidate))
+            candidate.checks_json = "[]"
+            session.commit()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create()
+        self.assertEqual(context.exception.code, "b005-sku-evidence-invalid")
+
+    def test_b005_six_piece_metrics_cannot_reuse_passed_evidence(self) -> None:
+        from sqlalchemy import select
+
+        with self.session_factory() as session:
+            candidate = session.scalar(select(AutoApprovalCandidate))
+            candidate.metrics_json = json.dumps({"sku_desc": "6PCS,L"})
+            session.commit()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create()
+        self.assertEqual(context.exception.code, "b005-sku-evidence-invalid")
+
+    def test_preview_sync_preserves_sku_and_check_for_page_and_execution(self) -> None:
+        from assistant.services.auto_approval_service import preview_payload, sync_preview_result
+
+        row = {
+            "apply_id": "apply-1", "creator_id": "creator-1", "creator_name": "creator_test",
+            "product_id": "1732414717062320994", "sku_desc": "3PCS (Best Seller),XL",
+            "sku_id": "sku-test", "custom_overall": "passed", "custom_eligible": True,
+            "content_verdict": "not_checked",
+        }
+        row["custom_checks"] = [evaluate_product_sku(row)]
+        result_path = Path(self.temporary_directory.name) / "preview.json"
+        result_path.write_text(json.dumps({"integrity_complete": True, "rows": [row]}), encoding="utf-8")
+        with self.session_factory() as session:
+            session.get(AutoApprovalPreview, "preview-1").result_path = str(result_path)
+            session.commit()
+        sync_preview_result(self.session_factory, "preview-1", status="completed")
+        result = preview_payload(self.session_factory, "preview-1")["rows"][0]
+        self.assertEqual(result["metrics"]["sku_desc"], row["sku_desc"])
+        self.assertEqual(result["checks"], row["custom_checks"])
+        self.assertIn("execution_id", self._create())
 
     def test_limit_zero_is_not_unlimited(self) -> None:
         with self.assertRaises(AutoApprovalServiceError) as context:

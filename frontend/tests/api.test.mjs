@@ -13,8 +13,61 @@ async function importTypeScriptModule(relativePath) {
 }
 
 const {createPreview, fetchJson, saveRuleDraft} = await importTypeScriptModule('../src/api.ts');
-const {buildStandardRule, rulesEqual, validateDraft} = await importTypeScriptModule('../src/ruleModel.ts');
+const {buildStandardRule, hasOutdatedSkuEvidence, rulesEqual, summaryRows, validateDraft} = await importTypeScriptModule('../src/ruleModel.ts');
 const {readRuleMemory, writeRuleMemory} = await importTypeScriptModule('../src/ruleMemory.ts');
+const {readExecutionLimit, writeExecutionLimit} = await importTypeScriptModule('../src/executionLimitMemory.ts');
+
+test('execution limit defaults to 20 and immediately remembers valid edits', () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  assert.equal(readExecutionLimit(storage), 20);
+  for (const limit of [1, 35, 1000]) {
+    assert.equal(writeExecutionLimit(storage, limit), true);
+    assert.equal(readExecutionLimit(storage), limit);
+  }
+  for (const invalidLimit of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(writeExecutionLimit(storage, invalidLimit), false);
+    assert.equal(readExecutionLimit(storage), 1000);
+  }
+});
+
+test('invalid limit memory and unavailable storage safely fall back to 20', () => {
+  for (const storedValue of ['{', 'null', '"35"', '{}', '0', '-1', '2.5', '1e999']) {
+    assert.equal(readExecutionLimit({getItem: () => storedValue}), 20);
+  }
+  const blockedStorage = {
+    getItem() { throw new Error('Storage denied'); },
+    setItem() { throw new Error('Storage denied'); },
+  };
+  assert.equal(readExecutionLimit(blockedStorage), 20);
+  assert.equal(writeExecutionLimit(blockedStorage, 35), false);
+});
+
+test('B005 fixed SKU rule appears only when its product is selected', () => {
+  const rule = buildStandardRule(null);
+  assert.ok(summaryRows(rule).some((row) => row.value.includes('6PCS')));
+  rule.product_ids = ['other-product'];
+  assert.ok(!summaryRows(rule).some((row) => row.value.includes('6PCS')));
+});
+
+test('old B005 results cannot remain executable after the SKU rule is introduced', () => {
+  const row = {
+    product_id: '1732414717062320994', custom_eligible: true,
+    metrics: {sku_desc: '3PCS,L'}, checks: [],
+  };
+  assert.equal(hasOutdatedSkuEvidence({rows: [row]}), true);
+  row.checks = [{key: 'b005_sku', source: 'application.sku_desc', status: 'passed', value: '3PCS,L'}];
+  assert.equal(hasOutdatedSkuEvidence({rows: [row]}), false);
+  row.metrics.sku_desc = '6PCS,L';
+  assert.equal(hasOutdatedSkuEvidence({rows: [row]}), true);
+  row.custom_eligible = false;
+  row.checks[0].status = 'failed';
+  assert.equal(hasOutdatedSkuEvidence({rows: [row]}), false);
+  assert.equal(hasOutdatedSkuEvidence({rows: [{...row, product_id: 'other-product', checks: []}]}), false);
+});
 
 test('form memory retains disabled values, hidden side selections and incomplete edits', () => {
   const rule = buildStandardRule(null);

@@ -18,6 +18,8 @@ import {
   BASIC_KEYS,
   BASIC_LABELS,
   BASIC_UNITS,
+  B005_SKU_RULE_DESCRIPTION,
+  DEFAULT_ACTIVE_PRODUCT_ID,
   summaryRows,
   validateDraft,
 } from '../ruleModel';
@@ -188,6 +190,13 @@ export function RuleConfigPanel({
                     );
                   })}
                 </Grid>
+              )}
+              {rule.product_ids.includes(DEFAULT_ACTIVE_PRODUCT_ID) && (
+                <Banner
+                  status="info"
+                  title="B005 专属 SKU 限制（固定启用）"
+                  description={B005_SKU_RULE_DESCRIPTION}
+                />
               )}
             </Stack>
 
@@ -419,8 +428,8 @@ export function RuleConfigPanel({
             {previewInvalidated && (
               <Banner
                 status="warning"
-                title="规则已修改"
-                description="规则或阈值发生变化，旧筛查结果已失效；请重新「开始只读筛查」。"
+                title="需要重新筛查"
+                description="规则或阈值发生变化，或旧结果缺少当前商品限制的证据；请重新「开始只读筛查」。"
               />
             )}
             <Button

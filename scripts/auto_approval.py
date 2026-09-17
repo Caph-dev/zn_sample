@@ -39,6 +39,7 @@ from lib.auto_approval_rules import (  # noqa: E402
     verify_row_evidence,
 )
 from lib.creator_video_review import review_creator_rows  # noqa: E402
+from lib.auto_approval_sku import evaluate_product_sku  # noqa: E402
 from lib.filters import enrich_row  # noqa: E402
 from lib.sample_navigation import navigate_from_seller_home_to_pending  # noqa: E402
 
@@ -675,6 +676,20 @@ def _run_execute(args: argparse.Namespace) -> int:
             )
             items.append(item)
             continue
+
+        live_sku_check = evaluate_product_sku({
+            "product_id": row.get("product_id"),
+            "sku_desc": pending_status.get("sku_desc"),
+        })
+        if live_sku_check is not None:
+            item["sku_desc"] = pending_status.get("sku_desc")
+            item["sku_check"] = live_sku_check
+            if live_sku_check["status"] != "passed":
+                item["approve_error"] = live_sku_check["detail"]
+                item["action"] = "skipped-b005-sku"
+                logger.info(f"  [跳过] {creator_name} apply={apply_id} {item['approve_error']}")
+                items.append(item)
+                continue
 
         logger.info(f"  [批准] {creator_name} apply={apply_id}")
         approve_exception: Exception | None = None

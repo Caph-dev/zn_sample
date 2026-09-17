@@ -38,6 +38,15 @@ def load_fixture() -> dict:
 
 
 class SampleApiParserTests(unittest.TestCase):
+    def test_preflight_sku_belongs_to_exact_application_not_group_alias(self) -> None:
+        rows = parse_pending_list_payload(load_fixture(), list_href="https://example.test/")
+        rows[0]["sku_desc"] = "3PCS (Best Seller),M"
+        exact = locate_pending_application(rows, rows[0]["apply_id"])
+        self.assertEqual(exact["sku_desc"], "3PCS (Best Seller),M")
+        sibling = locate_pending_application(rows, "apply-test-002")
+        self.assertIsNone(sibling["sku_desc"])
+        self.assertEqual(sibling["sku_id"], "")
+
     def test_maps_aggregate_to_existing_dom_row_shape(self) -> None:
         rows = parse_pending_list_payload(
             load_fixture(),

@@ -22,7 +22,8 @@ import {ReadinessPanel} from './components/ReadinessPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
-import {buildStandardRule, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
+import {isValidExecutionLimit, loadBrowserExecutionLimit, rememberBrowserExecutionLimit} from './executionLimitMemory';
+import {buildStandardRule, hasOutdatedSkuEvidence, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
 import {loadBrowserRuleMemory, rememberBrowserRule} from './ruleMemory';
 import type {
   AutoApprovalBootstrap,
@@ -76,23 +77,31 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [executionError, setExecutionError] = useState('');
   const [reconciling, setReconciling] = useState(false);
   const [reconcileError, setReconcileError] = useState('');
-  const [limit, setLimit] = useState(1);
-  const [writeFeishu, setWriteFeishu] = useState(false);
+  const [limit, setLimit] = useState(loadBrowserExecutionLimit);
+  const [writeFeishu, setWriteFeishu] = useState(true);
   const [confirmText, setConfirmText] = useState('');
   const [reconcileConfirmText, setReconcileConfirmText] = useState('');
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
+
+  const updateExecutionLimit = useCallback((nextLimit: number) => {
+    setLimit(nextLimit);
+    if (isValidExecutionLimit(nextLimit) && !rememberBrowserExecutionLimit(nextLimit)) {
+      setOptionsError('浏览器无法保存本次限量；当前设置仍有效，但刷新后可能恢复为默认值。');
+    }
+  }, []);
 
   const previewPollTimer = useRef<number | null>(null);
   const formRestoredRef = useRef(rememberedForm !== null);
 
   const busy = storeSummary?.error === 'ziniao-busy';
+  const skuEvidenceOutdated = preview !== null && hasOutdatedSkuEvidence(preview);
 
   const previewInvalidated = useMemo(() => {
     if (preview === null) {
       return false;
     }
-    return !rulesEqual(rule, preview.rule);
-  }, [rule, preview]);
+    return skuEvidenceOutdated || !rulesEqual(rule, preview.rule);
+  }, [rule, preview, skuEvidenceOutdated]);
 
   const refreshStore = useCallback(() => {
     getStorePreparation()
@@ -386,7 +395,9 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
             selection={selection}
             onSelectionChange={setSelection}
             previewInvalidated={previewInvalidated}
-            staleReason="规则或阈值已修改，旧结果已失效。"
+            staleReason={skuEvidenceOutdated
+              ? '旧结果缺少有效的 B005 SKU 限制证据，请重新筛查后再批准。'
+              : '规则或阈值已修改，旧结果已失效。'}
           />
         )}
         <ExecutionPanel
@@ -394,7 +405,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           previewInvalidated={previewInvalidated}
           selection={selection}
           limit={limit}
-          onLimitChange={setLimit}
+          onLimitChange={updateExecutionLimit}
           writeFeishu={writeFeishu}
           onWriteFeishuChange={setWriteFeishu}
           confirmText={confirmText}

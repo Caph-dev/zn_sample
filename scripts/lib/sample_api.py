@@ -378,6 +378,17 @@ def locate_pending_application(
         "curr_status": matched_row.get("curr_status"),
         "operable": matched_row.get("operable"),
         "main_order_id": matched_row.get("main_order_id") or "",
+        # 聚合 apply_ids 命中不代表主申请的 SKU 属于目标申请；禁止借用兄弟行。
+        "sku_desc": (
+            matched_row.get("sku_desc")
+            if str(matched_row.get("apply_id") or "") == normalized_apply_id
+            else None
+        ),
+        "sku_id": (
+            matched_row.get("sku_id") or ""
+            if str(matched_row.get("apply_id") or "") == normalized_apply_id
+            else ""
+        ),
     }
 
 

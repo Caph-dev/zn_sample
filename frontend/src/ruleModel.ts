@@ -1,6 +1,6 @@
 /** 规则草稿默认值、前端校验与实时摘要（与后端 lib.auto_approval_rules 对齐）。 */
 
-import type {BasicKey, OptionsPayload, RuleDraft} from './types';
+import type {BasicKey, OptionsPayload, PreviewPayload, RuleDraft} from './types';
 
 export const BASIC_KEYS: BasicKey[] = [
   'followers',
@@ -35,6 +35,28 @@ export const BASIC_UNITS: Partial<Record<BasicKey, string>> = {
 };
 
 export const DEFAULT_ACTIVE_PRODUCT_ID = '1732414717062320994';
+export const B005_SKU_RULE_DESCRIPTION =
+  'B005（1732414717062320994）的 SKU 不得包含 6PCS（不区分大小写）。SKU 缺失时待复核、不可批准；其他商品不受此限制。此限制固定启用。';
+
+export function hasOutdatedSkuEvidence(preview: PreviewPayload): boolean {
+  return preview.rows.some((row) => {
+    if (row.product_id !== DEFAULT_ACTIVE_PRODUCT_ID) {
+      return false;
+    }
+    const checks = row.checks.filter((check) => check.key === 'b005_sku');
+    if (checks.length !== 1 || checks[0].source !== 'application.sku_desc') {
+      return true;
+    }
+    if (!row.custom_eligible) {
+      return false;
+    }
+    const description = row.metrics.sku_desc;
+    return typeof description !== 'string' || description.trim() === ''
+      || description.toUpperCase().includes('6PCS')
+      || checks[0].status !== 'passed' || checks[0].value !== description.trim();
+  });
+}
+
 export const DEFAULT_CATEGORIES = [
   'Beauty & Personal Care',
   'Womenswear & Underwear',
@@ -319,6 +341,9 @@ export function summaryRows(rule: RuleDraft): SummaryRow[] {
     value: '自定义（本次临时标准，不代表完整 SOP 通过）',
   });
   rows.push({label: '商品', value: rule.product_ids.join('、')});
+  if (rule.product_ids.includes(DEFAULT_ACTIVE_PRODUCT_ID)) {
+    rows.push({label: '商品固定限制', value: B005_SKU_RULE_DESCRIPTION});
+  }
   const enabledParts: string[] = [];
   const disabledParts: string[] = [];
   for (const key of BASIC_KEYS) {

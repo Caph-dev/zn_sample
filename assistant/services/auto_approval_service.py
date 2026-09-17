@@ -525,6 +525,20 @@ def create_execution(
                 f"所选行不在可批准名单中: {disallowed}",
                 status_code=400,
             )
+        from lib.auto_approval_sku import has_product_sku_evidence
+
+        for apply_id in normalized_ids:
+            candidate = eligible_candidates[apply_id]
+            metrics = json.loads(candidate.metrics_json or "{}")
+            if not has_product_sku_evidence(
+                {"product_id": candidate.product_id, "sku_desc": metrics.get("sku_desc")},
+                json.loads(candidate.checks_json or "[]"),
+            ):
+                raise AutoApprovalServiceError(
+                    "b005-sku-evidence-invalid",
+                    f"申请 {apply_id} 缺少有效的 B005 SKU 检查证据，或 SKU 含 6PCS；请重新筛查。",
+                    status_code=409,
+                )
         execution_id = str(uuid.uuid4())
         apply_ids_path = rule_snapshot_directory() / f"apply_ids_{execution_id}.json"
         apply_ids_path.write_text(
@@ -764,6 +778,8 @@ def sync_preview_result(session_factory, preview_id: str, *, status: str, error_
                 ).all()
             }
             metric_keys = (
+                "sku_id",
+                "sku_desc",
                 "followers_n",
                 "gmv_n",
                 "units_n",

@@ -9,8 +9,9 @@
 - 启用指标缺失或已知违反 → failed（不通过；不默认放过）
 - 完整满足 → passed
 - 未启用的检查 → not_checked（不是「通过」，也不是「跳过即通过」）
-- 唯一例外：详情采集失败（detail_error）导致缺失 → needs_review
+- 详情采集失败（detail_error）导致缺失 → needs_review
   （该批次 integrity 不完整，本身禁止执行）
+- B005 固定 SKU 检查缺失 → needs_review（本行禁止执行）
 
 本模块只做判定与证据校验，不触发任何平台/飞书写操作。
 """
@@ -24,6 +25,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .filters import ALLOWED_CATEGORIES
+from .auto_approval_sku import (
+    B005_PRODUCT_ID,
+    B005_SKU_RULE_DESCRIPTION,
+    evaluate_product_sku,
+    has_product_sku_evidence,
+)
 
 SCHEMA_VERSION = 1
 MODE_CUSTOM = "custom"
@@ -435,6 +442,8 @@ def rule_summary_lines(
     ]
     lines.append(f"模式：自定义（本次临时标准，不代表完整 SOP 通过）")
     lines.append(f"商品：{'、'.join(product_labels)}")
+    if B005_PRODUCT_ID in rule.product_ids:
+        lines.append(f"商品固定限制：{B005_SKU_RULE_DESCRIPTION}")
 
     enabled_parts: list[str] = []
     disabled_parts: list[str] = []
@@ -505,8 +514,8 @@ def evaluate_custom_row(
     """按自定义规则对单行做判定；返回逐项结果与总体结论。
 
     判定语义：启用指标缺失或违反 → failed；完整满足 → passed；未启用 → not_checked。
-    仅「详情采集失败」（detail_error）导致缺失时落 needs_review——该批次
-    integrity 不完整，服务端与脚本都禁止执行。
+    「详情采集失败」（detail_error）导致缺失时落 needs_review——该批次
+    integrity 不完整，服务端与脚本都禁止执行；B005 SKU 缺失仅阻止本行。
 
     依赖上游已做数值抽取（lib.filters.evaluate_row 的 *_n 字段或等价字段）。
     这里不做写操作，也不做内容审核（内容审核单独跑 review_creator_rows）。
@@ -787,6 +796,11 @@ def evaluate_custom_row(
             }
         )
 
+    sku_check = evaluate_product_sku(row)
+    if sku_check is not None:
+        checks.append(sku_check)
+        absorb(sku_check["status"])
+
     # 主推款与当前跟进款（安全拦截；不属于自定义审核项）
     safety_blocks: list[dict[str, str]] = []
     hero_ok: bool | None = True
@@ -903,6 +917,8 @@ def verify_row_evidence(
         return False, "row-not-object"
     if row.get("custom_eligible") is not True:
         return False, "row-not-custom-eligible"
+    if not has_product_sku_evidence(row, row.get("custom_checks")):
+        return False, "b005-sku-evidence-invalid"
     evaluation = evaluate_custom_row(
         row,
         rule,

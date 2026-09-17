@@ -1,5 +1,6 @@
 import {Badge} from '@astryxdesign/core/Badge';
 import {Banner} from '@astryxdesign/core/Banner';
+import {Button} from '@astryxdesign/core/Button';
 import {CheckboxInput} from '@astryxdesign/core/CheckboxInput';
 import {Heading} from '@astryxdesign/core/Heading';
 import {Layout, LayoutContent, LayoutPanel} from '@astryxdesign/core/Layout';
@@ -141,6 +142,12 @@ export function ResultsPanel({
   );
 
   const stats = preview.stats;
+  const canSelectRows = !previewInvalidated && preview.integrity_complete
+    && preview.status === 'completed' && preview.is_fresh;
+  const isSelectable = (candidate: CandidateRow) =>
+    canSelectRows && candidate.custom_eligible && !candidate.blocked;
+  const selectablePageIds = numberedRows.filter(isSelectable).map((row) => row.apply_id);
+  const hasUnselectedPageRows = selectablePageIds.some((applyId) => !selection.includes(applyId));
 
   return (
     <Section>
@@ -200,6 +207,35 @@ export function ResultsPanel({
           />
         </Stack>
 
+        <Stack gap={2}>
+          <Stack direction="horizontal" gap={2} vAlign="center">
+            <Button
+              label="全选本页可批准项"
+              size="md"
+              variant="primary"
+              isDisabled={!hasUnselectedPageRows}
+              onClick={() => onSelectionChange([...new Set([...selection, ...selectablePageIds])])}
+            />
+            <Button
+              label="清空选择"
+              size="md"
+              variant={selection.length > 0 ? 'destructive' : 'secondary'}
+              // Astryx destructive uses a muted background; this action needs a solid fill.
+              style={selection.length > 0 ? {
+                backgroundColor: 'var(--color-error)',
+                color: 'var(--color-on-error)',
+              } : undefined}
+              isDisabled={selection.length === 0}
+              onClick={() => onSelectionChange([])}
+            />
+            <Text>已选 {selection.length} 条（含其他页）</Text>
+          </Stack>
+          <Text type="supporting">
+            全选仅作用于当前筛选后的本页，保留其他页已选项；不会自动批准或修改执行限额。
+            已选条数超过下方「本次限量」时不可执行。
+          </Text>
+        </Stack>
+
         <Layout
           content={
             <LayoutContent>
@@ -228,24 +264,17 @@ export function ResultsPanel({
                     width: pixel(44),
                     renderCell: (row) => {
                       const candidate = row as unknown as CandidateRow;
-                      const selectable =
-                        candidate.custom_eligible && !candidate.blocked && !previewInvalidated && preview.integrity_complete;
+                      const selectable = isSelectable(candidate);
                       return (
                         <CheckboxInput
                           size="sm"
                           label={`选择 ${candidate.creator_name}`}
                           isLabelHidden
-                          value={
-                            selection.includes(candidate.apply_id)
-                              ? true
-                              : selectable
-                                ? false
-                                : false
-                          }
+                          value={selection.includes(candidate.apply_id)}
                           isDisabled={!selectable && !selection.includes(candidate.apply_id)}
                           onChange={(checked) => {
                             const next = checked
-                              ? [...selection, candidate.apply_id]
+                              ? [...new Set([...selection, candidate.apply_id])]
                               : selection.filter((id) => id !== candidate.apply_id);
                             onSelectionChange(next);
                           }}
@@ -275,6 +304,22 @@ export function ResultsPanel({
                     key: 'product_id',
                     header: '商品',
                     width: proportional(2),
+                  },
+                  {
+                    key: 'sku_desc',
+                    header: 'SKU',
+                    width: proportional(3),
+                    renderCell: (row) => {
+                      const candidate = row as unknown as CandidateRow;
+                      const description = candidate.metrics.sku_desc;
+                      return (
+                        <Text maxLines={2}>
+                          {typeof description === 'string' && description.trim()
+                            ? description
+                            : '未取得'}
+                        </Text>
+                      );
+                    },
                   },
                   {
                     key: 'status',
@@ -374,6 +419,8 @@ export function ResultsPanel({
                   <Heading level={3}>{selectedRow.creator_name}</Heading>
                   <Text>申请 ID：{selectedRow.apply_id}</Text>
                   <Text>商品：{selectedRow.product_id}</Text>
+                  <Text>SKU：{typeof selectedRow.metrics.sku_desc === 'string' && selectedRow.metrics.sku_desc.trim()
+                    ? selectedRow.metrics.sku_desc : '未取得'}</Text>
                   <Heading level={4}>逐项检查</Heading>
                   {selectedRow.checks.map((check) => (
                     <Stack key={check.key} direction="horizontal" gap={2} vAlign="center">
@@ -387,6 +434,7 @@ export function ResultsPanel({
                           ? `（值 ${String(check.value)}）`
                           : ''}
                         {check.source !== '' ? ` · 来源 ${check.source}` : ''}
+                        {check.detail !== '' ? ` · ${check.detail}` : ''}
                       </Text>
                     </Stack>
                   ))}
