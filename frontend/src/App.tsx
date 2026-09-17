@@ -23,6 +23,7 @@ import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
 import {buildStandardRule, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
+import {loadBrowserRuleMemory, rememberBrowserRule} from './ruleMemory';
 import type {
   AutoApprovalBootstrap,
   ExecutionPayload,
@@ -55,10 +56,16 @@ function notifyJobMonitor(jobId: string | undefined) {
 }
 
 export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
+  const [rememberedForm] = useState(loadBrowserRuleMemory);
   const [options, setOptions] = useState<OptionsPayload | null>(null);
   const [optionsError, setOptionsError] = useState('');
-  const [rule, setRule] = useState<RuleDraft>(() => buildStandardRule(null));
-  const [displayMode, setDisplayMode] = useState<'standard' | 'custom'>('standard');
+  const [rule, setRule] = useState<RuleDraft>(() =>
+    rememberedForm ? normalizeRule(rememberedForm.rule) : buildStandardRule(null),
+  );
+  const [displayMode, setDisplayMode] = useState<'standard' | 'custom'>(
+    rememberedForm?.displayMode ?? 'standard',
+  );
+  const [ruleEdited, setRuleEdited] = useState(false);
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [previewEvents, setPreviewEvents] = useState<JobEvent[]>([]);
   const [previewCreating, setPreviewCreating] = useState(false);
@@ -76,7 +83,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
 
   const previewPollTimer = useRef<number | null>(null);
-  const restoredPreviewRef = useRef(false);
+  const formRestoredRef = useRef(rememberedForm !== null);
 
   const busy = storeSummary?.error === 'ziniao-busy';
 
@@ -122,14 +129,15 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   }, [execution]);
 
   useEffect(() => {
-    getOptions()
+    const optionsRequest = getOptions()
       .then((payload) => {
         setOptions(payload);
         if (!payload.hero.ok) {
           setOptionsError('主推款表不可用，请检查飞书配置。');
         }
-        // 有上次保存的自定义规则就静默回填（预览恢复优先，避免覆盖当前任务上下文）。
-        if (payload.saved_rule !== null && !restoredPreviewRef.current) {
+        // 当前浏览器记忆或用户刚做的修改优先，其次才是服务端草稿。
+        if (payload.saved_rule !== null && !formRestoredRef.current) {
+          formRestoredRef.current = true;
           setRule(normalizeRule(payload.saved_rule.rule, payload.categories));
           setDisplayMode('custom');
         }
@@ -142,11 +150,15 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
         const latestExecution = executions[0];
         if (latestPreview !== undefined) {
           getPreview(latestPreview.preview_id)
-            .then((payload) => {
-              restoredPreviewRef.current = true;
+            .then(async (payload) => {
               setPreview(payload);
-              setRule(normalizeRule(payload.rule));
-              setDisplayMode('custom');
+              // 旧结果只恢复结果区；没有记忆和草稿时才用其规则兜底。
+              await optionsRequest;
+              if (!formRestoredRef.current) {
+                formRestoredRef.current = true;
+                setRule(normalizeRule(payload.rule));
+                setDisplayMode('custom');
+              }
             })
             .catch(() => {});
         }
@@ -166,7 +178,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
 
   // 自定义规则改动后自动保存为草稿（仅保存校验通过的规则，供下次回填）。
   useEffect(() => {
-    if (displayMode !== 'custom' || options === null) {
+    if (!ruleEdited || displayMode !== 'custom' || options === null) {
       return undefined;
     }
     if (validateDraft(rule, options).length > 0) {
@@ -178,7 +190,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       });
     }, 800);
     return () => window.clearTimeout(saveTimer);
-  }, [rule, displayMode, options]);
+  }, [rule, displayMode, options, ruleEdited]);
 
   useEffect(() => {
     if (previewPollTimer.current !== null) {
@@ -220,11 +232,19 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
     }
   }, [execution]);
 
-  const onRuleChange = useCallback(
-    (next: RuleDraft) => {
+  const updateRememberedForm = useCallback(
+    (next: RuleDraft, mode: 'standard' | 'custom') => {
       // 修改规则使旧结果失效：由 previewInvalidated 统一判定。
       // 组逻辑固定 either、类目固定全选（UI 已移除选择框）。
-      setRule(normalizeRule(next, options?.categories));
+      const normalizedRule = normalizeRule(next, options?.categories);
+      formRestoredRef.current = true;
+      setRuleEdited(true);
+      setRule(normalizedRule);
+      setDisplayMode(mode);
+      // 同步写入，不等待 800ms 服务端保存；立即刷新也能保留未完成的编辑。
+      if (!rememberBrowserRule({rule: normalizedRule, displayMode: mode})) {
+        setOptionsError('浏览器无法保存条件记忆；合法规则仍会尝试保存到本机服务，请勿立即关闭页面。');
+      }
     },
     [options],
   );
@@ -329,7 +349,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
         {optionsError !== '' && (
           <ReadinessBanner message={optionsError} />
         )}
-        {previewError !== '' && <PreviewErrorBanner message={previewError} />}
         {previewEvents.length > 0 && preview !== null && isJobActive(preview.job?.status) && (
           <TaskProgress
             label={`筛查任务 ${preview.preview_id}`}
@@ -348,13 +367,13 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           options={options}
           rule={rule}
           displayMode={displayMode}
-          onDisplayModeChange={setDisplayMode}
+          onDisplayModeChange={(mode) => updateRememberedForm(rule, mode)}
           onCopyToCustom={() => {
-            setRule(buildStandardRule(options));
-            setDisplayMode('custom');
+            updateRememberedForm(buildStandardRule(options), 'custom');
           }}
-          onRuleChange={onRuleChange}
+          onRuleChange={(next) => updateRememberedForm(next, displayMode)}
           onStartPreview={() => void onStartPreview()}
+          previewError={previewError}
           previewRunning={
             previewCreating || (preview !== null && isJobActive(preview.job?.status))
           }
@@ -397,10 +416,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
 
 function ReadinessBanner({message}: {message: string}) {
   return <Banner status="warning" title="配置提示" description={message} />;
-}
-
-function PreviewErrorBanner({message}: {message: string}) {
-  return <Banner status="error" title="筛查创建失败" description={message} />;
 }
 
 function TaskProgress({label, events}: {label: string; events: JobEvent[]}) {

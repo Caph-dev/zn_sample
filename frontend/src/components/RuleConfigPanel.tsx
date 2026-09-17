@@ -30,6 +30,7 @@ interface RuleConfigPanelProps {
   onCopyToCustom: () => void;
   onRuleChange: (rule: RuleDraft) => void;
   onStartPreview: () => void;
+  previewError: string;
   previewRunning: boolean;
   busy: boolean;
   previewInvalidated: boolean;
@@ -55,6 +56,7 @@ export function RuleConfigPanel({
   onCopyToCustom,
   onRuleChange,
   onStartPreview,
+  previewError,
   previewRunning,
   busy,
   previewInvalidated,
@@ -430,6 +432,13 @@ export function RuleConfigPanel({
               isLoading={previewRunning}
               onClick={onStartPreview}
             />
+            {previewError !== '' && (
+              <Banner
+                status="error"
+                title="筛查创建失败"
+                description={previewError}
+              />
+            )}
             <Text type="supporting">
               只读筛查：扫描待审核列表并按本次规则评估，不点「同意」、不写飞书。
             </Text>

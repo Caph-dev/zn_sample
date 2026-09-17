@@ -48,10 +48,18 @@ class FollowupService:
         self.cancel_check = cancel_check or (lambda: None)
         self.store_id = store_id
 
-    def generate(self, now: datetime | None = None) -> dict:
+    def generate(
+        self,
+        now: datetime | None = None,
+        *,
+        enrich_missing_language: bool = True,
+    ) -> dict:
         self._hydrate_from_latest_export()
         self.cancel_check()
         effective_now = beijing_now(now)
+        languages = self._prepare_generation_languages(
+            enrich_missing_language=enrich_missing_language,
+        )
         created = 0
         refreshed = 0
         with self.session_factory() as session:
@@ -109,6 +117,7 @@ class FollowupService:
                             sample_case,
                             task_creation["stage"],
                             task_creation["scheduled_for"],
+                            language=languages[sample_case.id],
                         )
                     for suppression in mutation["suppress"]:
                         self._suppress_matching_task(
@@ -123,14 +132,56 @@ class FollowupService:
                             session,
                             sample_case,
                             confirmed_content,
+                            language=languages[sample_case.id],
                         )
                 refreshed += self._refresh_active_unpublished_tasks(
                     session,
                     sample_case,
                     skip_keys=created_keys,
+                    language=languages[sample_case.id],
                 )
             session.commit()
         return {"created": created, "refreshed": refreshed}
+
+    def _prepare_generation_languages(self, *, enrich_missing_language: bool) -> dict[int, dict]:
+        """Resolve remote language inputs before acquiring the task write lock."""
+        with self.session_factory() as session:
+            cases = session.scalars(
+                select(SampleCase).join(Shipment).where(
+                    Shipment.delivered_at.is_not(None),
+                    Shipment.needs_delivery_time_confirmation.is_(False),
+                )
+            ).all()
+            session.expunge_all()
+
+        languages = {}
+        profile_fields = ("bio", "feishu_lang", "is_video_creator", "is_live_creator")
+        for sample_case in cases:
+            self.cancel_check()
+            previous_values = {
+                field: getattr(sample_case, field) for field in profile_fields
+            }
+            if enrich_missing_language:
+                self._populate_language(sample_case)
+            languages[sample_case.id] = choose_followup_language(
+                bio=sample_case.bio or None,
+                feishu_lang=sample_case.feishu_lang or None,
+                manual_lang=sample_case.language or None,
+            )
+            changes = {
+                field: getattr(sample_case, field)
+                for field in profile_fields
+                if getattr(sample_case, field) != previous_values[field]
+            }
+            if changes:
+                with self.session_factory() as session:
+                    current_case = session.get(SampleCase, sample_case.id)
+                    if current_case is not None:
+                        for field, value in changes.items():
+                            if not getattr(current_case, field):
+                                setattr(current_case, field, value)
+                        session.commit()
+        return languages
 
     def _refresh_active_unpublished_tasks(
         self,
@@ -138,6 +189,7 @@ class FollowupService:
         sample_case: SampleCase,
         *,
         skip_keys: set[tuple],
+        language: dict,
     ) -> int:
         refreshed = 0
         active_tasks = session.scalars(
@@ -162,8 +214,7 @@ class FollowupService:
                 task.language,
                 task.action_kind,
             )
-            self._populate_language(sample_case)
-            self._fill_task_preview(task, sample_case)
+            self._fill_task_preview(task, sample_case, language=language)
             after = (
                 task.status,
                 task.review_reason,
@@ -559,7 +610,10 @@ class FollowupService:
             task.suppressed_reason = reason
             task.requires_manual_confirmation = False
 
-    def _upsert_stage(self, session, sample_case: SampleCase, stage: str, scheduled_for: date) -> int:
+    def _upsert_stage(
+        self, session, sample_case: SampleCase, stage: str, scheduled_for: date,
+        *, language: dict,
+    ) -> int:
         task = session.scalar(
             select(FollowupTask).where(
                 FollowupTask.sample_case_id == sample_case.id,
@@ -581,8 +635,7 @@ class FollowupService:
             return created
         if task.status not in ACTIVE_TASK_STATUSES and not created:
             return created
-        self._populate_language(sample_case)
-        self._fill_task_preview(task, sample_case)
+        self._fill_task_preview(task, sample_case, language=language)
         return created
 
     def _upsert_content_found(
@@ -590,6 +643,8 @@ class FollowupService:
         session,
         sample_case: SampleCase,
         evidence: ContentEvidence,
+        *,
+        language: dict | None = None,
     ) -> int:
         scheduled_for = beijing_now().date()
         existing = session.scalars(
@@ -608,7 +663,9 @@ class FollowupService:
             )
             session.add(task)
         sample_case.creator_type = evidence.content_type
-        self._fill_task_preview(task, sample_case, content_url=evidence.content_url)
+        self._fill_task_preview(
+            task, sample_case, content_url=evidence.content_url, language=language,
+        )
         return created
 
     def _fill_task_preview(
@@ -617,6 +674,7 @@ class FollowupService:
         sample_case: SampleCase,
         *,
         content_url: str = "",
+        language: dict | None = None,
     ) -> None:
         if task.status in {"skipped", "suppressed"}:
             return
@@ -624,11 +682,12 @@ class FollowupService:
             {"sent_at": task.sent_at, "send_result": task.send_result}
         ):
             return
-        language = choose_followup_language(
-            bio=sample_case.bio or None,
-            feishu_lang=sample_case.feishu_lang or None,
-            manual_lang=sample_case.language or None,
-        )
+        if language is None:
+            language = choose_followup_language(
+                bio=sample_case.bio or None,
+                feishu_lang=sample_case.feishu_lang or None,
+                manual_lang=sample_case.language or None,
+            )
         creator_type = choose_followup_creator_type(
             manual_type=sample_case.creator_type or None,
             is_video_creator=sample_case.is_video_creator,

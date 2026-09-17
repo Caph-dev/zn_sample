@@ -21,6 +21,10 @@ from sqlalchemy import select
 from assistant.database.models import SampleCase, Store
 from assistant.jobs.registry import JobCancelled
 from lib.operation_cancel import OperationCancelled, raise_if_cancelled
+from lib.sample_data_source import (
+    SYSTEMIC_DETAIL_FAILURE_LIMIT,
+    is_systemic_detail_error,
+)
 
 
 @dataclass(frozen=True)
@@ -431,6 +435,8 @@ class CreatorEnrichService:
                 session.commit()
 
                 page_ready = True
+                systemic_failure = False
+                consecutive_systemic_failures = 0
                 if self.store_id and need_type:
                     try:
                         from lib.sample_navigation import ensure_sample_request_context
@@ -471,6 +477,19 @@ class CreatorEnrichService:
                         stats["type_filled"] += int(outcome.type_filled)
                         stats["failed"] += int(not outcome.read_ok)
                         stats["type_failures"] += int(not outcome.read_ok)
+                        if not outcome.read_ok and is_systemic_detail_error(outcome.error_message):
+                            consecutive_systemic_failures += 1
+                        else:
+                            consecutive_systemic_failures = 0
+                        if consecutive_systemic_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT:
+                            systemic_failure = True
+                            stats["unprocessed"] += len(need_type) - index
+                            self.warning(
+                                f"达人详情服务连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 次系统级错误，"
+                                "已停止本批类型 API 和详情页读取；继续查询飞书语言，"
+                                "缺失类型保留人工确认。请检查插件/浏览器环境或等待平台恢复。"
+                            )
+                            break
 
                 # 阶段 1b：语言先查飞书。
                 for index, sample_case in enumerate(need_language, start=1):
@@ -493,7 +512,7 @@ class CreatorEnrichService:
                 still_missing_language = [
                     case for case in need_language if is_missing_language(case)
                 ]
-                if not page_ready:
+                if not page_ready or systemic_failure:
                     stats["unprocessed"] += len(still_missing_language)
                 else:
                     total = max(1, completed_units + len(still_missing_language))

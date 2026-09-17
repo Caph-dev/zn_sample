@@ -146,12 +146,11 @@ class CreatorEnrichTests(unittest.TestCase):
         self.assertEqual(result["type_filled"], 0)
         self.assertFalse(any("两侧都没有可用数据" in message for message in warnings))
 
-    def test_consecutive_profile_read_failures_do_not_stop_the_run(self) -> None:
+    def test_consecutive_systemic_profile_failures_stop_type_and_detail_reads(self) -> None:
         for index in range(5):
             self.add_case(
                 apply_id=f"profile-failure-{index}",
                 creator_id=f"creator-profile-failure-{index}",
-                language="en",
             )
         fetch_api = Mock(
             return_value={
@@ -162,6 +161,8 @@ class CreatorEnrichTests(unittest.TestCase):
         )
         with (
             patch("lib.creator_api.fetch_creator_detail_api", fetch_api),
+            patch("lib.app_config.load_bitable_settings", return_value={}) as feishu_settings,
+            patch("lib.sample_navigation.navigate_to_url") as navigate,
             patch(
                 "lib.sample_navigation.ensure_sample_request_context",
                 return_value={"ok": True, "already": True},
@@ -172,9 +173,32 @@ class CreatorEnrichTests(unittest.TestCase):
                 store_id="store-test",
             ).enrich()
 
+        self.assertEqual(fetch_api.call_count, 3)
+        self.assertEqual(feishu_settings.call_count, 5)
+        navigate.assert_not_called()
+        self.assertEqual(result["type_failures"], 3)
+        self.assertEqual(result["failed"], 3)
+        self.assertEqual(result["unprocessed"], 7)
+
+    def test_success_resets_consecutive_systemic_failure_count(self) -> None:
+        for index in range(5):
+            self.add_case(apply_id=f"reset-{index}", language="en")
+        failure = {"ok": False, "error": "Please remove the plugin and try again"}
+        success = {"ok": True, "detail": {"video_gpm_n": 15.0}}
+        with (
+            patch(
+                "lib.creator_api.fetch_creator_detail_api",
+                side_effect=[failure, failure, success, failure, failure],
+            ) as fetch_api,
+            patch("lib.sample_navigation.ensure_sample_request_context"),
+        ):
+            result = CreatorEnrichService(
+                self.session_factory, store_id="store-test",
+            ).enrich()
+
         self.assertEqual(fetch_api.call_count, 5)
-        self.assertEqual(result["type_failures"], 5)
-        self.assertEqual(result["failed"], 5)
+        self.assertEqual(result["type_filled"], 1)
+        self.assertEqual(result["type_failures"], 4)
         self.assertEqual(result["unprocessed"], 0)
 
     def test_mixed_profile_error_types_are_all_attempted(self) -> None:

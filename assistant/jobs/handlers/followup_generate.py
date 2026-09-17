@@ -71,6 +71,6 @@ def run_followup_generate(job_id: str, session_factory) -> str:
         warning=warning,
         cancel_check=cancel_check,
         store_id=store_id,
-    ).generate()
+    ).generate(enrich_missing_language=False)
     update_progress(session_factory, job_id, current=1, total=1, message="待办生成完成")
     return json.dumps(result, ensure_ascii=False, sort_keys=True)

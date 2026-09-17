@@ -11,6 +11,7 @@ ZINIAO_JOB_TYPES = frozenset(
         "environment_check",
         "shipment_sync",
         "daily_refresh",
+        "followup_generate",
         "content_thanks_preview",
         "creator_enrich",
         "operator_prepare",

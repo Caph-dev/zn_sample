@@ -34,11 +34,15 @@ export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T>
     let message = `请求失败（${response.status}）`;
     if (detail && typeof detail === 'object') {
       const objectDetail = detail as {code?: unknown; message?: unknown; detail?: unknown};
-      if (typeof objectDetail.code === 'string') {
-        code = objectDetail.code;
+      // FastAPI HTTPException 将业务错误放在 detail 对象中。
+      const errorDetail = objectDetail.detail && typeof objectDetail.detail === 'object'
+        ? objectDetail.detail as {code?: unknown; message?: unknown}
+        : objectDetail;
+      if (typeof errorDetail.code === 'string') {
+        code = errorDetail.code;
       }
-      if (typeof objectDetail.message === 'string') {
-        message = objectDetail.message;
+      if (typeof errorDetail.message === 'string') {
+        message = errorDetail.message;
       } else if (typeof objectDetail.detail === 'string') {
         message = objectDetail.detail;
       }
@@ -52,10 +56,25 @@ export function getOptions(): Promise<OptionsPayload> {
   return fetchJson<OptionsPayload>('/api/auto-approval/options');
 }
 
+function buildRulePayload(rule: RuleDraft): RuleDraft {
+  if (rule.video_live.enabled) {
+    return rule;
+  }
+  // 保留表单的子项选择供重新启用；提交时必须满足后端「关组也关子项」契约。
+  return {
+    ...rule,
+    video_live: {
+      ...rule.video_live,
+      video: {...rule.video_live.video, enabled: false},
+      live: {...rule.video_live.live, enabled: false},
+    },
+  };
+}
+
 export function saveRuleDraft(rule: RuleDraft): Promise<{rule: RuleDraft; saved_at: string}> {
   return fetchJson<{rule: RuleDraft; saved_at: string}>('/api/auto-approval/rule-draft', {
     method: 'PUT',
-    body: JSON.stringify({rule}),
+    body: JSON.stringify({rule: buildRulePayload(rule)}),
   });
 }
 
@@ -66,7 +85,7 @@ export function getStorePreparation(): Promise<StoreSummary> {
 export function createPreview(rule: RuleDraft, storeId: string | null): Promise<{preview_id: string; job_id: string}> {
   return fetchJson<{preview_id: string; job_id: string}>('/api/auto-approval/previews', {
     method: 'POST',
-    body: JSON.stringify({rule, store_id: storeId}),
+    body: JSON.stringify({rule: buildRulePayload(rule), store_id: storeId}),
   });
 }
 
