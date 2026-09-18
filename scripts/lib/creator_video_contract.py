@@ -44,14 +44,16 @@ def shopping_products(anchors: object) -> list[dict]:
 
     Live fixture schema (tests/fixtures/tiktok_shopping_anchors.json, captured
     from TikTok Shop T-3 anchors via TikHub):
-      * anchors: list; each element type 35 / component_key
+      * anchors: list; the shopping element carries component_key
         anchor_complex_shop with extra holding a JSON ARRAY of shop children.
       * child: type 33 / component_key anchor_shop with extra JSON object
         source == "TikTok Shop", product_id matching the child id, title, and
         categories with a level-1 root (level==1 or parent_id==0).
-    Empty/missing anchors mean non-shopping; hashtags never count.
-    Anything else (or a product without a resolvable root category) is unknown
-    and raises ReviewUnavailable so reviewers must look at the creator.
+    Elements without the shopping component_key are not shopping anchors
+    (filters, effects, hashtags) and are ignored; empty/missing anchors mean
+    non-shopping. A shopping element whose payload breaks the contract (or a
+    product without a resolvable root category) is unknown and raises
+    ReviewUnavailable so reviewers must look at the creator.
     """
     if anchors is None or anchors == []:
         return []
@@ -61,10 +63,9 @@ def shopping_products(anchors: object) -> list[dict]:
     for anchor in anchors:
         if (
             not isinstance(anchor, dict)
-            or anchor.get("type") != 35
             or anchor.get("component_key") != "anchor_complex_shop"
         ):
-            raise ReviewUnavailable("shopping_anchor_contract_unverified")
+            continue
         raw_extra = anchor.get("extra")
         if not isinstance(raw_extra, str) or len(raw_extra) > MAX_ANCHOR_JSON_CHARS:
             raise ReviewUnavailable("shopping_anchor_contract_unverified")

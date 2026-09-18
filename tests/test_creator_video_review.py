@@ -68,6 +68,11 @@ def shopping_anchor(product: dict, root="Womenswear Underwear") -> list[dict]:
     ]
 
 
+def unparsed_shopping_anchor() -> list[dict]:
+    """A shopping-marked anchor whose payload breaks the contract (unknown)."""
+    return [{"component_key": "anchor_complex_shop", "extra": "not-json"}]
+
+
 def detail(number=1, *, age=1, handle="alice", anchors=None):
     return {
         "aweme_id": str(7000000000000000000 + number),
@@ -183,8 +188,6 @@ def test_off_whitelist_root_is_known_but_not_related():
     "anchors",
     [
         {},
-        [{"type": 35, "keyword": "Bra", "id": "123"}],
-        [{"title": "#TikTokShop"}],
         [{"type": 35, "component_key": "anchor_complex_shop", "extra": "not-json"}],
         [
             {
@@ -200,6 +203,28 @@ def test_off_whitelist_root_is_known_but_not_related():
 def test_unknown_anchor_shapes_raise(anchors):
     with pytest.raises(review.ReviewUnavailable, match="contract_unverified"):
         contract.shopping_products(anchors)
+
+
+@pytest.mark.parametrize(
+    "anchors",
+    [
+        [{"type": 35, "keyword": "Bra", "id": "123"}],
+        [{"title": "#TikTokShop"}],
+        [{"type": 36, "component_key": "anchor_effect", "extra": "[]"}],
+        ["not-an-element"],
+    ],
+)
+def test_non_shopping_anchor_elements_are_ignored(anchors):
+    assert contract.shopping_products(anchors) == []
+
+
+def test_mixed_anchor_list_keeps_shopping_products():
+    anchors = [
+        {"type": 36, "component_key": "anchor_effect", "extra": "[]"},
+        *shopping_anchor(PRODUCT),
+        {"title": "#TikTokShop"},
+    ]
+    assert contract.shopping_products(anchors) == [PRODUCT]
 
 
 def test_empty_complex_shop_children_is_non_shopping():
@@ -389,7 +414,7 @@ def test_incomplete_collection_below_four_is_not_failed(settings, monkeypatch):
 
 
 def test_unknown_anchor_does_not_count_or_veto_a_proven_pass(settings, monkeypatch):
-    unknown = detail(99, age=3, anchors=[{"type": 35, "keyword": "unknown"}])
+    unknown = detail(99, age=3, anchors=unparsed_shopping_anchor())
     patch_provider(
         monkeypatch,
         count=3,
@@ -425,7 +450,7 @@ def test_unknown_anchor_does_not_count_or_veto_a_proven_pass(settings, monkeypat
 def test_unknown_anchor_does_not_veto_sparse_visual_when_related_enough(
     settings, monkeypatch
 ):
-    unknown = detail(99, age=3, anchors=[{"type": 35, "keyword": "unknown"}])
+    unknown = detail(99, age=3, anchors=unparsed_shopping_anchor())
     patch_provider(
         monkeypatch,
         count=4,
