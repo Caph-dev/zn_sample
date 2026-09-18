@@ -22,6 +22,7 @@ import {ReconciliationPanel} from './components/ReconciliationPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
+import {buildExecutionIdempotencyKey} from './executionIdempotency';
 import {isValidExecutionLimit, loadBrowserExecutionLimit, rememberBrowserExecutionLimit} from './executionLimitMemory';
 import {buildStandardRule, hasOutdatedSkuEvidence, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
 import {loadBrowserRuleMemory, rememberBrowserRule} from './ruleMemory';
@@ -283,8 +284,13 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
     }
     setExecuting(true);
     setExecutionError('');
-    const idempotencyKey = `${preview.preview_id}:${selection.join(',')}:${limit}:${writeFeishu ? '1' : '0'}`;
     try {
+      const idempotencyKey = buildExecutionIdempotencyKey({
+        previewId: preview.preview_id,
+        applyIds: selection,
+        limit,
+        writeFeishu,
+      });
       const created = await createExecution({
         preview_id: preview.preview_id,
         apply_ids: selection,
