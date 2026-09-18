@@ -854,6 +854,7 @@ def verify_preview_envelope(
     *,
     expected_store_id: str,
     expected_rule_hash: str,
+    require_fresh: bool = True,
 ) -> CustomRule:
     """执行/核对时验证预览信封：schema、店铺、规则 hash 与新鲜度。"""
     if not isinstance(preview, dict):
@@ -872,7 +873,7 @@ def verify_preview_envelope(
     if finished_at is None:
         _reject("preview-stale", "预览缺少完成时间，禁止执行；请重新筛查")
     elapsed = (datetime.now(timezone.utc) - finished_at).total_seconds()
-    if elapsed > PREVIEW_FRESHNESS_SECONDS:
+    if require_fresh and elapsed > PREVIEW_FRESHNESS_SECONDS:
         _reject(
             "preview-stale",
             f"预览已超过 {PREVIEW_FRESHNESS_SECONDS // 3600} 小时，禁止执行；请重新筛查",

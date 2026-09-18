@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from assistant.database.models import Job
@@ -147,6 +147,33 @@ async def create_execution(request: Request) -> dict:
         )
     except AutoApprovalServiceError as error:
         raise _service_error_to_http(error) from error
+
+
+@router.get("/api/auto-approval/executions")
+def list_executions(
+    request: Request, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100),
+) -> dict:
+    from assistant.database.models import AutoApprovalExecution
+
+    with _session_factory(request)() as session:
+        executions = session.scalars(
+            select(AutoApprovalExecution)
+            .order_by(AutoApprovalExecution.created_at.desc(), AutoApprovalExecution.id.desc())
+            .offset(offset).limit(limit + 1)
+        ).all()
+        return {
+            "has_more": len(executions) > limit,
+            "executions": [
+                {
+                    "execution_id": execution.id, "preview_id": execution.preview_id,
+                    "store_id": execution.store_id, "status": execution.status,
+                    "write_feishu": execution.write_feishu,
+                    "created_at": execution.created_at.isoformat(),
+                    "finished_at": execution.finished_at.isoformat() if execution.finished_at else None,
+                }
+                for execution in executions[:limit]
+            ],
+        }
 
 
 @router.get("/api/auto-approval/executions/{execution_id}")

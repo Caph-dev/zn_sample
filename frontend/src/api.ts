@@ -1,6 +1,7 @@
 /** 本页 API 客户端；所有写操作都经服务端严格校验。 */
 
 import type {
+  ExecutionHistoryPayload,
   ExecutionPayload,
   OptionsPayload,
   PreviewPayload,
@@ -108,7 +109,14 @@ export function createExecution(payload: {
 }
 
 export function getExecution(executionId: string): Promise<ExecutionPayload> {
-  return fetchJson<ExecutionPayload>(`/api/auto-approval/executions/${executionId}`);
+  return fetchJson<ExecutionPayload>(`/api/auto-approval/executions/${executionId}`, {cache: 'no-store'});
+}
+
+export function getExecutions(offset = 0, limit = 20): Promise<ExecutionHistoryPayload> {
+  return fetchJson<ExecutionHistoryPayload>(
+    `/api/auto-approval/executions?offset=${offset}&limit=${limit}`,
+    {cache: 'no-store'},
+  );
 }
 
 export function reconcileExecution(

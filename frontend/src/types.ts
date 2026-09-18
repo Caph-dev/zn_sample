@@ -177,6 +177,55 @@ export interface ExecutionPayload {
   finished_at: string | null;
   items: ExecutionItem[];
   job?: JobPayload;
+  reconciliation?: ExecutionReconciliation;
+}
+
+export interface ExecutionSummary {
+  execution_id: string;
+  preview_id: string;
+  store_id: string;
+  status: string;
+  write_feishu: boolean;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface ExecutionHistoryPayload {
+  executions: ExecutionSummary[];
+  has_more: boolean;
+}
+
+export interface ReconciliationItem extends Record<string, unknown> {
+  apply_id: string;
+  creator_name: string;
+  product_id: string;
+  platform_status: string;
+  relation_status: string;
+  order_status: string;
+  status: string;
+  detail: string;
+  record_id: string;
+  order_no: string;
+  can_repair: boolean;
+}
+
+export interface ReconciliationReport {
+  execution_id: string;
+  store_id: string;
+  checked_at: string;
+  write_feishu: boolean;
+  items: ReconciliationItem[];
+}
+
+export interface ExecutionReconciliation {
+  approval_active?: boolean;
+  state_error?: string;
+  available: boolean;
+  blocked_reason: string;
+  can_repair: boolean;
+  repair_blocked_reason: string;
+  latest_job: JobPayload | null;
+  report: ReconciliationReport | null;
 }
 
 export interface StoreSummary {

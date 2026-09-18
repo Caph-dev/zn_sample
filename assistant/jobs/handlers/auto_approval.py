@@ -133,10 +133,13 @@ def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
             str(request_payload["backup_path"]),
             "--execution-id",
             str(request_payload["execution_id"]),
+            "--limit",
+            str(int(request_payload.get("limit") or 1)),
             "--write-feishu",
             "1" if bool(request_payload.get("write_feishu")) else "0",
-            "--yes",
         ]
+        if request_payload.get("write_feishu"):
+            argv.append("--yes")
     else:
         raise HandlerFailure(
             "auto-approval-mode-not-allowed",
@@ -318,13 +321,8 @@ def run_auto_approval_job(job_id: str, session_factory) -> str:
             execution_id,
             status="completed",
         )
-    elif mode == "reconcile" and execution_id:
-        auto_approval_service.sync_reconcile_result(
-            session_factory,
-            execution_id,
-            reconcile_result_path=str(request_payload.get("result_path") or ""),
-            status="completed",
-        )
+    # Reconciliation reports are independent read-back evidence. They must not
+    # replace the original approval outcome or change its terminal status.
 
     update_progress(
         session_factory,
@@ -338,6 +336,8 @@ def run_auto_approval_job(job_id: str, session_factory) -> str:
             "mode": mode,
             "preview_id": preview_id,
             "execution_id": execution_id,
+            "result_path": str(request_payload.get("result_path") or ""),
+            "write_feishu": bool(request_payload.get("write_feishu")),
         },
         ensure_ascii=False,
         sort_keys=True,

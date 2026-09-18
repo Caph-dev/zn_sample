@@ -111,7 +111,10 @@ def _finish_job(
         job.status = status
         job.finished_at = utc_now()
         job.heartbeat_at = utc_now()
-        job.result_summary = result_summary
+        # Reconciliation failures must retain batch/report pointers so the UI
+        # can recover uncertain writes rather than reverting to old evidence.
+        if result_summary or job.job_type != "auto_approval_reconcile":
+            job.result_summary = result_summary
         job.error_code = error_code
         job.error_summary = error_summary
         session.commit()

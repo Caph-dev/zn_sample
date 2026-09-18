@@ -97,6 +97,7 @@
 - **按需采集**：仅 video/live 组启用才拉详情；详情字段优先（履约 `est_post_rate`、官方 GPM、客单价 `aov_detail`），缺失回退列表口径（GPM 近似标记 source=list-proxy）。内容审核只跑自定义已通过行，与正式链路同一 `review_creator_rows`/`validate_content_review` 证据。
 - **执行边界**：服务端校验 preview 完成/完整/新鲜 + 候选 ⊆ eligible + 限量 + 键入 `y` + 幂等键（重复点击/重试去重）；脚本内再验信封/店铺/hash、逐行复算结论、hero 重查、产品解析、查重、`check_pending_application_api` 预检后批准（`--write-source api` 固定）；批准未知 → 不写飞书、不自动重试。写飞书默认关，目标仍「达人关系管理(新)」。reconcile 复用正式 confirm 管线（不重批）。
 - **任务与页面**：写任务运行中不提供取消；启动器 `PROTECTED_JOB_TYPES` 含 auto_approval_execute/reconcile。页面网络异常先查任务状态，不重复创建批准任务。改规则立即令旧预览失效。
+- **常驻核对与补写**：历史批次独立于当前预览。`auto_approval_reconcile` 在 `write_feishu=false` 时只回读平台/飞书，无需 `y`；补写须 `y` + 15 分钟内成功核对的缺失证据 + 原批次限量，执行前重查、执行后回读。核对不改原批准批次 `status/job_id`；每次任务独立报告，失败仍保留批次/报告指针及不确定写入检查点。只接受绑定 execution/store/hash 的服务器快照；历史核对可跳过预览新鲜度，但新批准始终校验 24 小时。查询失败不是缺失；重复记录、不同订单号、未知写入未找到记录禁止补写。平台确认仍只认待发货；后续阶段交物流/人工，不重批。
 
 ---
 

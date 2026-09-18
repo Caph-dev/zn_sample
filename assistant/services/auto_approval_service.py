@@ -608,6 +608,8 @@ def create_execution(
 
 
 def execution_payload(session_factory, execution_id: str) -> dict[str, Any]:
+    from assistant.services.auto_approval_reconciliation import reconciliation_payload
+
     with session_factory() as session:
         execution = session.get(AutoApprovalExecution, execution_id)
         if execution is None:
@@ -621,6 +623,7 @@ def execution_payload(session_factory, execution_id: str) -> dict[str, Any]:
         ).all()
         return {
             "execution_id": execution.id,
+            "reconciliation": reconciliation_payload(session, execution),
             "preview_id": execution.preview_id,
             "job_id": execution.job_id,
             "status": execution.status,
@@ -660,63 +663,13 @@ def create_reconcile(
     write_feishu: bool,
     confirmation: str,
 ) -> dict[str, str]:
-    """对已完成执行批次创建核对补写任务（不重新批准）。"""
-    normalized_confirmation = str(confirmation or "").strip().lower()
-    if normalized_confirmation not in CONFIRMATION_ANSWERS:
-        raise AutoApprovalServiceError(
-            "confirmation-required",
-            "核对补写会写飞书（补记录/回填订单号），需要输入 y 明确确认。",
-            status_code=400,
-        )
-    with session_factory() as session:
-        execution = session.get(AutoApprovalExecution, execution_id)
-        if execution is None:
-            raise AutoApprovalServiceError(
-                "execution-not-found", "执行批次不存在", status_code=404
-            )
-        if execution.status not in {"completed", "needs_reconcile"}:
-            raise AutoApprovalServiceError(
-                "execution-not-ready",
-                f"执行批次状态为 {execution.status}，不可核对；请等待执行完成。",
-                status_code=409,
-            )
-        preview = session.get(AutoApprovalPreview, execution.preview_id)
-        if preview is None:
-            raise AutoApprovalServiceError(
-                "preview-not-found", "预览不存在", status_code=404
-            )
-        backup_rows_path = Path(execution.backup_path).with_name(
-            Path(execution.backup_path).name + "_pre_execute.json"
-        )
-        if not backup_rows_path.is_file():
-            raise AutoApprovalServiceError(
-                "backup-missing",
-                "执行备份缺失，无法核对；请人工核对平台与飞书状态。",
-                status_code=409,
-            )
-        reconcile_out = auto_approval_directory() / f"reconcile_{execution_id}.json"
-        job_id, _deduplicated = _create_job(
-            session_factory,
-            job_type="auto_approval_reconcile",
-            store_id=execution.store_id,
-            result_summary=json.dumps(
-                {
-                    "execution_id": execution_id,
-                    "preview_id": execution.preview_id,
-                    "rules_path": preview.rules_path,
-                    "preview_path": preview.result_path,
-                    "backup_path": str(backup_rows_path),
-                    "result_path": str(reconcile_out),
-                    "write_feishu": bool(write_feishu),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-        )
-        execution.status = "queued"
-        execution.job_id = job_id
-        session.commit()
-    return {"execution_id": execution_id, "job_id": job_id}
+    """只读回读无需确认；补写必须先有缺失证据并明确确认。"""
+    from assistant.services.auto_approval_reconciliation import create_reconciliation
+
+    return create_reconciliation(
+        session_factory, execution_id=execution_id,
+        write_feishu=write_feishu, confirmation=confirmation,
+    )
 
 
 def mark_job_cancelled(session_factory, job_id: str) -> None:

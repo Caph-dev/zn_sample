@@ -6,7 +6,7 @@
   --mode reconcile --yes [--write-feishu 1]
 
 硬性纪律：
-  - 默认只读（preview）；execute/reconcile 缺 --yes 直接退出
+  - 默认只读（preview）；execute 或 reconcile 写飞书时缺 --yes 直接退出
   - 只接受服务器生成的自定义规则快照与预览信封；不接收 shell 字符串
   - 批准走既有窄 API（--write-source api 固定）；批准成功再写飞书
   - 内容审查关闭时证据标记为 not_checked；执行边界要求规则快照与信封一致
@@ -50,11 +50,6 @@ from screen_sample_requests import (  # noqa: E402
     PLATFORM_CONFIRMATION_FIELD,
     _reject_if_not_exact_hero,
     _run_confirm_pipeline,
-    _select_confirm_candidates_from_export,
-    _select_feishu_reconcile_rows_from_export,
-    _select_order_backfill_rows_from_export,
-    _set_feishu_relation_status,
-    _set_platform_confirmation_status,
     _write_backup,
     decide_api_approval_outcome,
 )
@@ -865,7 +860,11 @@ def _run_execute(args: argparse.Namespace) -> int:
 
 
 def _run_reconcile(args: argparse.Namespace) -> int:
-    if not args.yes:
+    from lib.auto_approval_reconciliation import (
+        build_reconciliation_report, inspect_reconciliation_rows,
+    )
+
+    if args.write_feishu and not args.yes:
         logger.error("核对补写会写飞书（补记录/回填订单号）。确认请加 --yes。")
         return 2
     store_id = args.store_id
@@ -880,52 +879,111 @@ def _run_reconcile(args: argparse.Namespace) -> int:
             preview,
             expected_store_id=store_id,
             expected_rule_hash=rule_hash(rule),
+            require_fresh=False,  # 历史核对不授权新批准，仍校验店铺、规则与完整性。
         )
     except AutoApprovalRuleError as error:
         logger.error(f"预览信封校验失败: {error.code} {error}")
         return 2
 
+    snapshot = _load_json(args.backup)
+    if (
+        snapshot.get("envelope_type") != "auto_approval_reconcile_input"
+        or snapshot.get("execution_id") != args.execution_id
+        or snapshot.get("store_id") != store_id
+        or snapshot.get("rule_hash") != rule_hash(rule)
+        or not isinstance(snapshot.get("rows"), list)
+        or not snapshot["rows"]
+    ):
+        logger.error("核对输入不是本批次的服务器快照")
+        return 2
+    rows = snapshot["rows"]
+    if any(not isinstance(row, dict) or not row.get("apply_id") for row in rows):
+        logger.error("核对快照包含无效行")
+        return 2
+    row_ids = [str(row["apply_id"]) for row in rows]
+    preview_rows = {str(row.get("apply_id") or ""): row for row in preview.get("rows") or []}
+    if len(set(row_ids)) != len(row_ids) or any(
+        row["apply_id"] not in preview_rows or any(
+            row.get(key) != preview_rows[row["apply_id"]].get(key)
+            for key in ("creator_id", "creator_name", "product_id")
+        ) for row in rows
+    ):
+        logger.error("核对快照与原预览申请身份不一致或包含重复申请")
+        return 2
+    if args.limit <= 0 or snapshot.get("limit") != args.limit:
+        logger.error("核对限量与服务器执行快照不一致")
+        return 2
+    repair_ids = snapshot.get("repair_apply_ids")
+    if not isinstance(repair_ids, list) or any(
+        not isinstance(apply_id, str) or apply_id not in row_ids for apply_id in repair_ids
+    ):
+        logger.error("补写目标不属于本批次")
+        return 2
+    if args.write_feishu and not repair_ids:
+        logger.error("没有经服务器核对授权的缺失项")
+        return 2
+    if args.from_seller_home:
+        navigate_from_seller_home_to_pending(store_id, navigation_timeout=90.0)
     hero_data = _load_hero(store_id, args.config)
-    rows = _load_export_rows(args.backup)
-    if not rows:
-        logger.error("备份没有可用行")
-        return 1
     limit = args.limit if args.limit > 0 else DEFAULT_EXECUTE_LIMIT
-    candidates = _select_confirm_candidates_from_export(rows, force=False)
-    feishu_reconcile_rows = _select_feishu_reconcile_rows_from_export(rows)
-    order_backfill_rows = _select_order_backfill_rows_from_export(rows, force=False)
-    logger.info(f"--- RECONCILE 平台确认目标 {len(candidates)}（limit={limit}）---")
-    logger.info(f"--- 订单号回填 {len(order_backfill_rows)}（共享同一 limit）---")
-    logger.info(f"--- 飞书恢复补写 {len(feishu_reconcile_rows)}（共享同一 limit）---")
-    _run_confirm_pipeline(
-        store_id=store_id,
-        candidates=candidates,
-        hero_data=hero_data,
-        write_feishu=bool(args.write_feishu),
-        execute_limit=limit,
-        config_path=args.config,
-        order_backfill_rows=order_backfill_rows,
-        reconciliation_rows=rows,
-        allowed_product_ids=set(rule.product_ids),
+    inspections = inspect_reconciliation_rows(
+        rows, store_id=store_id, hero_data=hero_data, config_path=args.config,
     )
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(
-            {
-                "envelope_type": "auto_approval_reconcile",
-                "schema_version": SCHEMA_VERSION,
-                "execution_id": args.execution_id,
-                "preview_id": args.preview_id,
-                "store_id": store_id,
-                "finished_at": datetime.now().isoformat(timespec="seconds"),
-                "items": rows,
-            },
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        ),
-        encoding="utf-8",
-    )
+
+    def save_report(report_rows, report_items) -> None:
+        report = build_reconciliation_report(
+            execution_id=args.execution_id, store_id=store_id,
+            write_feishu=bool(args.write_feishu), rows=report_rows, items=report_items,
+        )
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = args.out.with_suffix(".tmp")
+        temporary_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_path.replace(args.out)
+
+    if args.write_feishu:
+        authorized_ids = set(snapshot.get("repair_apply_ids") or [])
+        repair_rows = []
+        rows_by_apply = {str(row["apply_id"]): row for row in rows}
+        for inspection in inspections:
+            if not inspection["can_repair"] or inspection["apply_id"] not in authorized_ids:
+                continue
+            if len(repair_rows) >= limit:
+                break
+            row = rows_by_apply[inspection["apply_id"]]
+            row.update(
+                platform_confirmation_status="confirmed", approve_confirmation="confirmed",
+                feishu_record_id=inspection["record_id"],
+                feishu_relation_status="linked-existing" if inspection["record_id"] else "not-requested",
+                sample_product_option=inspection["sample_product_option"],
+                resolved_sku=inspection["resolved_sku"],
+                order_backfill_status="", feishu_order_status="",
+            )
+            repair_rows.append(row)
+        # Persist uncertain intents before any write. A crash must never expose
+        # the previous missing report as authorization for an automatic retry.
+        checkpoint_rows = [dict(row) for row in rows]
+        repairing_ids = {row["apply_id"] for row in repair_rows}
+        for row in checkpoint_rows:
+            if row["apply_id"] in repairing_ids:
+                if not row.get("feishu_record_id"):
+                    row["feishu_relation_status"] = "write-uncertain"
+                row["order_backfill_status"] = "write-uncertain"
+        checkpoint_items = [dict(item, can_repair=False, status="needs_review", detail="补写任务尚未完成回读，不可重试写入。") for item in inspections]
+        save_report(checkpoint_rows, checkpoint_items)
+        if repair_rows:
+            _run_confirm_pipeline(
+                store_id=store_id, candidates=repair_rows, hero_data=hero_data,
+                write_feishu=True, execute_limit=limit, config_path=args.config,
+                reconciliation_rows=repair_rows, allowed_product_ids=set(rule.product_ids),
+            )
+        # Save remote outcomes before read-back as well, including uncertain writes.
+        save_report(rows, checkpoint_items)
+        inspections = inspect_reconciliation_rows(
+            rows, store_id=store_id, hero_data=hero_data, config_path=args.config,
+        )
+    save_report(rows, inspections)
+    verified_count = sum(item["status"] == "verified" for item in inspections)
+    logger.info(f"核对完成：回读一致 {verified_count}/{len(inspections)}；其它行请查看逐项核对结果。")
     logger.info(f"核对结果已写入: {args.out}")
     return 0
 

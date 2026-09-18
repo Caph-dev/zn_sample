@@ -12,13 +12,13 @@ import {
   getPreview,
   getRecent,
   getStorePreparation,
-  reconcileExecution,
   saveRuleDraft,
   JobEvent,
 } from './api';
 import {ExecutionPanel} from './components/ExecutionPanel';
 import {AppNavigation} from './components/AppNavigation';
 import {ReadinessPanel} from './components/ReadinessPanel';
+import {ReconciliationPanel} from './components/ReconciliationPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
@@ -75,12 +75,10 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [execution, setExecution] = useState<ExecutionPayload | null>(null);
   const [executing, setExecuting] = useState(false);
   const [executionError, setExecutionError] = useState('');
-  const [reconciling, setReconciling] = useState(false);
-  const [reconcileError, setReconcileError] = useState('');
   const [limit, setLimit] = useState(loadBrowserExecutionLimit);
   const [writeFeishu, setWriteFeishu] = useState(true);
   const [confirmText, setConfirmText] = useState('');
-  const [reconcileConfirmText, setReconcileConfirmText] = useState('');
+  const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
 
   const updateExecutionLimit = useCallback((nextLimit: number) => {
@@ -296,6 +294,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
         idempotency_key: idempotencyKey,
       });
       notifyJobMonitor(created.job_id);
+      setCurrentExecutionId(created.execution_id);
       setExecution(await getExecution(created.execution_id));
       setConfirmText('');
     } catch (error) {
@@ -315,6 +314,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           .then((payload) => {
             if (payload !== null) {
               setExecution(payload);
+              setCurrentExecutionId(payload.execution_id);
             }
           })
           .catch(() => {});
@@ -323,27 +323,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       setExecuting(false);
     }
   }, [preview, executing, selection, limit, writeFeishu, confirmText]);
-
-  const onReconcile = useCallback(async () => {
-    if (execution === null || reconciling) {
-      return;
-    }
-    setReconciling(true);
-    setReconcileError('');
-    try {
-      const result = await reconcileExecution(execution.execution_id, {
-        write_feishu: execution.write_feishu,
-        confirmation: reconcileConfirmText,
-      });
-      void result;
-      setExecution(await getExecution(execution.execution_id));
-      setReconcileConfirmText('');
-    } catch (error) {
-      setReconcileError(errorMessage(error));
-    } finally {
-      setReconciling(false);
-    }
-  }, [execution, reconciling, reconcileConfirmText]);
 
   return (
     <AppShell
@@ -414,12 +393,8 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           executing={executing}
           executionError={executionError}
           execution={execution}
-          reconcileConfirmText={reconcileConfirmText}
-          onReconcileConfirmTextChange={setReconcileConfirmText}
-          onReconcile={() => void onReconcile()}
-          reconciling={reconciling}
-          reconcileError={reconcileError}
         />
+        <ReconciliationPanel currentExecutionId={currentExecutionId} />
       </Stack>
     </AppShell>
   );

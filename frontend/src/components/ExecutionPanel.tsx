@@ -31,11 +31,6 @@ interface ExecutionPanelProps {
   executing: boolean;
   executionError: string;
   execution: ExecutionPayload | null;
-  reconcileConfirmText: string;
-  onReconcileConfirmTextChange: (value: string) => void;
-  onReconcile: () => void;
-  reconciling: boolean;
-  reconcileError: string;
 }
 
 const APPROVE_STATUS_LABELS: Record<string, string> = {
@@ -48,7 +43,7 @@ const APPROVE_STATUS_LABELS: Record<string, string> = {
 };
 
 const FEISHU_STATUS_LABELS: Record<string, string> = {
-  created: '已新建',
+  created: '接口返回成功，待回读确认',
   'not-requested': '未请求',
   'write-uncertain': '写后待核对',
   error: '写失败',
@@ -59,13 +54,13 @@ const FEISHU_STATUS_LABELS: Record<string, string> = {
 };
 
 function statusVariant(status: string): 'success' | 'error' | 'warning' | 'neutral' {
-  if (status === 'approved' || status === 'created') {
+  if (status === 'approved') {
     return 'success';
   }
   if (status === 'failed' || status === 'error') {
     return 'error';
   }
-  if (status === 'unknown' || status === 'write-uncertain' || status === 'ambiguous-match') {
+  if (status === 'created' || status === 'unknown' || status === 'write-uncertain' || status === 'ambiguous-match') {
     return 'warning';
   }
   return 'neutral';
@@ -96,11 +91,6 @@ export function ExecutionPanel({
   executing,
   executionError,
   execution,
-  reconcileConfirmText,
-  onReconcileConfirmTextChange,
-  onReconcile,
-  reconciling,
-  reconcileError,
 }: ExecutionPanelProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const canExecute = useMemo(() => {
@@ -310,29 +300,9 @@ export function ExecutionPanel({
               <Banner
                 status="info"
                 title="执行完成"
-                description="平台列表约 10 分钟后刷新；可用「核对补写」延后确认待发货、补飞书并回填订单号（不重新批准）。"
+                description="平台列表约 10 分钟后刷新；请在下方独立的「核对与补写」区回读核对。任务完成不代表飞书已写入，不会重新批准。"
               />
             )}
-            {reconcileError !== '' && (
-              <Banner status="error" title="核对创建失败" description={reconcileError} />
-            )}
-            {execution.status === 'completed' || execution.status === 'needs_reconcile' ? (
-              <Stack direction="horizontal" gap={2} vAlign="end">
-                <TextInput
-                  label="输入 y 确认核对补写（写飞书）"
-                  value={reconcileConfirmText}
-                  onChange={onReconcileConfirmTextChange}
-                  placeholder="y"
-                />
-                <Button
-                  label="核对补写"
-                  variant="secondary"
-                  isLoading={reconciling}
-                  isDisabled={reconcileConfirmText.trim().toLowerCase() !== 'y'}
-                  onClick={onReconcile}
-                />
-              </Stack>
-            ) : null}
           </Stack>
         )}
       </Stack>
