@@ -12,7 +12,6 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .debug_log import debug_log
 from .sample_dom import click_next
 from .sample_navigation import ensure_sample_request_context
 from .zclaw import zclaw_exec
@@ -184,19 +183,6 @@ def ensure_on_sample_page(
     tab: dict | Any = {}
     for attempt in range(attempts):
         tab = zclaw_exec(store_id, ENSURE_SHIPPED_TAB_JS)
-        # region agent log
-        debug_log(
-            "ensure-shipped-tab",
-            location="scripts/lib/shipped_dom.py:ensure_on_sample_page",
-            hypothesisId="H1",
-            attempt=attempt + 1,
-            attempts=attempts,
-            ok=bool(isinstance(tab, dict) and tab.get("ok")),
-            reason=str((tab or {}).get("reason") or "") if isinstance(tab, dict) else type(tab).__name__,
-            titles=(tab or {}).get("titles") if isinstance(tab, dict) else None,
-            href=str((tab or {}).get("href") or "")[:180] if isinstance(tab, dict) else "",
-        )
-        # endregion
         if isinstance(tab, dict) and tab.get("ok"):
             if tab.get("clicked"):
                 time.sleep(page_wait)

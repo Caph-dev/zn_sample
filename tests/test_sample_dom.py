@@ -66,7 +66,6 @@ class PendingTabReadinessTests(unittest.TestCase):
 
 
 class ShippedTabReadinessTests(unittest.TestCase):
-    @patch("lib.shipped_dom.debug_log")
     @patch("lib.shipped_dom.time.sleep")
     @patch("lib.shipped_dom.ensure_sample_request_context")
     @patch("lib.shipped_dom.zclaw_exec")
@@ -75,7 +74,6 @@ class ShippedTabReadinessTests(unittest.TestCase):
         execute_script,
         ensure_context,
         sleep,
-        _debug_log,
     ) -> None:
         from lib.shipped_dom import ensure_on_sample_page
 
@@ -106,14 +104,12 @@ class ShippedTabReadinessTests(unittest.TestCase):
         ensure_context.assert_called_once()
         sleep.assert_any_call(1.5)
 
-    @patch("lib.shipped_dom.debug_log")
     @patch("lib.shipped_dom.ensure_sample_request_context")
     @patch("lib.shipped_dom.zclaw_exec")
     def test_does_not_retry_when_not_on_sample_page(
         self,
         execute_script,
         ensure_context,
-        _debug_log,
     ) -> None:
         from lib.shipped_dom import ensure_on_sample_page
 

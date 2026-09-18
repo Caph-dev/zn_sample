@@ -13,7 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from assistant.app import create_app
 from assistant.database.engine import create_database_engine
@@ -78,6 +78,30 @@ class ApplicationSkeletonTests(unittest.TestCase):
         queue_hrefs = [item["href"] for item in data["queue_items"]]
         self.assertIn("/followups?stage=day_3", queue_hrefs)
         self.assertIn("/jobs", queue_hrefs)
+
+    def test_overview_with_database_does_not_require_writable_log_files(self) -> None:
+        engine = create_database_engine(self.root / "overview.sqlite3")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        self.app.state.session_factory = sessionmaker(bind=engine)
+        original_open = Path.open
+        attempted_writes = []
+
+        def open_read_only(path, mode="r", *arguments, **options):
+            if any(flag in mode for flag in "wax+"):
+                attempted_writes.append(path)
+                raise PermissionError("Filesystem writes are disabled for this request")
+            return original_open(path, mode, *arguments, **options)
+
+        with (
+            patch("assistant.web.routes.request_safe_store_summary", return_value={}),
+            patch.object(Path, "open", open_read_only),
+        ):
+            response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._console_bootstrap(response)["page"], "overview")
+        self.assertEqual(attempted_writes, [])
 
     def test_prepare_page_exposes_store_entry(self) -> None:
         with patch("lib.zclaw.list_running_stores", return_value=[]):

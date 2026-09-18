@@ -9,7 +9,6 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-from .debug_log import debug_log
 from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .sample_dom import assert_on_pending_list
 from .sync_errors import SellerNavigationTimeout, SellerPageReadinessTimeout
@@ -375,15 +374,6 @@ def navigate_to_url(
         current_href = ""
     raise_if_cancelled(cancel_check)
     if href_matches(current_href):
-        # region agent log
-        debug_log(
-            "navigate-already",
-            location="scripts/lib/sample_navigation.py:navigate_to_url",
-            hypothesisId="H-nav",
-            from_href=current_href[:180],
-            target_url=url[:180],
-        )
-        # endregion
         return {"ok": True, "href": current_href, "already": True, "target_url": url}
 
     navigator = navigate_page_fn or schedule_page_navigation
@@ -404,16 +394,6 @@ def navigate_to_url(
         )
 
     raise_if_cancelled(cancel_check)
-    # region agent log
-    debug_log(
-        "navigate-start",
-        location="scripts/lib/sample_navigation.py:navigate_to_url",
-        hypothesisId="H-nav",
-        from_href=current_href[:180],
-        target_url=url[:180],
-        timeout=timeout,
-    )
-    # endregion
     try:
         invoke_navigation()
         raise_if_cancelled(cancel_check)
@@ -442,15 +422,6 @@ def navigate_to_url(
         except Exception:
             probed_href = ""
         if href_matches(probed_href):
-            # region agent log
-            debug_log(
-                "navigate-schedule-timeout-but-arrived",
-                location="scripts/lib/sample_navigation.py:navigate_to_url",
-                hypothesisId="H-nav",
-                arrived_href=probed_href[:180],
-                target_url=url[:180],
-            )
-            # endregion
             return {"ok": True, "href": probed_href, "already": False, "target_url": url}
         if remaining_seconds(resolved_deadline) >= 1.0:
             raise_if_cancelled(cancel_check)
@@ -464,38 +435,14 @@ def navigate_to_url(
         raise SellerNavigationTimeout(
             f"页面导航 settle 等待耗尽 deadline: target={url[:180]}"
         )
-    try:
-        arrived_href = wait_for_page_href(
-            store_id,
-            href_matches,
-            deadline=resolved_deadline,
-            poll_interval=poll_interval,
-            execute_script_fn=execute_script_fn,
-            cancel_check=cancel_check,
-        )
-    except Exception as error:
-        # region agent log
-        debug_log(
-            "navigate-fail",
-            location="scripts/lib/sample_navigation.py:navigate_to_url",
-            hypothesisId="H-nav",
-            from_href=current_href[:180],
-            target_url=url[:180],
-            error_type=type(error).__name__,
-            error=str(error)[:400],
-        )
-        # endregion
-        raise
-    # region agent log
-    debug_log(
-        "navigate-ok",
-        location="scripts/lib/sample_navigation.py:navigate_to_url",
-        hypothesisId="H-nav",
-        from_href=current_href[:180],
-        arrived_href=arrived_href[:180],
-        target_url=url[:180],
+    arrived_href = wait_for_page_href(
+        store_id,
+        href_matches,
+        deadline=resolved_deadline,
+        poll_interval=poll_interval,
+        execute_script_fn=execute_script_fn,
+        cancel_check=cancel_check,
     )
-    # endregion
     return {
         "ok": True,
         "href": arrived_href,

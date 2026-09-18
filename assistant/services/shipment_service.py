@@ -371,20 +371,10 @@ class ShipmentService:
         from lib.sample_api import scrape_processing_list_api, scrape_shipped_list_api
         from lib.sample_navigation import navigate_to_sample_request
         from lib.shipped_dom import ensure_sample_page_loaded, scrape_shipped_list
-        from lib.debug_log import debug_log
 
         store_model = StoreService(self.session_factory).upsert_store(store)
         ziniao_store_id = store_model.ziniao_store_id
         page_state = ensure_sample_page_loaded(ziniao_store_id)
-        # region agent log
-        debug_log(
-            "shipment-page-loaded",
-            location="assistant/services/shipment_service.py:synchronize_shipments",
-            hypothesisId="H3",
-            href=str((page_state or {}).get("href") or "")[:180],
-            already=bool((page_state or {}).get("already")),
-        )
-        # endregion
 
         destination = (page_state or {}).get("destination") or {}
         if not store_model.shop_id:
@@ -420,35 +410,7 @@ class ShipmentService:
 
         try:
             shipped_rows = scrape_shipped_list_api(ziniao_store_id)
-            # region agent log
-            debug_log(
-                "shipped-list-api-ok",
-                location="assistant/services/shipment_service.py:synchronize_shipments",
-                hypothesisId="H3",
-                row_count=len(shipped_rows),
-            )
-            # endregion
-        except PageApiSchemaError as api_error:
-            # region agent log
-            debug_log(
-                "shipped-list-api-fallback",
-                location="assistant/services/shipment_service.py:synchronize_shipments",
-                hypothesisId="H3",
-                error_type=type(api_error).__name__,
-                error=str(api_error)[:240],
-            )
-            # endregion
-            shipped_rows = scrape_shipped_list(ziniao_store_id)
-        except Exception as api_error:
-            # region agent log
-            debug_log(
-                "shipped-list-api-fallback",
-                location="assistant/services/shipment_service.py:synchronize_shipments",
-                hypothesisId="H3",
-                error_type=type(api_error).__name__,
-                error=str(api_error)[:240],
-            )
-            # endregion
+        except Exception:
             shipped_rows = scrape_shipped_list(ziniao_store_id)
         try:
             processing_rows = scrape_processing_list_api(ziniao_store_id)
@@ -630,15 +592,6 @@ class ShipmentService:
                         )
                         if self._seller_context_lost(ziniao_store_id):
                             # 页面离开订单 host / context 失效：停止新查询，进入批次恢复。
-                            # region agent log
-                            debug_log(
-                                "seller-context-lost",
-                                location="assistant/services/shipment_service.py:synchronize_shipments",
-                                hypothesisId="H-detail",
-                                order_id=plan.main_order_id,
-                                error_type=type(error).__name__,
-                            )
-                            # endregion
                             raise RuntimeError(
                                 "订单页上下文失效，已停止本批查询："
                                 f"error_type={type(error).__name__}"
@@ -653,18 +606,6 @@ class ShipmentService:
                                 now=now,
                             )
                         )
-                        # region agent log
-                        debug_log(
-                            "logistics-detail-error",
-                            location="assistant/services/shipment_service.py:synchronize_shipments",
-                            hypothesisId="H-detail",
-                            order_id=plan.main_order_id,
-                            error_type=type(error).__name__,
-                            error=str(error)[:400],
-                            shop_id=store_model.shop_id,
-                            shop_region=store_model.shop_region,
-                        )
-                        # endregion
                         self.warning(
                             f"订单 {order_id_suffix} 物流详情读取失败，已跳过："
                             f"阶段={stage} 错误类型={type(error).__name__} "
@@ -738,17 +679,6 @@ class ShipmentService:
                             f"{navigation_result!r}"[:300]
                         )
                 except Exception as error:
-                    # region agent log
-                    debug_log(
-                        "return-sample-error",
-                        location="assistant/services/shipment_service.py:synchronize_shipments",
-                        hypothesisId="H-return",
-                        error_type=type(error).__name__,
-                        error=str(error)[:400],
-                        shop_id=store_model.shop_id,
-                        shop_region=store_model.shop_region,
-                    )
-                    # endregion
                     self.warning(
                         "回样品申请页失败，已停止本批："
                         f"error_type={type(error).__name__}"

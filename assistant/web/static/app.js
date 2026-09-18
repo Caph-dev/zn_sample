@@ -1,27 +1,6 @@
 (() => {
   "use strict";
 
-  function dbgLog(event, data = {}) {
-    try {
-      fetch("http://127.0.0.1:7571/ingest/e1ea32ce-c1b3-4a1c-b4f8-c821ab1d50ab", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "469bfe",
-        },
-        body: JSON.stringify({
-          sessionId: "469bfe",
-          location: "assistant/web/static/app.js",
-          event,
-          data,
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-    } catch (_error) {
-      /* instrumentation must never break the UI */
-    }
-  }
-
   const terminalStatuses = new Set([
     "succeeded",
     "failed",
@@ -611,8 +590,6 @@
       return existingMonitor;
     }
 
-    dbgLog("monitor-start", {jobId, useGlobalPanel: options.useGlobalPanel !== false});
-
     const monitor = {
       jobId,
       statusTarget: options.statusTarget || null,
@@ -645,11 +622,9 @@
     const refreshSnapshot = () => {
       fetchJob(jobId)
         .then((job) => {
-          dbgLog("snapshot-ok", {jobId, status: job.status});
           handleJobSnapshot(monitor, job);
         })
         .catch((error) => {
-          dbgLog("snapshot-error", {jobId, error: String(error)});
           showMonitorError(monitor, error);
         });
     };
@@ -758,7 +733,6 @@
         throw new Error(errorMessage);
       }
       const payload = await response.json();
-      dbgLog("job-submitted", {jobId: payload.job_id, deduplicated: payload.deduplicated});
       const monitor = startMonitor(payload.job_id, {
         useGlobalPanel: true,
       });
@@ -884,14 +858,6 @@
     const restoreJobId = globalPanel?.dataset.taskRestoreJob || "";
     const hasDedicatedJobMonitor =
       document.querySelector("[data-job-monitor]") !== null;
-    dbgLog("page-load", {
-      globalPanelHidden: globalPanel ? globalPanel.hidden : "no-panel",
-      globalPanelJobId:
-        globalPanel?.querySelector("form[data-job-cancel]")?.dataset.jobId || "",
-      monitorTargets: document.querySelectorAll("[data-job-monitor]").length,
-      restoreJobId,
-      hasDedicatedJobMonitor,
-    });
     if (restoreJobId && !hasDedicatedJobMonitor) {
       startMonitor(restoreJobId, {useGlobalPanel: true});
     }

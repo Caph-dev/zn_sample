@@ -144,55 +144,6 @@ def _console_response(
     return templates.TemplateResponse(request, "console.html", context)
 
 
-def _debug_home_jobs(session_factory) -> None:
-    from lib.debug_log import debug_log
-
-    try:
-        with session_factory() as session:
-            active_jobs = session.scalars(
-                select(Job)
-                .where(Job.status.in_({"pending", "running"}))
-                .order_by(Job.created_at.desc())
-                .limit(5)
-            ).all()
-            latest_sync = session.scalar(
-                select(Job)
-                .where(Job.job_type == "shipment_sync")
-                .order_by(Job.created_at.desc())
-                .limit(1)
-            )
-        debug_log(
-            "home-render",
-            location="assistant/web/routes.py:home",
-            active_jobs=[
-                {
-                    "id": job.id,
-                    "type": job.job_type,
-                    "status": job.status,
-                    "progress": f"{job.progress_current}/{job.progress_total}",
-                }
-                for job in active_jobs
-            ],
-            latest_shipment_sync=(
-                {
-                    "id": latest_sync.id,
-                    "status": latest_sync.status,
-                    "finished_at": latest_sync.finished_at.isoformat()
-                    if latest_sync.finished_at
-                    else None,
-                }
-                if latest_sync
-                else None
-            ),
-        )
-    except Exception as exc:  # instrumentation must never break pages
-        debug_log(
-            "home-render-error",
-            location="assistant/web/routes.py:home",
-            error=str(exc),
-        )
-
-
 @router.get("/", response_class=HTMLResponse)
 def overview(request: Request) -> HTMLResponse:
     """总览页：只读计数 + 准备状态摘要，不放任何操作入口。"""
@@ -205,8 +156,6 @@ def overview(request: Request) -> HTMLResponse:
         store_summary=store_summary,
         dashboard=dashboard,
     )
-    if session_factory is not None:
-        _debug_home_jobs(session_factory)
     return _console_response(request, page="overview", page_title="总览", data=data)
 
 
