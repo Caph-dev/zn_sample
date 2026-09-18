@@ -34,15 +34,15 @@ ENSURE_PENDING_TAB_JS = r"""
     e.classList && e.classList.contains('core-tabs-header-title-active')
   );
   const activeText = active ? (active.innerText || '').trim() : '';
-  if (/待审核|To\\s*review|Pending/i.test(activeText)) {
+  if (/待审核|To\s*review|Pending/i.test(activeText)) {
     return JSON.stringify({ok: true, already: true, text: activeText.slice(0, 40), href: location.href});
   }
-  const t = titles.find(e => /待审核|To\\s*review|Pending/i.test((e.innerText || '').trim()));
+  const t = titles.find(e => /待审核|To\s*review|Pending/i.test((e.innerText || '').trim()));
   if (!t) {
     // 宽松
     const loose = [...document.querySelectorAll('div,span,a,li')].find(e => {
       const tx = (e.innerText || '').trim();
-      return /待审核/.test(tx) && tx.length < 30 && e.offsetParent;
+      return /待审核|To\s*review|Pending/i.test(tx) && tx.length < 30 && e.offsetParent;
     });
     if (!loose) {
       return JSON.stringify({
