@@ -999,10 +999,203 @@ def _load_export_rows(path: Path) -> list[dict[str, Any]]:
     return [row for row in data if isinstance(row, dict)]
 
 
+def _run_order_backfill(args: argparse.Namespace) -> int:
+    """飞书驱动的订单号补写：人员+近窗+空订单号 → 平台待发货订单号。
+
+    不依赖执行批次、不重新批准、不新建/修改其它列；同一批可重复跑（幂等）。
+    """
+    from lib.app_config import load_bitable_settings
+    from lib.order_backfill import (
+        ORDER_BACKFILL_LOOKBACK_HOURS,
+        ORDER_BACKFILL_PERSON,
+        PLATFORM_SEARCH_TABS,
+        PLATFORM_TAB_FIELD,
+        apply_order_backfill,
+        build_order_backfill_report,
+        collect_order_backfill_candidates,
+        plan_order_backfill,
+        select_platform_order,
+    )
+    from lib.page_api import get_affiliate_page_context
+    from lib.sample_api import scrape_pending_list_api
+    from lib.shipped_dom import ensure_sample_page_loaded
+
+    if args.write_feishu and not args.yes:
+        logger.error("订单号补写会写飞书「订单号」列。确认请加 --yes。")
+        return 2
+    store_id = args.store_id
+
+    try:
+        hero_data = _load_hero(store_id, args.config)
+    except RuntimeError as error:
+        logger.error(f"[主推] 读取失败：{error}")
+        return 2
+    product_id_to_sku = build_product_id_to_sku_map(hero_data, hero_only=False)
+
+    try:
+        settings = load_bitable_settings(
+            config_path=args.config,
+            default_app_token=DEFAULT_APP_TOKEN,
+            default_table_id=DEFAULT_TABLE_ID,
+            default_view_id=DEFAULT_VIEW_ID,
+        )
+        app_token = settings.get("app_token") or DEFAULT_APP_TOKEN
+        table_id = settings.get("table_id") or DEFAULT_TABLE_ID
+        access_token = get_bitable_access_token(config_path=args.config)
+        sample_options = list_sample_product_options(
+            access_token, app_token=app_token, table_id=table_id
+        )
+    except Exception as error:
+        logger.error(f"[飞书] 不可用，无法核对订单号：{error}")
+        return 2
+
+    try:
+        candidates = collect_order_backfill_candidates(
+            access_token,
+            person=ORDER_BACKFILL_PERSON,
+            lookback_hours=ORDER_BACKFILL_LOOKBACK_HOURS,
+            app_token=app_token,
+            table_id=table_id,
+        )
+    except FeishuBitableError as error:
+        logger.error(f"[飞书] 读取待补写行失败：{error}")
+        return 2
+    logger.info(
+        f"[飞书] 人员={ORDER_BACKFILL_PERSON}、近 {ORDER_BACKFILL_LOOKBACK_HOURS} 小时"
+        f"且「订单号」为空：{len(candidates)} 行"
+    )
+
+    def save_report(report_items, *, platform_rows: int, search_errors: list[str]) -> None:
+        report = build_order_backfill_report(
+            store_id=store_id,
+            person=ORDER_BACKFILL_PERSON,
+            lookback_hours=ORDER_BACKFILL_LOOKBACK_HOURS,
+            write_feishu=bool(args.write_feishu),
+            platform_rows=platform_rows,
+            search_errors=search_errors,
+            items=report_items,
+        )
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = args.out.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+        )
+        temporary_path.replace(args.out)
+
+    if not candidates:
+        save_report([], platform_rows=0, search_errors=[])
+        logger.info("没有待补写的订单号，未搜索平台后台。")
+        logger.info(f"补写结果已写入: {args.out}")
+        return 0
+
+    if args.from_seller_home:
+        navigate_from_seller_home_to_pending(store_id, navigation_timeout=90.0)
+    try:
+        ensure_sample_page_loaded(store_id, page_wait=max(3.0, args.page_wait))
+        page_context = get_affiliate_page_context(store_id)
+    except Exception as error:
+        logger.error(f"[平台] 无法进入样品申请页：{error}")
+        return 2
+
+    resolved_options = sample_options or list(product_id_to_sku.values())
+    search_errors: list[str] = []
+    seen_apply_ids: set[str] = set()
+    platform_rows = 0
+
+    def search_tab(tab: int, label: str, handle: str) -> list[dict[str, Any]]:
+        """按达人搜索一个 tab；页面上下文失效时重解析一次再重试。"""
+        nonlocal page_context
+        for attempt in (1, 2):
+            try:
+                return scrape_pending_list_api(
+                    store_id, tab=tab, search_value=handle, max_pages=2,
+                    ensure_page=False, context=page_context,
+                )
+            except Exception as error:
+                if attempt == 1:
+                    try:
+                        page_context = get_affiliate_page_context(store_id)
+                    except Exception:
+                        pass
+                    continue
+                search_errors.append(f"{handle} · {label}：{error}")
+                logger.warning(f"[平台] 搜索失败 {handle} · {label}：{error}")
+        return []
+
+    lookups: dict[str, dict[str, Any]] = {}
+    for index, candidate in enumerate(candidates, 1):
+        handle = str(candidate["creator_handle"])
+        handle_rows: list[dict[str, Any]] = []
+        lookup: dict[str, Any] = {}
+        for tab, label in PLATFORM_SEARCH_TABS:
+            for row in search_tab(tab, label, handle):
+                apply_id = str(row.get("apply_id") or "")
+                if apply_id and apply_id in seen_apply_ids:
+                    continue
+                if apply_id:
+                    seen_apply_ids.add(apply_id)
+                row[PLATFORM_TAB_FIELD] = label
+                handle_rows.append(row)
+                platform_rows += 1
+            lookup = select_platform_order(
+                handle_rows,
+                creator_handle=handle,
+                sample_product=str(candidate["sample_product"]),
+                product_id_to_sku=product_id_to_sku,
+                sample_product_options=resolved_options,
+            )
+            if lookup.get("status") == "matched":
+                break
+        lookups[str(candidate["record_id"])] = lookup
+        logger.info(
+            f"  [{index}/{len(candidates)}] {handle} {candidate['sample_product']} → "
+            f"{lookup.get('status')} {lookup.get('order_no') or ''} "
+            f"{lookup.get('detail') or ''}"
+        )
+
+    plans = plan_order_backfill(candidates, lookups)
+    # 写前先落一份计划，进程中断也能看到本次打算写什么。
+    save_report(plans, platform_rows=platform_rows, search_errors=search_errors)
+
+    results = apply_order_backfill(
+        plans,
+        access_token=access_token,
+        write_feishu=bool(args.write_feishu),
+        limit=max(0, int(args.limit or 0)),
+        app_token=app_token,
+        table_id=table_id,
+    )
+    for item in results:
+        logger.info(
+            f"  [{item.get('status')}] {item.get('creator_handle')} "
+            f"{item.get('sample_product')} 订单号={item.get('order_no') or '-'} "
+            f"{item.get('detail') or ''}"
+        )
+    save_report(results, platform_rows=platform_rows, search_errors=search_errors)
+
+    written = sum(1 for item in results if item.get("status") == "written")
+    unchanged = sum(1 for item in results if item.get("status") == "unchanged")
+    pending_review = sum(
+        1
+        for item in results
+        if item.get("status") in {"conflict", "write-uncertain", "ambiguous"}
+    )
+    logger.info(
+        f"--- 订单号补写完成：写入 {written} 行、已一致 {unchanged} 行、"
+        f"待人工 {pending_review} 行（写飞书={'开' if args.write_feishu else '关'}）---"
+    )
+    logger.info(f"补写结果已写入: {args.out}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="自动审批：自定义审核筛查/批准/核对")
-    ap.add_argument("--mode", choices=("preview", "execute", "reconcile"), required=True)
-    ap.add_argument("--rules", type=Path, required=True, help="自定义规则 JSON 路径")
+    ap.add_argument(
+        "--mode",
+        choices=("preview", "execute", "reconcile", "order-backfill"),
+        required=True,
+    )
+    ap.add_argument("--rules", type=Path, default=None, help="自定义规则 JSON 路径（order-backfill 不需要）")
     ap.add_argument("--store-id", required=True)
     ap.add_argument("--out", type=Path, required=True, help="结果 JSON 输出路径")
     ap.add_argument("--preview", type=Path, default=None, help="预览信封 JSON 路径")
@@ -1025,17 +1218,22 @@ def main() -> int:
     configure_logging(verbose=bool(args.verbose))
 
     if args.mode == "preview":
+        if not args.rules:
+            logger.error("preview 需要 --rules")
+            return 2
         return _run_preview(args)
     if args.mode == "execute":
-        if not args.preview or not args.apply_ids or not args.backup_out:
-            logger.error("execute 需要 --preview / --apply-ids / --backup-out")
+        if not args.rules or not args.preview or not args.apply_ids or not args.backup_out:
+            logger.error("execute 需要 --rules / --preview / --apply-ids / --backup-out")
             return 2
         return _run_execute(args)
     if args.mode == "reconcile":
-        if not args.preview or not args.backup:
-            logger.error("reconcile 需要 --preview / --backup")
+        if not args.rules or not args.preview or not args.backup:
+            logger.error("reconcile 需要 --rules / --preview / --backup")
             return 2
         return _run_reconcile(args)
+    if args.mode == "order-backfill":
+        return _run_order_backfill(args)
     return 2
 
 

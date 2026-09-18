@@ -1,9 +1,10 @@
 /** 本页 API 客户端；所有写操作都经服务端严格校验。 */
 
 import type {
-  ExecutionHistoryPayload,
   ExecutionPayload,
   OptionsPayload,
+  OrderBackfillCandidatesPayload,
+  OrderBackfillStatePayload,
   PreviewPayload,
   RuleDraft,
   StoreSummary,
@@ -112,19 +113,25 @@ export function getExecution(executionId: string): Promise<ExecutionPayload> {
   return fetchJson<ExecutionPayload>(`/api/auto-approval/executions/${executionId}`, {cache: 'no-store'});
 }
 
-export function getExecutions(offset = 0, limit = 20): Promise<ExecutionHistoryPayload> {
-  return fetchJson<ExecutionHistoryPayload>(
-    `/api/auto-approval/executions?offset=${offset}&limit=${limit}`,
-    {cache: 'no-store'},
-  );
+export function getOrderBackfillCandidates(): Promise<OrderBackfillCandidatesPayload> {
+  return fetchJson<OrderBackfillCandidatesPayload>('/api/auto-approval/order-backfill/candidates', {
+    cache: 'no-store',
+  });
 }
 
-export function reconcileExecution(
-  executionId: string,
-  payload: {write_feishu: boolean; confirmation: string},
-): Promise<{execution_id: string; job_id: string}> {
-  return fetchJson<{execution_id: string; job_id: string}>(
-    `/api/auto-approval/executions/${executionId}/reconcile`,
+export function getOrderBackfillState(): Promise<OrderBackfillStatePayload> {
+  return fetchJson<OrderBackfillStatePayload>('/api/auto-approval/order-backfill', {
+    cache: 'no-store',
+  });
+}
+
+export function startOrderBackfill(payload: {
+  store_id: string | null;
+  limit: number;
+  confirmation: string;
+}): Promise<{job_id: string; store_id: string; limit: number}> {
+  return fetchJson<{job_id: string; store_id: string; limit: number}>(
+    '/api/auto-approval/order-backfill',
     {method: 'POST', body: JSON.stringify(payload)},
   );
 }

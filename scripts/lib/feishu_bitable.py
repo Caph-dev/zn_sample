@@ -577,6 +577,57 @@ def record_outreach_ms(record: dict[str, Any]) -> int | None:
     return record_created_ms(record if isinstance(record, dict) else {})
 
 
+def search_records_missing_order_no(
+    access_token: str,
+    *,
+    since: datetime,
+    person: str,
+    app_token: str = DEFAULT_APP_TOKEN,
+    table_id: str = DEFAULT_TABLE_ID,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """近窗内、指定人员、且「订单号」为空的行。用系统 created_time，不读业务列当时间。"""
+    if since.tzinfo is None:
+        raise FeishuBitableError("search_records_missing_order_no 需要带时区的 since")
+    since_ms = int(since.timestamp() * 1000)
+    items: list[dict[str, Any]] = []
+    page_token = ""
+    while True:
+        body: dict[str, Any] = {
+            "page_size": min(max(1, int(page_size)), 500),
+            "automatic_fields": True,
+            "filter": {
+                "conjunction": "and",
+                "conditions": [
+                    {"field_name": "人员", "operator": "is", "value": [person]},
+                    {"field_name": "订单号", "operator": "isEmpty", "value": []},
+                ],
+            },
+        }
+        if page_token:
+            body["page_token"] = page_token
+        payload = _http_json(
+            "POST",
+            f"{OPEN_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=body,
+        )
+        data = payload.get("data") or {}
+        for record in data.get("items") or []:
+            if not isinstance(record, dict):
+                continue
+            created_ms = record_created_ms(record)
+            if created_ms is None or created_ms < since_ms:
+                continue
+            items.append(record)
+        if not data.get("has_more"):
+            break
+        page_token = str(data.get("page_token") or "").strip()
+        if not page_token:
+            break
+    return items
+
+
 def search_pending_ship_records(
     access_token: str,
     *,

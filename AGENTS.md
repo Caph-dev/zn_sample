@@ -57,7 +57,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）、物流写回与跟进动作（含跟进详情页单条发送），复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
+| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）、物流写回、跟进动作（含跟进详情页单条发送）与自动批准页的「订单号补写」，复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -88,7 +88,7 @@
 
 ## 自动审批子页面（自定义审核方案）
 
-`/auto-approval` 是独立 React 页（构建产物 `assistant/web/static/auto-approval/`，源码 `frontend/`，构建 `npm run build:auto`；产物被 gitignore）。后端：`assistant/api/auto_approval.py` + `assistant/services/auto_approval_service.py` + `scripts/auto_approval.py`（三种 mode）+ `scripts/lib/auto_approval_rules.py`；任务类型 `auto_approval_preview|execute|reconcile`（已入 ZINIAO_JOB_TYPES 与写任务保护集）。候选筛选层级（L0–L5）见 [docs/spec/自动审批候选筛选流程.md](./docs/spec/自动审批候选筛选流程.md)。
+`/auto-approval` 是独立 React 页（构建产物 `assistant/web/static/auto-approval/`，源码 `frontend/`，构建 `npm run build:auto`；产物被 gitignore）。后端：`assistant/api/auto_approval.py` + `assistant/services/auto_approval_service.py` + `scripts/auto_approval.py`（四种 mode：`preview|execute|reconcile|order-backfill`）+ `scripts/lib/auto_approval_rules.py`；任务类型 `auto_approval_preview|execute|reconcile|order_backfill`（已入 ZINIAO_JOB_TYPES 与写任务保护集，启动器 PROTECTED_JOB_TYPES 同）。候选筛选层级（L0–L5）见 [docs/spec/自动审批候选筛选流程.md](./docs/spec/自动审批候选筛选流程.md)。
 
 - **隔离，不是默认**：正式 SOP、`filters.Criteria`、0/1/2/3 入口行为不变。自定义规则只绑定本次任务快照；关闭检查 = not_checked，≠通过。正式入口与旧导出继续严格走 `_guard_content_review()`；本页批准只接受服务器生成的自定义快照（preview 信封 + rule hash + 逐项证据），禁止前端布尔量绕过内容门禁。
 - **规则 schema 严格**（`validate_custom_rule`）：未知字段、非有限数字、非法范围、空条件组合、非主推商品都拒绝。至少启用一项检查；比较符第一版固定 `>`（客单价为区间）；`video_live` 组 either/both，both 须两侧都启用。
@@ -96,8 +96,9 @@
 - **判定语义**：启用指标缺失或违反 → failed（不通过）；完整满足 → passed；仅详情采集失败（`detail_error`）导致缺失 → needs_review，且批次禁止执行。视频/直播任一侧通过即过；AND 组已知失败即失败。主推/当前款/`can_be_approved=false`/缺 ID 为**执行拦截**（blocked），不属审核项。
 - **按需采集**：仅 video/live 组启用才拉详情；详情字段优先（履约 `est_post_rate`、官方 GPM、客单价 `aov_detail`），缺失回退列表口径（GPM 近似标记 source=list-proxy）。内容审核只跑自定义已通过行，与正式链路同一 `review_creator_rows`/`validate_content_review` 证据。
 - **执行边界**：服务端校验 preview 完成/完整/新鲜 + 候选 ⊆ eligible + 限量 + 键入 `y` + 幂等键（重复点击/重试去重）；脚本内再验信封/店铺/hash、逐行复算结论、hero 重查、产品解析、查重、`check_pending_application_api` 预检后批准（`--write-source api` 固定）；批准未知 → 不写飞书、不自动重试。写飞书默认关，目标仍「达人关系管理(新)」。reconcile 复用正式 confirm 管线（不重批）。
-- **任务与页面**：写任务运行中不提供取消；启动器 `PROTECTED_JOB_TYPES` 含 auto_approval_execute/reconcile。页面网络异常先查任务状态，不重复创建批准任务。改规则立即令旧预览失效。
-- **常驻核对与补写**：历史批次独立于当前预览。`auto_approval_reconcile` 在 `write_feishu=false` 时只回读平台/飞书，无需 `y`；补写须 `y` + 15 分钟内成功核对的缺失证据 + 原批次限量，执行前重查、执行后回读。核对不改原批准批次 `status/job_id`；每次任务独立报告，失败仍保留批次/报告指针及不确定写入检查点。只接受绑定 execution/store/hash 的服务器快照；历史核对可跳过预览新鲜度，但新批准始终校验 24 小时。查询失败不是缺失；重复记录、不同订单号、未知写入未找到记录禁止补写。平台确认仍只认待发货；后续阶段交物流/人工，不重批。
+- **任务与页面**：写任务运行中不提供取消；启动器 `PROTECTED_JOB_TYPES` 含 auto_approval_execute/reconcile/order_backfill。页面网络异常先查任务状态，不重复创建批准任务。改规则立即令旧预览失效。
+- **订单号补写（页面第 5 节，2026-09-18 起）**：`auto_approval_order_backfill` 与 `scripts/auto_approval.py --mode order-backfill`；规则固定「人员=王良希（技术）+ 系统 created_time 近 72 小时 + 订单号为空」（`lib/order_backfill.py`），**不选批次、不需要先跑只读核对**。只读扫描（`GET /api/auto-approval/order-backfill/candidates`，Web 进程直接读飞书，不占店铺页面）只用于展示；写任务**对每条候选到后台按达人 ID 逐个搜索**（`PLATFORM_SEARCH_TABS` = 待发货 20 → 已发货 30 → 处理中 40 → 已完成 100 → 待审核 10，拿到有效单号即停止继续搜后面的 tab），按「红人ID+寄样产品」选中申请（同一达人可能有多笔，必须两个键都对上），逐行 `update_record_order_no` 只写「订单号」一列并立即回读。**禁止只扫「待发货」整表**：已发货/处理中的行不在 tab=20，会整批漏掉（2026-09-18 实测三条）。页面仍须键入 `y`（`confirmation`），任务去重 + 店铺页面互斥；默认限量为 0（不限量，候选有界且重复运行幂等）。逐行结论 `written|unchanged|conflict|write-uncertain|no-platform-order|ambiguous`，报告带 `platform_tab`（来源 tab）与 `search_errors`（逐候选逐 tab 的搜索失败）；`write-uncertain` 禁止自动重试，后台未刷新时保持 `no-platform-order`、下次重扫自动带上。`--write-feishu 0` 为纯核对（`planned`，不写远端）。
+- **常驻核对与补写（按历史批次，脚本/维护用；页面已移除）**：历史批次独立于当前预览。`auto_approval_reconcile` 在 `write_feishu=false` 时只回读平台/飞书，无需 `y`；补写须 `y` + 15 分钟内成功核对的缺失证据 + 原批次限量，执行前重查、执行后回读。核对不改原批准批次 `status/job_id`；每次任务独立报告，失败仍保留批次/报告指针及不确定写入检查点。只接受绑定 execution/store/hash 的服务器快照；历史核对可跳过预览新鲜度，但新批准始终校验 24 小时。查询失败不是缺失；重复记录、不同订单号、未知写入未找到记录禁止补写。平台确认仍只认待发货；后续阶段交物流/人工，不重批。
 
 ---
 
@@ -142,7 +143,9 @@
 | `--force` | 只绕过 16:00 |
 | `--observe-approve-network` | 仅单条 execute 被动观察；不重放、不登记未确认 endpoint |
 
-网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking|followup_send` 五个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排（`followup_send` 走固定 handler 调 `send_followup_message.py`），不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）、`tracking`（达人跟进页物流写回）和 `followup_send`（达人跟进详情页单条发送，固定 `task_id`、限 1、键入 `y` 确认）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。运行中的网页 operator 任务不提供取消按钮，避免把已经发生的平台批准、飞书写入或私信误解为可撤销。
+网页不是新的业务写路径：后端只登记 `prepare|screen|pipeline|tracking|followup_send` 五个固定任务，使用启动操作台的 `sys.executable` 直接调用既有编排（`followup_send` 走固定 handler 调 `send_followup_message.py`），不执行 `.command`/`.bat`、不接受 shell 字符串、不允许网页覆盖 store/limit/source 等参数。网页只暴露 `prepare`（运行准备）、`screen`（自动批准页只出名单）、`tracking`（达人跟进页物流写回）和 `followup_send`（达人跟进详情页单条发送，固定 `task_id`、限 1、键入 `y` 确认）；`pipeline` 端点保留兼容但不在任何页面暴露，正式筛查-批准只走脚本 1/2。
+
+**网页取消（2026-09-18 加）：** 运行中的任务只有登记了安全检查点的类型可以取消，`can_request_cancellation()`（`assistant/jobs/registry.py`）是唯一判据，页面按钮直接读 `/api/jobs/{id}` 的 `can_cancel`，不要在前端再写一份名单。写任务里只有 `operator_tracking` 在列：服务端只写哨兵文件（`assistant/jobs/locks.py` 的 `cancel_flag_path`，经 `ZN_SAMPLE_CANCEL_FLAG` 传给子进程），子进程在 `sync_shipped_tracking.py` 的**每一行边界**检查并停下（退出码 3 → `JobCancelled`），已写入的飞书行和已发私信保留、任务显示「已取消」；绝不从一次写入中间杀进程。平台同意 / 单条私信 / 自动审批写任务运行中仍不可取消；取消只代表「不再处理剩余行」，不是撤销。
 
 网页“运行准备”的调试口状态只认唯一 running 店的短超时 `execute_script` 探活；不能因 running 有店或 `doctor` 正常就显示已就绪。检测只读且不得自动开店/重开；ZClaw 任务运行时返回 busy 缓存，不并发探活。探活只在总览 / 运行准备页轮询；自动批准页只显示状态条 + 去准备页链接。
 
@@ -204,6 +207,7 @@
 - 列表：静默读 fiber `record`，勿点名称旁易弹剪贴板的控件。批准只走列表「同意」，不在详情页点同意。
 - 详情：直链 `cid=` 或点头像；抽完回列表。
 - 私信：只从样品申请页右下角「聊天数」进入，点击「发送消息」，在「发送给」输入达人 ID 后点击结果行右侧「聊天」。成功=选中 `contactCard` 对得上人且有输入框。**不要打开详情消息弹层、不要跳到 `/seller/im`、不要点最近联系人**。发送默认 `onSendText`，不点发送钮（除非 `--write-source dom`）。
+- **搜索键先 handle 后数字（2026-09-18 改）**：`open_conversation_via_new_message` 的候选顺序是 `creator_name`（业务上的达人 ID，平台 handle，如 `prettybalanced_`）优先，`creator_id`（19 位内部数字 ID）只在前者搜不到时兜底——数字串会先出现在「发送给」输入框，用户已把它当 bug 报过。填完必须回读输入框，内容与搜索键不一致（残留上一位达人 / 拼串）立即拒开该会话，不再换第二个关键词。
 - 可点：待审核/已发货 tab、翻页、头像/详情、返回，以及样品申请页聊天数面板中的「发送消息」、达人 ID 搜索结果「聊天」。execute 还可点列表同意、确认弹窗。永不点邀请。
 - 进出商家订单页：异步 `location.replace` + 短轮询，禁止阻塞 `visit_page` 回样品申请。从订单等 SPA 子页出发时先 replace 掉历史，避免弹回订单页。
 - storeId：显式 > running 精确店名 > running 唯一 > 测试默认 1 号店。ZClaw Bridge `9481` ≠ WebDriver `16851`。

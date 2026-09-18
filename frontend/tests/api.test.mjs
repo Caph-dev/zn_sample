@@ -12,21 +12,43 @@ async function importTypeScriptModule(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 }
 
-const {createPreview, fetchJson, reconcileExecution, saveRuleDraft} = await importTypeScriptModule('../src/api.ts');
+const {createPreview, fetchJson, getOrderBackfillCandidates, saveRuleDraft, startOrderBackfill} =
+  await importTypeScriptModule('../src/api.ts');
 const {buildStandardRule, hasOutdatedSkuEvidence, rulesEqual, summaryRows, validateDraft} = await importTypeScriptModule('../src/ruleModel.ts');
 const {readRuleMemory, writeRuleMemory} = await importTypeScriptModule('../src/ruleMemory.ts');
 const {readExecutionLimit, writeExecutionLimit} = await importTypeScriptModule('../src/executionLimitMemory.ts');
-const {approvalActivity} = await importTypeScriptModule('../src/reconciliationState.ts');
 
-test('legacy queued batch with completed reconciliation is not an active approval', () => {
-  const state = approvalActivity({status: 'queued', job: {status: 'succeeded'}});
-  assert.equal(state.active, false);
-  assert.match(state.stateError, /历史批次状态异常/);
-  for (const status of ['pending', 'running']) {
-    assert.deepEqual(approvalActivity({status: 'queued', job: {status}}), {active: true, stateError: ''});
-  }
-  assert.deepEqual(approvalActivity({status: 'completed', job: {status: 'succeeded'}}), {active: false, stateError: ''});
-  assert.equal(approvalActivity({status: 'queued', job: {status: 'running'}, reconciliation: {approval_active: false}}).active, false);
+test('order-number backfill posts one confirmed write and scans candidates read-only', async (context) => {
+  const requests = [];
+  context.mock.method(globalThis, 'fetch', async (path, request) => {
+    requests.push({path, method: request?.method ?? 'GET', body: request?.body ?? null});
+    if (path === '/api/auto-approval/order-backfill/candidates') {
+      return Response.json({person: '王良希（技术）', lookback_hours: 72, total: 0, rows: []});
+    }
+    return Response.json({job_id: 'job-1', store_id: 'store-1', limit: 0});
+  });
+  const candidates = await getOrderBackfillCandidates();
+  assert.equal(candidates.person, '王良希（技术）');
+  await startOrderBackfill({store_id: 'store-1', limit: 0, confirmation: 'y'});
+  assert.deepEqual(requests, [
+    {path: '/api/auto-approval/order-backfill/candidates', method: 'GET', body: null},
+    {
+      path: '/api/auto-approval/order-backfill',
+      method: 'POST',
+      body: JSON.stringify({store_id: 'store-1', limit: 0, confirmation: 'y'}),
+    },
+  ]);
+});
+
+test('order-number backfill never retries a write when its response is lost', async (context) => {
+  const fetchMock = context.mock.method(globalThis, 'fetch', async () => {
+    throw new TypeError('Connection lost after submission');
+  });
+  await assert.rejects(
+    startOrderBackfill({store_id: 'store-1', limit: 0, confirmation: 'y'}),
+    /Connection lost/,
+  );
+  assert.equal(fetchMock.mock.callCount(), 1);
 });
 
 test('execution limit defaults to 20 and immediately remembers valid edits', () => {
@@ -193,33 +215,6 @@ const errorCases = [
     message: 'invalid-origin',
   },
 ];
-
-test('reconciliation keeps read-only and explicitly confirmed repair requests separate', async (context) => {
-  const requests = [];
-  context.mock.method(globalThis, 'fetch', async (path, request) => {
-    assert.equal(path, '/api/auto-approval/executions/batch-1/reconcile');
-    assert.equal(request.method, 'POST');
-    requests.push(JSON.parse(request.body));
-    return Response.json({execution_id: 'batch-1', job_id: 'job-1'});
-  });
-  await reconcileExecution('batch-1', {write_feishu: false, confirmation: ''});
-  await reconcileExecution('batch-1', {write_feishu: true, confirmation: 'y'});
-  assert.deepEqual(requests, [
-    {write_feishu: false, confirmation: ''},
-    {write_feishu: true, confirmation: 'y'},
-  ]);
-});
-
-test('reconciliation never retries a write when its response is lost', async (context) => {
-  const fetchMock = context.mock.method(globalThis, 'fetch', async () => {
-    throw new TypeError('Connection lost after submission');
-  });
-  await assert.rejects(
-    reconcileExecution('batch-1', {write_feishu: true, confirmation: 'y'}),
-    /Connection lost/,
-  );
-  assert.equal(fetchMock.mock.callCount(), 1);
-});
 
 for (const errorCase of errorCases) {
   test(`fetchJson preserves ${errorCase.name}`, async (context) => {

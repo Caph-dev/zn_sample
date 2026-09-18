@@ -303,7 +303,48 @@ class ImOpenPathTests(unittest.TestCase):
     @patch("lib.im_dom.inspect_im")
     @patch("lib.im_dom.time.sleep", return_value=None)
     @patch("lib.im_dom.zclaw_exec")
-    def test_open_conversation_falls_back_to_handle_within_new_message_path(
+    def test_open_conversation_searches_the_handle_before_the_numeric_id(
+        self, execute, _sleep, inspect
+    ) -> None:
+        """业务达人 ID 是 handle（如 prettybalanced_）；输入框先填 handle，不填内部数字 ID。"""
+        inspect.side_effect = [
+            {
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+            },
+            {
+                "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+                "hasComposer": True,
+                "current_user_id": "7494176038218335933",
+                "current_screen_name": "prettybalanced_",
+            },
+        ]
+        execute.side_effect = [
+            {"ok": True, "already": True},
+            {"ok": True},
+            {"ok": True, "value": "prettybalanced_"},
+            {
+                "ok": True,
+                "via": "react-onClick",
+                "result_creator_id": "7494176038218335933",
+            },
+        ]
+
+        with patch("lib.im_dom._wait_for_page_flag", return_value=True):
+            result = open_conversation_via_new_message(
+                "store-test",
+                creator_id="7494176038218335933",
+                creator_name="prettybalanced_",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["fill"]["value"], "prettybalanced_")
+        self.assertEqual(execute.call_count, 4)
+        self.assertEqual(inspect.call_count, 2)
+
+    @patch("lib.im_dom.inspect_im")
+    @patch("lib.im_dom.time.sleep", return_value=None)
+    @patch("lib.im_dom.zclaw_exec")
+    def test_open_conversation_falls_back_to_creator_id_when_handle_finds_nothing(
         self, execute, _sleep, inspect
     ) -> None:
         inspect.side_effect = [
@@ -320,11 +361,11 @@ class ImOpenPathTests(unittest.TestCase):
         execute.side_effect = [
             {"ok": True, "already": True},
             {"ok": True},
-            {"ok": True, "value": "creator-id"},
+            {"ok": True, "value": "creator_handle"},
             {"ok": False, "reason": "no-result-row"},
             {"ok": True, "already": True},
             {"ok": True},
-            {"ok": True, "value": "creator_handle"},
+            {"ok": True, "value": "creator-id"},
             {
                 "ok": True,
                 "via": "react-onClick",
@@ -346,6 +387,38 @@ class ImOpenPathTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(execute.call_count, 8)
         self.assertEqual(inspect.call_count, 2)
+
+    @patch("lib.im_dom.inspect_im")
+    @patch("lib.im_dom.time.sleep", return_value=None)
+    @patch("lib.im_dom.zclaw_exec")
+    def test_open_conversation_rejects_a_search_box_that_did_not_take_the_key(
+        self, execute, _sleep, inspect
+    ) -> None:
+        """搜索框残留/拼串时（回读值不一致）不得继续点结果行，否则会开错会话。"""
+        inspect.return_value = {
+            "href": "https://affiliate.tiktokshopglobalselling.com/affiliate/sample/sample-request",
+        }
+        execute.side_effect = [
+            {"ok": True, "already": True},
+            {"ok": True},
+            # 输入框回读是上一位达人残留的数字串，而不是本次要搜的 handle。
+            {"ok": True, "value": "74941760382183359337494176038218335933"},
+        ]
+
+        with patch("lib.im_dom._wait_for_page_flag", return_value=True):
+            result = open_conversation_via_new_message(
+                "store-test",
+                creator_id="7494176038218335933",
+                creator_name="prettybalanced_",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["attempts"][0]["detail"]["error"],
+            "搜索框内容与达人 ID 不一致",
+        )
+        # 只填了搜索框，没有去点结果行。
+        self.assertEqual(execute.call_count, 3)
 
     @patch("lib.im_dom.time.sleep", return_value=None)
     @patch("lib.im_dom.zclaw_exec")

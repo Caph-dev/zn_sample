@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import threading
 import uuid
+from pathlib import Path
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from assistant.database.models import Job, Store
+from assistant.paths import runtime_dir
 from assistant.security.csrf import is_local_host
 from assistant.jobs.registry import ZINIAO_JOB_TYPES
 
@@ -16,6 +18,22 @@ from assistant.jobs.registry import ZINIAO_JOB_TYPES
 _cancelled_job_ids: set[str] = set()
 _cancellation_lock = threading.Lock()
 _job_creation_lock = threading.Lock()
+
+
+def cancel_flag_path(job_id: str) -> Path:
+    """Sentinel path a subprocess job checks at safe checkpoints.
+
+    Subprocess handlers cannot see the in-memory flag, so the request thread
+    writes this file instead of killing the child process mid-write.
+    """
+    return runtime_dir() / "cancel-flags" / f"{job_id}.flag"
+
+
+def write_cancel_flag(job_id: str) -> Path:
+    path = cancel_flag_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("cancelled", encoding="utf-8")
+    return path
 
 
 def request_cancellation(job_id: str) -> None:
@@ -31,6 +49,11 @@ def is_cancellation_requested(job_id: str) -> bool:
 def clear_cancellation(job_id: str) -> None:
     with _cancellation_lock:
         _cancelled_job_ids.discard(job_id)
+    try:
+        cancel_flag_path(job_id).unlink(missing_ok=True)
+    except OSError:
+        # 任务已经结束；清不掉哨兵文件不影响结果，下一次同 id 不会再出现。
+        pass
 
 
 def create_or_get_pending_job(

@@ -111,9 +111,13 @@ def _finish_job(
         job.status = status
         job.finished_at = utc_now()
         job.heartbeat_at = utc_now()
-        # Reconciliation failures must retain batch/report pointers so the UI
-        # can recover uncertain writes rather than reverting to old evidence.
-        if result_summary or job.job_type != "auto_approval_reconcile":
+        # Reconciliation and order-backfill failures must retain report pointers
+        # so the UI can recover uncertain writes rather than reverting to old
+        # evidence or losing the result path of the last run.
+        if result_summary or job.job_type not in {
+            "auto_approval_reconcile",
+            "auto_approval_order_backfill",
+        }:
             job.result_summary = result_summary
         job.error_code = error_code
         job.error_summary = error_summary

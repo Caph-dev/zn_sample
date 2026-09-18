@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -39,6 +40,7 @@ from assistant.jobs.worker import (
     start_worker,
     worker_loop_once,
 )
+from lib.job_cancel import CANCEL_FLAG_ENV, EXIT_CODE_CANCELLED
 
 
 class JobTestCase(unittest.TestCase):
@@ -401,6 +403,87 @@ class JobWorkerTests(JobTestCase):
         self.assertTrue(operator_call.kwargs["confirm_fn"](None))
         self.assertTrue(operator_call.kwargs["force_fn"]())
 
+    def test_operator_handler_maps_checkpoint_exit_code_to_cancelled(self) -> None:
+        """子进程在安全检查点停下（代号 3）→ 任务标记取消，并保留部分完成说明。"""
+        from assistant.jobs.registry import JobCancelled
+
+        job_id = self.add_job(job_type="operator_tracking")
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            job.result_summary = json.dumps({})
+            session.commit()
+
+        with (
+            patch(
+                "assistant.jobs.handlers.operator.ensure_user_dirs",
+                return_value=self.root,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator.cancel_flag_path",
+                return_value=self.root / "cancel.flag",
+            ),
+            patch(
+                "assistant.jobs.handlers.operator.run_operator_mode",
+                return_value=EXIT_CODE_CANCELLED,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator._resolve_report_name",
+                return_value="sample_shipped.csv",
+            ),
+        ):
+            with self.assertRaises(JobCancelled) as raised:
+                run_operator_job(job_id, self.session_factory)
+
+        summary = json.loads(raised.exception.result_summary)
+        self.assertEqual(summary["mode"], "tracking")
+        self.assertEqual(summary["report_name"], "sample_shipped.csv")
+        self.assertIn("已写入的飞书行和已发私信保留", summary["summary"])
+
+    def test_operator_handler_hands_the_cancel_flag_to_the_tracking_child(self) -> None:
+        """取消哨兵路径必须作为环境变量传给物流子进程，服务端不杀进程。"""
+        job_id = self.add_job(job_type="operator_tracking")
+        with self.session_factory() as session:
+            job = session.get(Job, job_id)
+            job.result_summary = json.dumps({})
+            session.commit()
+        (self.root / "logs").mkdir(parents=True, exist_ok=True)
+        flag_path = self.root / "flag" / f"{job_id}.flag"
+
+        captured: dict = {}
+
+        def fake_run_operator_mode(mode_key, **kwargs):
+            captured["mode_key"] = mode_key
+            with patch.dict(os.environ, {}, clear=True):
+                with patch(
+                    "assistant.jobs.handlers.operator.subprocess.run"
+                ) as run:
+                    kwargs["run_job_fn"](["python", "sync_shipped_tracking.py"])
+                    captured["env"] = run.call_args.kwargs["env"]
+            return 0
+
+        with (
+            patch(
+                "assistant.jobs.handlers.operator.ensure_user_dirs",
+                return_value=self.root,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator.cancel_flag_path",
+                return_value=flag_path,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator.run_operator_mode",
+                side_effect=fake_run_operator_mode,
+            ),
+            patch(
+                "assistant.jobs.handlers.operator._resolve_report_name",
+                return_value="",
+            ),
+        ):
+            run_operator_job(job_id, self.session_factory)
+
+        self.assertEqual(captured["mode_key"], "tracking")
+        self.assertEqual(captured["env"][CANCEL_FLAG_ENV], str(flag_path))
+
     def test_operator_handler_rejects_unregistered_job_type(self) -> None:
         job_id = self.add_job(job_type="operator_unknown")
         with self.assertRaisesRegex(Exception, "没有登记"):
@@ -750,9 +833,15 @@ class JobApiTests(JobTestCase):
         self.assertEqual(self.post(f"/api/jobs/{job_id}/cancel").status_code, 409)
 
     def test_running_job_sets_cooperative_cancellation_flag(self) -> None:
-        job_id = self.add_job(status="running")
+        job_id = self.add_job(job_type="shipment_sync", status="running")
         try:
-            response = self.post(f"/api/jobs/{job_id}/cancel")
+            with patch(
+                "assistant.jobs.locks.runtime_dir",
+                return_value=self.root,
+            ):
+                response = self.post(f"/api/jobs/{job_id}/cancel")
+                flag_path = self.root / "cancel-flags" / f"{job_id}.flag"
+                self.assertTrue(flag_path.is_file())
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "cancellation-requested")
             self.assertTrue(is_cancellation_requested(job_id))
@@ -796,8 +885,47 @@ class JobApiTests(JobTestCase):
         job_id = self.add_job(job_type="auto_approval_execute", status="running")
         response = self.post(f"/api/jobs/{job_id}/cancel")
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["detail"], "operator-job-not-cancellable")
+        self.assertEqual(
+            response.json()["detail"], "job-not-cancellable-while-running"
+        )
         self.assertFalse(is_cancellation_requested(job_id))
+
+    def test_running_tracking_job_can_be_cancelled_at_row_checkpoints(self) -> None:
+        """物流任务运行中可取消：写哨兵文件，子进程处理完当前行后停。"""
+        job_id = self.add_job(job_type="operator_tracking", status="running")
+        try:
+            with patch(
+                "assistant.jobs.locks.runtime_dir",
+                return_value=self.root,
+            ):
+                response = self.post(f"/api/jobs/{job_id}/cancel")
+                flag_path = self.root / "cancel-flags" / f"{job_id}.flag"
+                self.assertTrue(flag_path.is_file())
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "cancellation-requested")
+            job = self.get_job(job_id)
+            self.assertEqual(job.progress_message, "已请求取消：当前这一条处理完就停")
+            payload = self.client.get(f"/api/jobs/{job_id}").json()
+            self.assertTrue(payload["can_cancel"])
+        finally:
+            clear_cancellation(job_id)
+
+    def test_running_send_job_cannot_be_cancelled(self) -> None:
+        """单条私信一次成型，没有整行检查点：运行中不给取消。"""
+        job_id = self.add_job(job_type="operator_followup_send", status="running")
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"], "job-not-cancellable-while-running"
+        )
+        self.assertFalse(is_cancellation_requested(job_id))
+
+    def test_finished_tracking_job_is_not_cancellable(self) -> None:
+        job_id = self.add_job(job_type="operator_tracking", status="succeeded")
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 409)
+        payload = self.client.get(f"/api/jobs/{job_id}").json()
+        self.assertFalse(payload["can_cancel"])
 
     def test_preview_handler_stops_process_when_cancelled(self) -> None:
         from assistant.jobs.handlers.auto_approval import run_auto_approval_job
@@ -882,15 +1010,24 @@ class JobApiTests(JobTestCase):
         job_id = self.add_job(job_type="operator_pipeline", status="running")
         response = self.post(f"/api/jobs/{job_id}/cancel")
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["detail"], "operator-job-not-cancellable")
+        self.assertEqual(
+            response.json()["detail"], "job-not-cancellable-while-running"
+        )
         self.assertFalse(is_cancellation_requested(job_id))
 
         detail_response = self.client.get(f"/jobs/{job_id}")
         self.assertEqual(detail_response.status_code, 200)
         self.assertNotIn("取消这项任务", detail_response.text)
 
+    def test_pending_operator_job_can_still_be_cancelled(self) -> None:
+        """还没开始的任务取消没有副作用：任何类型都允许。"""
+        job_id = self.add_job(job_type="operator_pipeline", status="pending")
+        response = self.post(f"/api/jobs/{job_id}/cancel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.get_job(job_id).status, "cancelled")
+
     def test_pending_cancel_cannot_overwrite_worker_claim(self) -> None:
-        job_id = self.add_job()
+        job_id = self.add_job(job_type="shipment_sync")
         cancel_update_barrier = threading.Barrier(2)
         cancel_update_reached = threading.Event()
         worker_claimed = threading.Event()
@@ -1002,9 +1139,11 @@ class JobApiTests(JobTestCase):
                 "id", "job_type", "status", "store_id",
                 "progress_current", "progress_total", "progress_message",
                 "error_code", "error_summary", "result_summary",
-                "created_at", "finished_at", "log_path",
+                "created_at", "finished_at", "log_path", "can_cancel",
             },
         )
+        # 排队中还没开始：任何任务都可以直接取消。
+        self.assertTrue(payload["can_cancel"])
 
     def test_stores_use_cache_while_ziniao_job_is_running(self) -> None:
         with self.session_factory() as session:

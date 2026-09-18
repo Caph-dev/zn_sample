@@ -1,9 +1,10 @@
 """自动审批任务 handler：固定 argv 子进程，不执行网页 shell 字符串。
 
-三种任务类型：
-- auto_approval_preview   只读自定义筛查（预览）
-- auto_approval_execute   限量批准 + 可选写飞书（服务端已确认 + 幂等）
-- auto_approval_reconcile 核对补写（不重新批准）
+四种任务类型：
+- auto_approval_preview          只读自定义筛查（预览）
+- auto_approval_execute          限量批准 + 可选写飞书（服务端已确认 + 幂等）
+- auto_approval_reconcile        核对补写（不重新批准）
+- auto_approval_order_backfill   近窗缺「订单号」行 → 平台待发货订单号（只写订单号列）
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ JOB_TYPE_TO_MODE = {
     "auto_approval_preview": "preview",
     "auto_approval_execute": "execute",
     "auto_approval_reconcile": "reconcile",
+    "auto_approval_order_backfill": "order-backfill",
 }
 
 PROGRESS_POLL_SECONDS = 2.0
@@ -59,12 +61,11 @@ def _load_request(session_factory, job_id: str) -> tuple[str, dict]:
 
 def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
     """组装固定 argv；只接受服务端写入的绝对路径与整数开关。"""
-    rules_path = str(request_payload.get("rules_path") or "").strip()
     result_path = str(request_payload.get("result_path") or "").strip()
-    if not rules_path or not result_path:
+    if not result_path:
         raise HandlerFailure(
             "auto-approval-request-invalid",
-            "自动审批任务缺少规则或结果路径，已拒绝执行。",
+            "自动审批任务缺少结果路径，已拒绝执行。",
         )
     store_id = str(request_payload.get("store_id") or "").strip()
     if not store_id:
@@ -77,8 +78,6 @@ def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
         str(AUTO_APPROVAL_SCRIPT),
         "--mode",
         mode,
-        "--rules",
-        rules_path,
         "--store-id",
         store_id,
         "--out",
@@ -87,6 +86,15 @@ def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
         "--max-pages",
         "50",
     ]
+    if mode != "order-backfill":
+        # 订单号补写不读自定义规则，也不需要预览信封；其余三种模式必须带规则快照。
+        rules_path = str(request_payload.get("rules_path") or "").strip()
+        if not rules_path:
+            raise HandlerFailure(
+                "auto-approval-request-invalid",
+                "自动审批任务缺少规则路径，已拒绝执行。",
+            )
+        argv += ["--rules", rules_path]
     if mode == "preview":
         preview_id = str(request_payload.get("preview_id") or "")
         if not preview_id:
@@ -135,6 +143,15 @@ def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
             str(request_payload["execution_id"]),
             "--limit",
             str(int(request_payload.get("limit") or 1)),
+            "--write-feishu",
+            "1" if bool(request_payload.get("write_feishu")) else "0",
+        ]
+        if request_payload.get("write_feishu"):
+            argv.append("--yes")
+    elif mode == "order-backfill":
+        argv += [
+            "--limit",
+            str(max(0, int(request_payload.get("limit") or 0))),
             "--write-feishu",
             "1" if bool(request_payload.get("write_feishu")) else "0",
         ]

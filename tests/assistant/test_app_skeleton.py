@@ -158,7 +158,8 @@ class ApplicationSkeletonTests(unittest.TestCase):
         self.assertIn("assistant:monitor-job", app_js)
         self.assertIn("useGlobalPanel: true", app_js)
         self.assertIn("existingMonitor", app_js)
-        self.assertIn("writeJobTypes", app_js)
+        # 取消按钮是否出现由服务端 can_cancel 决定，前端不再硬编码写任务集合。
+        self.assertIn("job.can_cancel", app_js)
 
     def _auto_approval_bootstrap(self, response) -> dict:
         import json

@@ -23,6 +23,7 @@
     auto_approval_preview: "自动审批 · 只读筛查",
     auto_approval_execute: "自动审批 · 执行批准",
     auto_approval_reconcile: "自动审批 · 补写核对",
+    auto_approval_order_backfill: "自动审批 · 补写订单号",
   };
 
   const operatorJobTypes = new Set([
@@ -30,13 +31,6 @@
     "operator_screen",
     "operator_pipeline",
     "operator_tracking",
-  ]);
-
-  const writeJobTypes = new Set([
-    "operator_pipeline",
-    "operator_tracking",
-    "auto_approval_execute",
-    "auto_approval_reconcile",
   ]);
 
   const statusLabels = {
@@ -327,6 +321,27 @@
     );
     target.append(heading);
 
+    if (job.status === "cancelled") {
+      // 检查点取消不是失败：已经处理的那些行是真的处理完了，要如实显示。
+      const cancelledResult = parseResultSummary(job);
+      const cancelledEntries = getResultEntries(job, cancelledResult);
+      if (cancelledEntries.length > 0) {
+        const cancelledList = createElement("dl", "result-list");
+        for (const [label, value] of cancelledEntries) {
+          appendMetadataRow(cancelledList, label, value);
+        }
+        target.append(cancelledList);
+      } else {
+        target.append(
+          createElement("p", "task-error", "任务已在安全检查点取消。"),
+        );
+      }
+      if (job.log_path) {
+        target.append(createElement("small", "text-secondary", `任务日志：${job.log_path}`));
+      }
+      return;
+    }
+
     if (job.status !== "succeeded") {
       target.append(
         createElement(
@@ -451,10 +466,9 @@
       status.replaceChildren(createStatusToken(job.status));
     }
     if (cancelForm && cancelButton) {
-      const cancellable =
-        !terminalStatuses.has(job.status)
-        && !operatorJobTypes.has(job.job_type)
-        && !writeJobTypes.has(job.job_type);
+      // 服务端给结论：只有登记了安全检查点的任务才显示取消
+      // （写任务里物流任务可以在整行边界停下，平台批准 / 私信不在列）。
+      const cancellable = job.can_cancel === true;
       if (cancellable) {
         cancelForm.action = `/api/jobs/${encodeURIComponent(job.id)}/cancel`;
         cancelForm.dataset.jobId = job.id;

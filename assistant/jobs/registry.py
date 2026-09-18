@@ -22,6 +22,7 @@ ZINIAO_JOB_TYPES = frozenset(
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
+        "auto_approval_order_backfill",
     }
 )
 REGISTERED_JOB_TYPES = frozenset(
@@ -41,6 +42,7 @@ REGISTERED_JOB_TYPES = frozenset(
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
+        "auto_approval_order_backfill",
     }
 )
 # 运行中不可取消的任务：写操作不可撤销，且占用紫鸟通道。
@@ -51,8 +53,36 @@ WRITE_JOB_TYPES = frozenset(
         "operator_followup_send",
         "auto_approval_execute",
         "auto_approval_reconcile",
+        "auto_approval_order_backfill",
     }
 )
+# 运行中可以在安全检查点停下的任务。写任务里只有「停止点落在整行边界」的
+# operator_tracking 在列；平台同意、发私信、写飞书这类一次成型的动作不在列。
+COOPERATIVE_CANCEL_JOB_TYPES = frozenset(
+    {
+        "shipment_sync",
+        "daily_refresh",
+        "followup_generate",
+        "content_thanks_preview",
+        "creator_enrich",
+        "operator_tracking",
+        "auto_approval_preview",
+    }
+)
+
+
+def can_request_cancellation(job_type: str, status: str) -> bool:
+    """Whether the cancel endpoint should accept this job right now.
+
+    ``pending`` means nothing has happened yet, so any type can be cancelled.
+    A running job may only be asked to stop when its handler (or its child
+    process) has a safe checkpoint to stop at.
+    """
+    if status == "pending":
+        return True
+    if status != "running":
+        return False
+    return job_type in COOPERATIVE_CANCEL_JOB_TYPES
 
 
 class HandlerFailure(RuntimeError):
@@ -110,6 +140,7 @@ def get_handler(job_type: str) -> JobHandler | None:
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
+        "auto_approval_order_backfill",
     }:
         from assistant.jobs.handlers.auto_approval import run_auto_approval_job
         return run_auto_approval_job

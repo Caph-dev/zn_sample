@@ -17,8 +17,8 @@ import {
 } from './api';
 import {ExecutionPanel} from './components/ExecutionPanel';
 import {AppNavigation} from './components/AppNavigation';
+import {OrderBackfillPanel} from './components/OrderBackfillPanel';
 import {ReadinessPanel} from './components/ReadinessPanel';
-import {ReconciliationPanel} from './components/ReconciliationPanel';
 import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
@@ -79,7 +79,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [limit, setLimit] = useState(loadBrowserExecutionLimit);
   const [writeFeishu, setWriteFeishu] = useState(true);
   const [confirmText, setConfirmText] = useState('');
-  const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
   const [storeSummary, setStoreSummary] = useState<StoreSummary | null>(null);
 
   const updateExecutionLimit = useCallback((nextLimit: number) => {
@@ -300,7 +299,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
         idempotency_key: idempotencyKey,
       });
       notifyJobMonitor(created.job_id);
-      setCurrentExecutionId(created.execution_id);
       setExecution(await getExecution(created.execution_id));
       setConfirmText('');
     } catch (error) {
@@ -320,7 +318,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           .then((payload) => {
             if (payload !== null) {
               setExecution(payload);
-              setCurrentExecutionId(payload.execution_id);
             }
           })
           .catch(() => {});
@@ -400,7 +397,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           executionError={executionError}
           execution={execution}
         />
-        <ReconciliationPanel currentExecutionId={currentExecutionId} />
+        <OrderBackfillPanel storeId={storeSummary?.store?.storeId ?? null} />
       </Stack>
     </AppShell>
   );

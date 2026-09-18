@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from .zclaw import zclaw_exec
+
+logger = logging.getLogger(__name__)
 
 NEW_MESSAGE_CONFIRM_TIMEOUT_SECONDS = 15.0
 NEW_MESSAGE_CONFIRM_POLL_INTERVAL_SECONDS = 0.75
@@ -1020,6 +1023,21 @@ def _try_open_via_new_message(
     )
     if not isinstance(filled, dict) or not filled.get("ok"):
         return {"ok": False, "error": "发送给输入失败", "fill": filled}
+    # 回读输入框：平台的搜索框是受控组件，若这次没写进去（残留上一位达人、
+    # 或把内部数字 ID 拼在了一起），点结果行就可能开错会话；这里失败即拒开。
+    filled_value = str(filled.get("value") or "").strip()
+    if filled_value != name:
+        logger.warning(
+            "新消息搜索框内容与达人 ID 不一致：期望=%r 实际=%r",
+            name,
+            filled_value,
+        )
+        return {
+            "ok": False,
+            "error": "搜索框内容与达人 ID 不一致",
+            "expected_key": name,
+            "fill": filled,
+        }
     time.sleep(max(1.0, wait))
     clicked = _click_new_message_result(store_id, name)
     if not clicked.get("ok"):
@@ -1075,13 +1093,15 @@ def open_conversation_via_new_message(
     当前页面必须已经是样品申请页；不打开详情消息弹层、不跳转到
     ``/seller/im``、不点「聊天数」里的最近联系人。
 
-    优先用 creator_id 搜索；平台搜索不接受数字 ID 时，再在同一个「新消息」
-    抽屉里用 creator_name 搜索。无论使用哪个关键词，点击后都必须在当前
-    输入框的 React 身份或选中卡里确认命中目标达人。
+    搜索键优先用业务上的达人 ID（``creator_name``，即平台上的 handle，
+    如 ``prettybalanced_``）；``creator_id`` 是内部数字 ID，搜出来的是
+    一大串数字、平台不稳定接受，只在没有 handle 或 handle 搜不到时兜底。
+    无论使用哪个关键词，点击后都必须在当前输入框的 React 身份或选中卡里
+    确认命中目标达人。
     """
     creator_id = str(creator_id or "").strip()
     creator_name = str(creator_name or "").strip()
-    candidates = list(dict.fromkeys(key for key in (creator_id, creator_name) if key))
+    candidates = list(dict.fromkeys(key for key in (creator_name, creator_id) if key))
     name = creator_name
     if not candidates:
         return {"ok": False, "error": "empty-creator"}
@@ -1096,6 +1116,7 @@ def open_conversation_via_new_message(
         }
     failures: list[dict[str, Any]] = []
     for candidate in candidates:
+        logger.info("新消息搜索：输入 %r 打开会话", candidate)
         attempt = _try_open_via_new_message(
             store_id,
             candidate,
@@ -1106,9 +1127,13 @@ def open_conversation_via_new_message(
         if attempt.get("ok"):
             return attempt
         failures.append({"key": candidate, "detail": attempt})
-        # 面板/抽屉都打不开时，换关键词也无济于事；只有「搜不到/没点中」
-        # 这类关键词相关失败才换下一个候选。
-        if attempt.get("error") in {"无法打开聊天数面板", "无法打开新消息抽屉"}:
+        # 面板/抽屉都打不开、或搜索框没吃进这个关键词时，换关键词也无济于事：
+        # 后者再试就会把内部数字 ID 填进搜索框，直接失败转人工更安全。
+        if attempt.get("error") in {
+            "无法打开聊天数面板",
+            "无法打开新消息抽屉",
+            "搜索框内容与达人 ID 不一致",
+        }:
             break
     return {"ok": False, "error": "新消息路径未找到会话", "attempts": failures}
 

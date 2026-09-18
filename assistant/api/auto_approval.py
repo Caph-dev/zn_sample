@@ -204,6 +204,41 @@ async def reconcile_execution(execution_id: str, request: Request) -> dict:
         raise _service_error_to_http(error) from error
 
 
+@router.get("/api/auto-approval/order-backfill/candidates")
+def order_backfill_candidates(request: Request) -> dict:
+    """只读：按固定规则扫飞书近期缺「订单号」的行（不读平台、不写）。"""
+    from assistant.services import order_backfill
+
+    try:
+        return order_backfill.candidates_payload()
+    except AutoApprovalServiceError as error:
+        raise _service_error_to_http(error) from error
+
+
+@router.get("/api/auto-approval/order-backfill")
+def order_backfill_state(request: Request) -> dict:
+    from assistant.services import order_backfill
+
+    return order_backfill.state_payload(_session_factory(request))
+
+
+@router.post("/api/auto-approval/order-backfill")
+async def create_order_backfill(request: Request) -> dict:
+    from assistant.services import order_backfill
+
+    session_factory = _session_factory(request)
+    body = await _json_body(request)
+    try:
+        return order_backfill.create_order_backfill(
+            session_factory,
+            store_id=_store_for_request(request, body.get("store_id")),
+            limit=body.get("limit"),
+            confirmation=str(body.get("confirmation") or ""),
+        )
+    except AutoApprovalServiceError as error:
+        raise _service_error_to_http(error) from error
+
+
 @router.get("/api/auto-approval/recent")
 def list_recent(request: Request) -> dict:
     """最近预览与执行批次（页面刷新后恢复上下文用）。"""

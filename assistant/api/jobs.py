@@ -10,9 +10,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 
 from assistant.database.models import FollowupTask, Job
-from assistant.jobs.locks import create_or_get_pending_job, request_cancellation
+from assistant.jobs.locks import (
+    create_or_get_pending_job,
+    request_cancellation,
+    write_cancel_flag,
+)
 from assistant.jobs.progress import list_events
-from assistant.jobs.registry import WRITE_JOB_TYPES
+from assistant.jobs.registry import can_request_cancellation
 
 
 router = APIRouter()
@@ -52,6 +56,7 @@ def _job_payload(job: Job) -> dict:
         "log_path": job.log_path or "",
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "can_cancel": can_request_cancellation(job.job_type, job.status),
     }
 
 
@@ -253,13 +258,19 @@ def cancel_job(job_id: str, request: Request) -> dict:
         if job is None:
             raise HTTPException(status_code=404, detail="job-not-found")
         if job.status == "running":
-            if job.job_type in OPERATOR_JOB_TYPES or job.job_type in WRITE_JOB_TYPES:
+            if not can_request_cancellation(job.job_type, job.status):
                 raise HTTPException(
                     status_code=409,
-                    detail="operator-job-not-cancellable",
+                    detail="job-not-cancellable-while-running",
                 )
+            # 只登记「请停」：handler / 子进程会在安检点自己停，不在写入中间杀进程。
             request_cancellation(job_id)
-            job.progress_message = "已请求取消，将在安全检查点停止"
+            write_cancel_flag(job_id)
+            job.progress_message = (
+                "已请求取消：当前这一条处理完就停"
+                if job.job_type == "operator_tracking"
+                else "已请求取消，将在安全检查点停止"
+            )
             session.commit()
             return {"job_id": job_id, "status": "cancellation-requested"}
         raise HTTPException(status_code=409, detail="job-not-cancellable")

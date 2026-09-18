@@ -51,6 +51,7 @@ from lib.feishu_bitable import (  # noqa: E402
 )
 from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
 from lib.im_api import send_direct_message  # noqa: E402
+from lib.job_cancel import EXIT_CODE_CANCELLED, cancellation_requested  # noqa: E402
 from lib.message_templates import looks_like_tracking, tracking_message  # noqa: E402
 from lib.order_dom import fetch_tiktok_tracking  # noqa: E402
 from lib.order_api import fetch_tiktok_tracking_api  # noqa: E402
@@ -355,10 +356,20 @@ def main() -> int:
     limit = 0 if unlimited_send else args.execute_limit
     sent = 0
     written = 0
+    cancelled = False
     results: list[dict[str, Any]] = []
     total_rows = len(rows)
 
     for index, row in enumerate(rows, 1):
+        # 安全检查点：网页取消只在这里生效——当前行必须整行处理完，
+        # 已写入飞书、已发出的私信都保留，绝不从一次写入的中间停下。
+        if cancellation_requested():
+            cancelled = True
+            logger.info(
+                f"  [{index}/{total_rows}] 已请求取消：这一行起不再处理，"
+                f"已完成 {len(results)} 行；已写入的飞书行和已发私信保留。"
+            )
+            break
         name = str(row.get("creator_name") or "")
         order_id = str(row.get("main_order_id") or "").strip()
         seq = f"[{index}/{total_rows}]"
@@ -530,11 +541,20 @@ def main() -> int:
     for key, path in paths.items():
         logger.info(f"  {key}: {path}")
     logger.info(f"完成 rows={len(results)} 飞书写入={written} 私信发送={sent}")
+    if cancelled:
+        logger.info(
+            f"已请求取消：在安全检查点停下，已处理 {len(results)}/{total_rows} 行；"
+            "已写入的飞书行和已发私信保留，剩余行没有处理。"
+        )
     sending = bool(args.send_tracking and args.execute)
     logger.info(
         "\n"
         + format_job_summary(
-            title="「获取物流信息写飞书发单号」完成",
+            title=(
+                "「获取物流信息写飞书发单号」已在安全检查点取消"
+                if cancelled
+                else "「获取物流信息写飞书发单号」完成"
+            ),
             stats=[
                 f"飞书写入 : {written}",
                 f"私信发送 : {sent}",
@@ -545,9 +565,13 @@ def main() -> int:
             json_path=paths.get("json"),
             xlsx_path=paths.get("xlsx"),
             root=ROOT,
-            hint="请看报表里的飞书状态和私信发送结果。",
+            hint=(
+                "已取消：已写入的飞书行和已发私信保留，下次再跑会接着处理剩余行。"
+                if cancelled
+                else "请看报表里的飞书状态和私信发送结果。"
+            ),
         ))
-    return 0
+    return EXIT_CODE_CANCELLED if cancelled else 0
 
 
 if __name__ == "__main__":

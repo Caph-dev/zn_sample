@@ -180,21 +180,6 @@ export interface ExecutionPayload {
   reconciliation?: ExecutionReconciliation;
 }
 
-export interface ExecutionSummary {
-  execution_id: string;
-  preview_id: string;
-  store_id: string;
-  status: string;
-  write_feishu: boolean;
-  created_at: string;
-  finished_at: string | null;
-}
-
-export interface ExecutionHistoryPayload {
-  executions: ExecutionSummary[];
-  has_more: boolean;
-}
-
 export interface ReconciliationItem extends Record<string, unknown> {
   apply_id: string;
   creator_name: string;
@@ -226,6 +211,74 @@ export interface ExecutionReconciliation {
   repair_blocked_reason: string;
   latest_job: JobPayload | null;
   report: ReconciliationReport | null;
+}
+
+/** 「订单号补写」：飞书近窗缺单号的行（只读扫描结果）。 */
+export interface OrderBackfillCandidate extends Record<string, unknown> {
+  record_id: string;
+  creator_handle: string;
+  sample_product: string;
+  cooperation_status: string;
+  created_ms: number;
+  created_at: string;
+}
+
+export interface OrderBackfillCandidatesPayload {
+  person: string;
+  lookback_hours: number;
+  limit_default: number;
+  scanned_at: string;
+  total: number;
+  rows: OrderBackfillCandidate[];
+}
+
+export interface OrderBackfillItem extends Record<string, unknown> {
+  record_id: string;
+  creator_handle: string;
+  sample_product: string;
+  cooperation_status?: string;
+  created_at?: string;
+  status: string;
+  order_no?: string;
+  apply_id?: string;
+  platform_tab?: string;
+  platform_tabs?: string[];
+  current_order?: string;
+  detail?: string;
+}
+
+export interface OrderBackfillReport {
+  checked_at: string;
+  store_id: string;
+  person: string;
+  lookback_hours: number;
+  write_feishu: boolean;
+  platform_rows: number;
+  search_errors: string[];
+  counts: Record<string, number>;
+  items: OrderBackfillItem[];
+}
+
+export interface OrderBackfillJobPayload {
+  job_id?: string;
+  status?: string;
+  store_id?: string;
+  progress_message?: string;
+  error_code?: string;
+  error_summary?: string;
+  log_path?: string;
+  created_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface OrderBackfillStatePayload {
+  person: string;
+  lookback_hours: number;
+  limit_default: number;
+  available: boolean;
+  blocked_reason: string;
+  latest_job: OrderBackfillJobPayload;
+  report: OrderBackfillReport | null;
 }
 
 export interface StoreSummary {

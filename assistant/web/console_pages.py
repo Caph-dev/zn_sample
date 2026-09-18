@@ -59,6 +59,7 @@ JOB_TYPE_LABELS = {
     "auto_approval_preview": "自动审批 · 只读筛查",
     "auto_approval_execute": "自动审批 · 执行批准",
     "auto_approval_reconcile": "自动审批 · 补写核对",
+    "auto_approval_order_backfill": "自动审批 · 补写订单号",
 }
 
 JOB_STATUS_LABELS = {

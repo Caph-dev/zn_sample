@@ -295,6 +295,29 @@ def scrape_shipped_list_api(
     )
 
 
+def scrape_ready_to_ship_list_api(
+    store_id: str,
+    *,
+    max_pages: int = 50,
+    max_rows: int = 0,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    request_json: Callable[..., dict[str, Any]] = post_read_json,
+    context: AffiliatePageContext | None = None,
+) -> list[dict[str, Any]]:
+    """通过样品列表 API 读取「待发货」申请，保留订单号字段。"""
+    resolved_context = context or get_affiliate_page_context(store_id)
+    return scrape_pending_list_api(
+        store_id,
+        max_pages=max_pages,
+        max_rows=max_rows,
+        page_size=page_size,
+        ensure_page=False,
+        request_json=request_json,
+        context=resolved_context,
+        tab=READY_TO_SHIP_TAB,
+    )
+
+
 def scrape_processing_list_api(store_id: str, **kwargs) -> list[dict[str, Any]]:
     """只读免费样品「处理中」列表，禁止触发待审核页导航。"""
     kwargs.setdefault("ensure_page", False)
