@@ -50,6 +50,8 @@ from screen_sample_requests import (  # noqa: E402
     PLATFORM_CONFIRMATION_FIELD,
     _reject_if_not_exact_hero,
     _run_confirm_pipeline,
+    _set_feishu_relation_status,
+    _set_platform_confirmation_status,
     _write_backup,
     decide_api_approval_outcome,
 )

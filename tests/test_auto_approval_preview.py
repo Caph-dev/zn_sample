@@ -144,6 +144,103 @@ class ExecuteSkuRecheckTests(unittest.TestCase):
                 self.assertEqual(result["items"][0]["action"], "skipped-b005-sku")
 
 
+class ExecuteCheckpointTests(unittest.TestCase):
+    def test_accepted_approval_persists_platform_and_feishu_checkpoints(self) -> None:
+        rules_payload = {
+            **RULE_PAYLOAD,
+            "basic": {"fulfillment": {"enabled": True, "min": 85}},
+            "video_live": {"enabled": False},
+        }
+        rule = auto_approval.validate_custom_rule(
+            rules_payload, allowed_product_ids={HERO_PRODUCT_ID},
+        )
+        row = auto_approval.enrich_row(_pending_rows(1)[0])
+        evaluation = auto_approval.evaluate_custom_row(
+            row, rule, hero_keys={HERO_PRODUCT_ID},
+            allowed_product_ids={HERO_PRODUCT_ID},
+        )
+        row.update(
+            custom_eligible=True, custom_overall="passed",
+            custom_checks=evaluation["checks"],
+        )
+        preview = {
+            "schema_version": 1,
+            "mode": "custom",
+            "store_id": "store-test",
+            "rule": rule.to_dict(),
+            "rule_hash": auto_approval.rule_hash(rule),
+            "integrity_complete": True,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "allowed_product_ids": [HERO_PRODUCT_ID],
+            "rows": [row],
+        }
+        scenarios = (
+            (False, {"record_id": "record-test"}, None, "not-requested"),
+            (True, {"record_id": "record-test"}, None, "created"),
+            (True, {}, None, "write-uncertain"),
+            (True, {}, auto_approval.FeishuBitableError("timeout"), "write-uncertain"),
+        )
+        for write_enabled, create_result, create_error, expected_status in scenarios:
+            with self.subTest(write=write_enabled, status=expected_status, error=create_error):
+                with tempfile.TemporaryDirectory() as directory:
+                    temporary_root = Path(directory)
+                    rules_path = temporary_root / "rules.json"
+                    preview_path = temporary_root / "preview.json"
+                    apply_ids_path = temporary_root / "apply_ids.json"
+                    for file_path, payload in (
+                        (rules_path, rules_payload),
+                        (preview_path, preview),
+                        (apply_ids_path, [row["apply_id"]]),
+                    ):
+                        file_path.write_text(json.dumps(payload), encoding="utf-8")
+                    args = Namespace(
+                        yes=True, limit=1, store_id="store-test",
+                        rules=rules_path, preview=preview_path,
+                        apply_ids=apply_ids_path, from_seller_home=False,
+                        config=None, write_feishu=write_enabled,
+                        backup_out=temporary_root / "backup",
+                        out=temporary_root / "result.json",
+                        execution_id="execution-test", preview_id="preview-test",
+                    )
+                    # Keep real validation, status setters and export persistence;
+                    # replace every external read/write with an offline stub.
+                    with (
+                        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+                        patch("lib.app_config.load_bitable_settings", return_value={}),
+                        patch.object(auto_approval, "get_bitable_access_token", return_value="test-token"),
+                        patch.object(auto_approval, "list_sample_product_options", return_value=["B005"]),
+                        patch.object(auto_approval, "resolve_duplicate_record", return_value={"status": "no-match"}),
+                        patch.object(auto_approval, "check_pending_application_api", return_value={
+                            "ok": True, "state": "pending-approvable", "sku_desc": "3PCS,M",
+                        }),
+                        patch("lib.zclaw.ensure_store_exec_ready"),
+                        patch.object(auto_approval, "approve_application_api", return_value={"ok": True}) as approve,
+                        patch.object(
+                            auto_approval, "create_creator_relation_record",
+                            return_value=create_result, side_effect=create_error,
+                        ) as create_relation,
+                        patch.object(auto_approval.time, "sleep"),
+                    ):
+                        self.assertEqual(auto_approval._run_execute(args), 0)
+                    approve.assert_called_once()
+                    self.assertEqual(create_relation.call_count, int(write_enabled))
+                    result = json.loads(args.out.read_text(encoding="utf-8"))
+                    item = result["items"][0]
+                    self.assertEqual(item["approve_status"], "approved")
+                    self.assertEqual(item["platform_confirmation_status"], "deferred")
+                    self.assertEqual(item["feishu_relation_status"], expected_status)
+                    self.assertEqual(
+                        item["feishu_record_id"],
+                        "record-test" if expected_status == "created" else "",
+                    )
+                    backup = json.loads(
+                        Path(result["backup_paths"]["json"]).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(backup[0]["approve_status"], "approved")
+                    self.assertEqual(backup[0]["platform_confirmation_status"], "deferred")
+                    self.assertEqual(backup[0]["feishu_relation_status"], expected_status)
+
+
 class ApplyIdsFileTests(unittest.TestCase):
     def test_rejects_invalid_arrays_and_malformed_json(self) -> None:
         invalid_contents = [
