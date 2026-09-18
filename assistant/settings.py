@@ -6,7 +6,7 @@ import os
 
 APP_NAME = "ZnSampleAssistant"
 BIND_HOST = "127.0.0.1"
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8766
 
 
 def preferred_port() -> int:
