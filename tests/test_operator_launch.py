@@ -754,6 +754,29 @@ class StubFileTests(unittest.TestCase):
             self.assertGreater(crlf, 0, path.name)
             self.assertEqual(lf_only, 0, path.name)
 
+    def test_console_cmd_launches_assistant_with_windows_paths(self) -> None:
+        data = (PROJECT_ROOT / "启动操作台.cmd").read_bytes()
+        self.assertTrue(
+            data.startswith(b"\xef\xbb\xbf"),
+            "启动操作台.cmd 须带 UTF-8 BOM，避免中文 echo 被 GBK 解析坏",
+        )
+        crlf = data.count(b"\r\n")
+        self.assertGreater(crlf, 0)
+        self.assertEqual(data.count(b"\n") - crlf, 0, "cmd.exe 读 .cmd 要 CRLF")
+
+        text = data.decode("utf-8-sig")
+        self.assertIn('cd /d "%~dp0"', text)
+        self.assertIn('%~dp0.venv\\Scripts\\python.exe', text)
+        self.assertIn('%~dp0scripts\\launch_assistant.py', text)
+        self.assertIn("chcp 65001", text)
+        self.assertIn("PYTHONUTF8=1", text)
+        self.assertIn("PYTHONIOENCODING=utf-8", text)
+        self.assertNotRegex(text, r"(?i)\bgoto\b")
+        self.assertNotIn("PATH=", text)
+
+        attributes = (PROJECT_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("*.cmd text eol=crlf", attributes)
+
     def test_run_launcher_bat_has_no_goto_or_labels(self) -> None:
         launcher = PROJECT_ROOT / "scripts" / "run_launcher.bat"
         text = launcher.read_text(encoding="utf-8-sig")

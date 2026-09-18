@@ -56,6 +56,8 @@ uv run python -m pytest tests -q
 python3 scripts/launch_assistant.py
 ```
 
+Windows 可双击仓库根目录的「启动操作台.cmd」，等价于 `python scripts\launch_assistant.py`；带参数时在 cmd 里运行，例如 `启动操作台.cmd --no-restart`。
+
 启动时会自动停止仍在运行的旧实例再启动，保证加载最新代码；运行中的网页写任务（打开店铺 / 物流写回）会阻止自动重启，避免中断平台写操作。旧实例存在时只想打开浏览器，用 `--no-restart`。
 
 操作台导航固定八项：**总览 / 运行准备 / 自动批准 / 达人跟进 / 物流 / 任务 / 报表 / 诊断**。包含两组能力：

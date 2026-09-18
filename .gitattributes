@@ -1,2 +1,3 @@
 # cmd.exe 读 .bat 要 CRLF。GitHub zip 仍可能是 LF，所以 launcher 也不写跳转标签。
 *.bat text eol=crlf
+*.cmd text eol=crlf
