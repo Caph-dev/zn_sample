@@ -96,6 +96,17 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def _load_apply_ids(path: Path) -> list[str]:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("apply-ids 文件必须是数组")
+    if any(not isinstance(apply_id, str) or not apply_id.strip() for apply_id in data):
+        raise ValueError("apply-ids 数组元素必须是非空字符串")
+    if len(data) != len(set(data)):
+        raise ValueError("apply-ids 数组不能包含重复申请")
+    return data
+
+
 def _load_hero(store_id: str, config_path: str | None) -> dict[str, Any]:
     """读取飞书主推表（与正式筛查同源）。"""
     try:
@@ -484,9 +495,10 @@ def _run_execute(args: argparse.Namespace) -> int:
     rows_by_apply = {
         str(row.get("apply_id") or ""): row for row in preview_rows
     }
-    selected_apply_ids = _load_json(args.apply_ids)
-    if not isinstance(selected_apply_ids, list):
-        logger.error("apply-ids 文件必须是数组")
+    try:
+        selected_apply_ids = _load_apply_ids(args.apply_ids)
+    except (OSError, ValueError) as error:
+        logger.error(f"读取申请 ID 列表失败: {error}")
         return 2
     missing = [apply_id for apply_id in selected_apply_ids if apply_id not in rows_by_apply]
     if missing:

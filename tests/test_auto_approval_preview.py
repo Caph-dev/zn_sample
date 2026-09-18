@@ -113,14 +113,22 @@ class ExecuteSkuRecheckTests(unittest.TestCase):
         }
         for live_description in ("6PCS,L", None, ""):
             with self.subTest(sku=live_description), tempfile.TemporaryDirectory() as directory:
+                rules_path = Path(directory) / "rules.json"
+                preview_path = Path(directory) / "preview.json"
+                apply_ids_path = Path(directory) / "apply_ids.json"
+                for path, payload in (
+                    (rules_path, rules_payload),
+                    (preview_path, preview),
+                    (apply_ids_path, [row["apply_id"]]),
+                ):
+                    path.write_text(json.dumps(payload), encoding="utf-8")
                 args = Namespace(
-                    yes=True, limit=1, store_id="store-test", rules="rules", preview="preview",
-                    apply_ids="ids", from_seller_home=False, config=None, write_feishu=False,
+                    yes=True, limit=1, store_id="store-test", rules=rules_path, preview=preview_path,
+                    apply_ids=apply_ids_path, from_seller_home=False, config=None, write_feishu=False,
                     backup_out=Path(directory) / "backup", out=Path(directory) / "result.json",
                     execution_id="execution-test", preview_id="preview-test",
                 )
                 with (
-                    patch.object(auto_approval, "_load_json", side_effect=[rules_payload, preview, [row["apply_id"]]]),
                     patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
                     patch.object(auto_approval, "check_pending_application_api", return_value={
                         "ok": True, "state": "pending-approvable", "sku_desc": live_description,
@@ -134,6 +142,28 @@ class ExecuteSkuRecheckTests(unittest.TestCase):
                 write_feishu.assert_not_called()
                 result = json.loads(args.out.read_text(encoding="utf-8"))
                 self.assertEqual(result["items"][0]["action"], "skipped-b005-sku")
+
+
+class ApplyIdsFileTests(unittest.TestCase):
+    def test_rejects_invalid_arrays_and_malformed_json(self) -> None:
+        invalid_contents = [
+            '{}', '"apply-1"', 'null', '[123]', '[null]', '[{}]',
+            '[""]', '[" "]', '["apply-1", "apply-1"]', '[',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "apply_ids.json"
+            for content in invalid_contents:
+                with self.subTest(content=content):
+                    path.write_text(content, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        auto_approval._load_apply_ids(path)
+
+    def test_object_loader_still_rejects_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.json"
+            path.write_text('["apply-1"]', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "JSON 不是对象"):
+                auto_approval._load_json(path)
 
 
 class PreviewFailFastTests(unittest.TestCase):
