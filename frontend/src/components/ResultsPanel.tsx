@@ -15,14 +15,18 @@ import {Text} from '@astryxdesign/core/Text';
 import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
+import type {ApprovalProgress} from '../executionProgress';
 import type {CandidateRow, PreviewPayload} from '../types';
 
-type FilterTab = 'all' | 'eligible' | 'needs_review' | 'failed' | 'blocked';
+type FilterTab = 'pending' | 'all' | 'eligible' | 'needs_review' | 'failed' | 'blocked';
 
 interface ResultsPanelProps {
   preview: PreviewPayload;
   selection: string[];
   onSelectionChange: (applyIds: string[]) => void;
+  approvalProgress: Map<string, ApprovalProgress>;
+  operationActive: boolean;
+  recordsReady: boolean;
   previewInvalidated: boolean;
   staleReason: string;
 }
@@ -84,11 +88,13 @@ export function ResultsPanel({
   preview,
   selection,
   onSelectionChange,
+  approvalProgress,
+  operationActive,
+  recordsReady,
   previewInvalidated,
   staleReason,
 }: ResultsPanelProps) {
-  // 筛查跑完默认只看符合项；待复核/不符合/拦截仍可切页签查看。
-  const [filter, setFilter] = useState<FilterTab>('eligible');
+  const [filter, setFilter] = useState<FilterTab>('pending');
   const [search, setSearch] = useState('');
   const [selectedApplyId, setSelectedApplyId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -98,6 +104,9 @@ export function ResultsPanel({
     const normalizedSearch = search.trim().toLowerCase();
     return preview.rows.filter((row) => {
       const overall = rowOverall(row);
+      if (filter === 'pending' && (overall !== 'eligible' || approvalProgress.has(row.apply_id))) {
+        return false;
+      }
       if (filter === 'eligible' && overall !== 'eligible') {
         return false;
       }
@@ -120,7 +129,7 @@ export function ResultsPanel({
       }
       return true;
     });
-  }, [preview.rows, filter, search]);
+  }, [preview.rows, filter, search, approvalProgress]);
 
   const selectedRow = useMemo(
     () => preview.rows.find((row) => row.apply_id === selectedApplyId) ?? null,
@@ -143,9 +152,13 @@ export function ResultsPanel({
 
   const stats = preview.stats;
   const canSelectRows = !previewInvalidated && preview.integrity_complete
-    && preview.status === 'completed' && preview.is_fresh;
+    && preview.status === 'completed' && preview.is_fresh && recordsReady && !operationActive;
   const isSelectable = (candidate: CandidateRow) =>
-    canSelectRows && candidate.custom_eligible && !candidate.blocked;
+    canSelectRows && candidate.custom_eligible && !candidate.blocked
+    && !approvalProgress.has(candidate.apply_id);
+  const pendingCount = preview.rows.filter((row) =>
+    row.custom_eligible && !row.blocked && !approvalProgress.has(row.apply_id),
+  ).length;
   const selectablePageIds = numberedRows.filter(isSelectable).map((row) => row.apply_id);
   const hasUnselectedPageRows = selectablePageIds.some((applyId) => !selection.includes(applyId));
 
@@ -156,6 +169,7 @@ export function ResultsPanel({
           <Heading level={2}>3 · 只读结果</Heading>
           <Badge label={`合计 ${stats?.rows ?? 0}`} />
           <Badge label={`符合 ${stats?.eligible ?? 0}`} />
+          <Badge label={`待处理 ${pendingCount}`} />
           <Badge label={`待复核 ${stats?.needs_review ?? 0}`} />
           <Badge label={`不符合 ${stats?.failed ?? 0}`} />
           <Badge label={`拦截 ${stats?.blocked ?? 0}`} />
@@ -172,7 +186,7 @@ export function ResultsPanel({
           <Banner
             status="warning"
             title="采集不完整"
-            description="部分详情或内容证据采集失败；完整性不足的批次不能用于执行批准。"
+            description="部分详情或内容证据采集失败；采集不完整的结果不能用于批准。"
           />
         )}
 
@@ -185,6 +199,7 @@ export function ResultsPanel({
             }}
             hasDivider
           >
+            <Tab value="pending" label="待处理" />
             <Tab value="all" label="全部" />
             <Tab value="eligible" label="符合" />
             <Tab value="needs_review" label="待复核" />
@@ -336,6 +351,20 @@ export function ResultsPanel({
                           <Text>{rowStatusLabel(candidate)}</Text>
                         </Stack>
                       );
+                    },
+                  },
+                  {
+                    key: 'approval_progress',
+                    header: '操作状态',
+                    width: pixel(105),
+                    renderCell: (row) => {
+                      const candidate = row as unknown as CandidateRow;
+                      const progress = approvalProgress.get(candidate.apply_id);
+                      const label = progress === 'processing' ? '处理中'
+                        : progress === 'approved' ? '已批准'
+                          : progress === 'needs_review' ? '待核对'
+                            : candidate.custom_eligible && !candidate.blocked ? '待处理' : '不可批准';
+                      return <Text>{label}</Text>;
                     },
                   },
                   {

@@ -273,7 +273,7 @@ export function OrderBackfillPanel({storeId}: {storeId: string | null}) {
             isLoading={submitting} onClick={() => void onSubmit()} />
         </Stack>
         <Text type="supporting">
-          不需要先跑只读核对，也不选批次：每次点击都按上面的规则重新扫描飞书。
+          不需要先跑只读核对；每次点击都按上面的规则重新扫描飞书。
           运行中不要重复点击；写任务不可取消。
         </Text>
         {actionError && <Banner status="warning" title="请先核实任务状态" description={actionError} />}

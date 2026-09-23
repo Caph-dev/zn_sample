@@ -22,6 +22,7 @@ from assistant.database.models import (
     AutoApprovalExecutionItem,
     AutoApprovalPreview,
     Base,
+    Job,
 )
 from assistant.services.auto_approval_service import (
     AutoApprovalServiceError,
@@ -121,6 +122,16 @@ class ExecutionBoundaryTests(unittest.TestCase):
         }
         payload.update(overrides)
         return create_execution(self.session_factory, **payload)
+
+    def _complete_job(self, execution_id: str, approve_status: str) -> None:
+        with self.session_factory() as session:
+            execution = session.get(AutoApprovalExecution, execution_id)
+            execution.status = "completed"
+            session.get(Job, execution.job_id).status = "completed"
+            session.query(AutoApprovalExecutionItem).filter_by(
+                execution_id=execution_id
+            ).one().approve_status = approve_status
+            session.commit()
 
     def test_confirmation_required(self) -> None:
         with self.assertRaises(AutoApprovalServiceError) as context:
@@ -223,6 +234,81 @@ class ExecutionBoundaryTests(unittest.TestCase):
         second = self._create()
         self.assertEqual(first["execution_id"], second["execution_id"])
         self.assertTrue(second["deduplicated"])
+
+    def test_same_preview_can_execute_different_applications_separately(self) -> None:
+        with self.session_factory() as session:
+            session.add(AutoApprovalCandidate(
+                preview_id="preview-1", apply_id="apply-2", creator_id="creator-2",
+                creator_name="another_creator", product_id=ALLOWED_PRODUCTS[0]["product_id"],
+                overall="passed", content_verdict="not_checked", custom_eligible=True,
+                metrics_json=json.dumps({"sku_desc": "3PCS (Best Seller),XL"}),
+                checks_json=json.dumps([evaluate_product_sku({
+                    "product_id": ALLOWED_PRODUCTS[0]["product_id"],
+                    "sku_desc": "3PCS (Best Seller),XL",
+                })]),
+            ))
+            session.commit()
+        first = self._create()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create(apply_ids=["apply-2"], idempotency_key="key-2")
+        self.assertEqual(context.exception.code, "approval-already-running")
+        self._complete_job(first["execution_id"], "approved")
+        second = self._create(apply_ids=["apply-2"], idempotency_key="key-2")
+        self.assertNotEqual(first["execution_id"], second["execution_id"])
+
+    def test_existing_application_requires_reconciliation_or_other_selection(self) -> None:
+        created = self._create()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create(idempotency_key="key-2")
+        self.assertEqual(context.exception.code, "approval-already-running")
+
+        for approve_status in ("approved", "unknown"):
+            self._complete_job(created["execution_id"], approve_status)
+            with self.assertRaises(AutoApprovalServiceError) as context:
+                self._create(idempotency_key=f"key-{approve_status}")
+            self.assertEqual(context.exception.code, "candidate-already-handled")
+
+    def test_failed_application_can_be_reselected(self) -> None:
+        created = self._create()
+        self._complete_job(created["execution_id"], "failed")
+        retried = self._create(idempotency_key="key-2")
+        self.assertNotEqual(created["execution_id"], retried["execution_id"])
+
+    def test_interrupted_operation_without_item_outcome_requires_review(self) -> None:
+        created = self._create()
+        with self.session_factory() as session:
+            session.get(AutoApprovalExecution, created["execution_id"]).status = "failed"
+            session.get(Job, created["job_id"]).status = "failed"
+            session.commit()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create(idempotency_key="key-2")
+        self.assertEqual(context.exception.code, "candidate-already-handled")
+
+    def test_approved_application_cannot_be_reselected_from_new_preview(self) -> None:
+        created = self._create()
+        self._complete_job(created["execution_id"], "approved")
+        with self.session_factory() as session:
+            session.add(AutoApprovalPreview(
+                id="preview-2", store_id="store-1", job_id="preview-job-2",
+                rule_json="{}", rule_hash="hash-1", status="completed",
+                integrity_complete=True, finished_at=datetime.now(timezone.utc),
+            ))
+            session.flush()
+            previous_candidate = session.query(AutoApprovalCandidate).filter_by(
+                preview_id="preview-1"
+            ).one()
+            session.add(AutoApprovalCandidate(
+                preview_id="preview-2", apply_id=previous_candidate.apply_id,
+                creator_id=previous_candidate.creator_id,
+                creator_name=previous_candidate.creator_name,
+                product_id=previous_candidate.product_id,
+                custom_eligible=True, metrics_json=previous_candidate.metrics_json,
+                checks_json=previous_candidate.checks_json,
+            ))
+            session.commit()
+        with self.assertRaises(AutoApprovalServiceError) as context:
+            self._create(preview_id="preview-2", idempotency_key="key-2")
+        self.assertEqual(context.exception.code, "candidate-already-handled")
 
     def test_successful_creation_persists_items(self) -> None:
         result = self._create()

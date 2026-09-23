@@ -180,6 +180,18 @@ export interface ExecutionPayload {
   reconciliation?: ExecutionReconciliation;
 }
 
+export interface ExecutionRecord {
+  execution_id: string;
+  preview_id: string;
+  status: string;
+  write_feishu: boolean;
+  created_at: string;
+  finished_at: string | null;
+  items: Pick<ExecutionItem,
+    'apply_id' | 'creator_name' | 'approve_status' | 'approve_error'
+    | 'feishu_relation_status' | 'feishu_error'>[];
+}
+
 export interface ReconciliationItem extends Record<string, unknown> {
   apply_id: string;
   creator_name: string;

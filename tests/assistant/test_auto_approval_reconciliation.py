@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from assistant.api.auto_approval import list_executions
 from assistant.database.engine import create_database_engine
-from assistant.database.models import AutoApprovalExecution, AutoApprovalPreview, Base, Job
+from assistant.database.models import AutoApprovalExecution, AutoApprovalExecutionItem, AutoApprovalPreview, Base, Job
 from assistant.jobs.handlers.auto_approval import _fixed_argv
 from assistant.services import auto_approval_reconciliation as reconciliation
 from assistant.services import auto_approval_service as approval
@@ -257,6 +257,32 @@ class ReconciliationServiceTests(unittest.TestCase):
         self.assertEqual([row["execution_id"] for row in second_page["executions"]], ["execution-2", "execution-1"])
         with self.session_factory() as session:
             self.assertEqual(len(session.scalars(select(Job)).all()), 1)
+
+    def test_preview_history_returns_only_matching_operations_and_item_outcomes(self):
+        with self.session_factory() as session:
+            session.add(AutoApprovalPreview(
+                id="preview-2", store_id="store-1", job_id="other-preview",
+                rule_json="{}", rule_hash="hash-1", status="completed",
+            ))
+            session.flush()
+            session.add(AutoApprovalExecutionItem(
+                execution_id="execution-1", apply_id="apply-1", creator_name="creator_test",
+                approve_status="unknown", approve_error="等待核对",
+            ))
+            session.add(AutoApprovalExecution(
+                id="execution-2", preview_id="preview-2", job_id="other-job",
+                idempotency_key="other-key", store_id="store-1", rule_hash="hash-1",
+                apply_ids_json='["apply-2"]', status="completed",
+            ))
+            session.commit()
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=self.session_factory)))
+        history = list_executions(request, offset=0, limit=20, preview_id="preview-1")
+        self.assertEqual(len(history["executions"]), 1)
+        self.assertEqual(history["executions"][0]["items"][0]["approve_status"], "unknown")
+        self.assertEqual(history["executions"][0]["items"][0]["approve_error"], "等待核对")
+        store_history = list_executions(request, offset=0, limit=20, store_id="store-1")
+        self.assertEqual(len(store_history["executions"]), 2)
+        self.assertTrue(all("items" in record for record in store_history["executions"]))
 
 
 class ReconciliationHandlerTests(unittest.TestCase):

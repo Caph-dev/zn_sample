@@ -10,6 +10,7 @@ import {
   getJobEvents,
   getOptions,
   getPreview,
+  getStoreExecutions,
   getRecent,
   getStorePreparation,
   saveRuleDraft,
@@ -23,12 +24,14 @@ import {ResultsPanel} from './components/ResultsPanel';
 import {RuleConfigPanel} from './components/RuleConfigPanel';
 import {StandardScreenPanel} from './components/StandardScreenPanel';
 import {buildExecutionIdempotencyKey} from './executionIdempotency';
+import {getApprovalProgress} from './executionProgress';
 import {isValidExecutionLimit, loadBrowserExecutionLimit, rememberBrowserExecutionLimit} from './executionLimitMemory';
 import {buildStandardRule, hasOutdatedSkuEvidence, normalizeRule, rulesEqual, validateDraft} from './ruleModel';
 import {loadBrowserRuleMemory, rememberBrowserRule} from './ruleMemory';
 import type {
   AutoApprovalBootstrap,
   ExecutionPayload,
+  ExecutionRecord,
   OptionsPayload,
   PreviewPayload,
   RuleDraft,
@@ -74,6 +77,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   const [previewError, setPreviewError] = useState('');
   const [selection, setSelection] = useState<string[]>([]);
   const [execution, setExecution] = useState<ExecutionPayload | null>(null);
+  const [executionRecords, setExecutionRecords] = useState<ExecutionRecord[] | null>(null);
   const [executing, setExecuting] = useState(false);
   const [executionError, setExecutionError] = useState('');
   const [limit, setLimit] = useState(loadBrowserExecutionLimit);
@@ -100,6 +104,13 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
     }
     return skuEvidenceOutdated || !rulesEqual(rule, preview.rule);
   }, [rule, preview, skuEvidenceOutdated]);
+  const approvalProgress = useMemo(
+    () => getApprovalProgress(executionRecords ?? []),
+    [executionRecords],
+  );
+  const operationActive = executing || isJobActive(execution?.job?.status) || executionRecords?.some(
+    (record) => record.status === 'queued' || record.status === 'running',
+  ) === true;
 
   const refreshStore = useCallback(() => {
     getStorePreparation()
@@ -129,7 +140,13 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       return;
     }
     try {
-      setExecution(await getExecution(execution.execution_id));
+      const payload = await getExecution(execution.execution_id);
+      setExecution(payload);
+      if (!isJobActive(payload.job?.status)) {
+        setExecutionRecords(null);
+        setExecutionRecords(await getStoreExecutions(payload.store_id));
+        setExecution(null);
+      }
     } catch {
       // 网络异常先查任务状态。
     }
@@ -152,9 +169,8 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       .catch((error) => setOptionsError(errorMessage(error)));
     refreshStore();
     getRecent()
-      .then(({previews, executions}) => {
+      .then(({previews}) => {
         const latestPreview = previews[0];
-        const latestExecution = executions[0];
         if (latestPreview !== undefined) {
           getPreview(latestPreview.preview_id)
             .then(async (payload) => {
@@ -169,11 +185,6 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
             })
             .catch(() => {});
         }
-        if (latestExecution !== undefined) {
-          getExecution(latestExecution.execution_id)
-            .then(setExecution)
-            .catch(() => {});
-        }
       })
       .catch(() => {});
     return () => {
@@ -182,6 +193,45 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       }
     };
   }, [refreshStore]);
+
+  useEffect(() => {
+    if (preview === null) {
+      return undefined;
+    }
+    let cancelled = false;
+    setExecutionRecords(null);
+    setExecution(null);
+    getStoreExecutions(preview.store_id)
+      .then((records) => {
+        if (cancelled) {
+          return;
+        }
+        setExecutionRecords(records);
+        const active = records.find((record) => record.status === 'queued' || record.status === 'running');
+        if (active !== undefined) {
+          getExecution(active.execution_id).then((payload) => {
+            if (!cancelled) {
+              setExecution(payload);
+            }
+          }).catch(() => {});
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setExecutionError('无法读取操作记录，请刷新页面后再选择。');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [preview?.preview_id]);
+
+  useEffect(() => {
+    if (executionRecords !== null) {
+      setSelection((current) => {
+        const remaining = current.filter((applyId) => !approvalProgress.has(applyId));
+        return remaining.length === current.length ? current : remaining;
+      });
+    }
+  }, [approvalProgress, executionRecords]);
 
   // 自定义规则改动后自动保存为草稿（仅保存校验通过的规则，供下次回填）。
   useEffect(() => {
@@ -204,10 +254,10 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
       window.clearInterval(previewPollTimer.current);
       previewPollTimer.current = null;
     }
-    if (preview !== null && isJobActive(preview.job?.status)) {
+    if (preview !== null && (isJobActive(preview.job?.status) || preview.status === 'completed')) {
       previewPollTimer.current = window.setInterval(() => {
         void pollPreview();
-      }, POLL_INTERVAL_MS);
+      }, isJobActive(preview.job?.status) ? POLL_INTERVAL_MS : 60000);
     }
     return () => {
       if (previewPollTimer.current !== null) {
@@ -262,13 +312,14 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
     }
     setPreviewCreating(true);
     setPreviewError('');
-    setSelection([]);
-    setExecution(null);
-    setConfirmText('');
     try {
       const created = await createPreview(rule, storeSummary?.store?.storeId ?? null);
       notifyJobMonitor(created.job_id);
       const payload = await getPreview(created.preview_id);
+      setSelection([]);
+      setExecution(null);
+      setExecutionRecords(null);
+      setConfirmText('');
       setPreview(payload);
     } catch (error) {
       setPreviewError(errorMessage(error));
@@ -278,7 +329,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
   }, [previewCreating, rule, storeSummary]);
 
   const onExecute = useCallback(async () => {
-    if (preview === null || executing) {
+    if (preview === null || executionRecords === null || operationActive) {
       return;
     }
     setExecuting(true);
@@ -299,33 +350,39 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
         idempotency_key: idempotencyKey,
       });
       notifyJobMonitor(created.job_id);
-      setExecution(await getExecution(created.execution_id));
+      setExecutionRecords(null);
+      const payload = await getExecution(created.execution_id);
+      setExecution(payload);
+      setExecutionRecords(await getStoreExecutions(preview.store_id));
+      setSelection([]);
       setConfirmText('');
     } catch (error) {
       setExecutionError(errorMessage(error));
-      // 网络异常先查任务状态：若已有执行批次则恢复。
+      // 创建请求可能已经成功；仅恢复当前选择对应的执行，避免把旧记录误当作本次操作。
       if (preview !== null) {
-        getRecent()
-          .then(({executions}) => {
-            const match = executions.find(
-              (item) => item.preview_id === preview.preview_id,
+        getStoreExecutions(preview.store_id)
+          .then((records) => {
+            setExecutionRecords(records);
+            const match = records.find((record) =>
+              record.preview_id === preview.preview_id
+              && (record.status === 'queued' || record.status === 'running')
+              && record.items.map((item) => item.apply_id).join(',') === selection.join(','),
             );
             if (match !== undefined) {
-              return getExecution(match.execution_id);
+              return getExecution(match.execution_id).then((payload) => {
+                setExecution(payload);
+                setSelection([]);
+                setConfirmText('');
+              });
             }
             return null;
-          })
-          .then((payload) => {
-            if (payload !== null) {
-              setExecution(payload);
-            }
           })
           .catch(() => {});
       }
     } finally {
       setExecuting(false);
     }
-  }, [preview, executing, selection, limit, writeFeishu, confirmText]);
+  }, [preview, executionRecords, operationActive, selection, limit, writeFeishu, confirmText]);
 
   return (
     <AppShell
@@ -376,6 +433,9 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
             preview={preview}
             selection={selection}
             onSelectionChange={setSelection}
+            approvalProgress={approvalProgress}
+            operationActive={operationActive}
+            recordsReady={executionRecords !== null}
             previewInvalidated={previewInvalidated}
             staleReason={skuEvidenceOutdated
               ? '旧结果缺少有效的 B005 SKU 限制证据，请重新筛查后再批准。'
@@ -386,6 +446,7 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           preview={preview !== null && preview.status === 'completed' ? preview : null}
           previewInvalidated={previewInvalidated}
           selection={selection}
+          approvalProgress={approvalProgress}
           limit={limit}
           onLimitChange={updateExecutionLimit}
           writeFeishu={writeFeishu}
@@ -394,8 +455,12 @@ export function App({bootstrap}: {bootstrap: AutoApprovalBootstrap}) {
           onConfirmTextChange={setConfirmText}
           onExecute={() => void onExecute()}
           executing={executing}
+          operationActive={operationActive}
+          recordsReady={executionRecords !== null}
           executionError={executionError}
-          execution={execution}
+          executionRecords={(executionRecords ?? []).filter(
+            (record) => record.preview_id === preview?.preview_id,
+          )}
         />
         <OrderBackfillPanel storeId={storeSummary?.store?.storeId ?? null} />
       </Stack>

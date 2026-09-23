@@ -152,15 +152,40 @@ async def create_execution(request: Request) -> dict:
 @router.get("/api/auto-approval/executions")
 def list_executions(
     request: Request, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100),
+    preview_id: str | None = None,
+    store_id: str | None = None,
 ) -> dict:
-    from assistant.database.models import AutoApprovalExecution
+    from assistant.database.models import AutoApprovalExecution, AutoApprovalExecutionItem
 
     with _session_factory(request)() as session:
+        query = select(AutoApprovalExecution)
+        if preview_id is not None:
+            query = query.where(AutoApprovalExecution.preview_id == preview_id)
+        if store_id is not None:
+            query = query.where(AutoApprovalExecution.store_id == store_id)
         executions = session.scalars(
-            select(AutoApprovalExecution)
-            .order_by(AutoApprovalExecution.created_at.desc(), AutoApprovalExecution.id.desc())
+            query.order_by(AutoApprovalExecution.created_at.desc(), AutoApprovalExecution.id.desc())
             .offset(offset).limit(limit + 1)
         ).all()
+        visible_executions = executions[:limit]
+        items_by_execution: dict[str, list[dict[str, str]]] = {}
+        if (preview_id is not None or store_id is not None) and visible_executions:
+            items = session.scalars(
+                select(AutoApprovalExecutionItem)
+                .where(AutoApprovalExecutionItem.execution_id.in_(
+                    [execution.id for execution in visible_executions]
+                ))
+                .order_by(AutoApprovalExecutionItem.id)
+            ).all()
+            for item in items:
+                items_by_execution.setdefault(item.execution_id, []).append({
+                    "apply_id": item.apply_id,
+                    "creator_name": item.creator_name,
+                    "approve_status": item.approve_status,
+                    "approve_error": item.approve_error,
+                    "feishu_relation_status": item.feishu_relation_status,
+                    "feishu_error": item.feishu_error,
+                })
         return {
             "has_more": len(executions) > limit,
             "executions": [
@@ -170,8 +195,10 @@ def list_executions(
                     "write_feishu": execution.write_feishu,
                     "created_at": execution.created_at.isoformat(),
                     "finished_at": execution.finished_at.isoformat() if execution.finished_at else None,
+                    **({"items": items_by_execution.get(execution.id, [])}
+                       if preview_id is not None or store_id is not None else {}),
                 }
-                for execution in executions[:limit]
+                for execution in visible_executions
             ],
         }
 

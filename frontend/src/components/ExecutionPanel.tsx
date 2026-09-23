@@ -15,12 +15,14 @@ import {TextInput} from '@astryxdesign/core/TextInput';
 import {useMemo, useState} from 'react';
 
 import {isValidExecutionLimit} from '../executionLimitMemory';
-import type {ExecutionPayload, PreviewPayload} from '../types';
+import type {ApprovalProgress} from '../executionProgress';
+import type {ExecutionRecord, PreviewPayload} from '../types';
 
 interface ExecutionPanelProps {
   preview: PreviewPayload | null;
   previewInvalidated: boolean;
   selection: string[];
+  approvalProgress: Map<string, ApprovalProgress>;
   limit: number;
   onLimitChange: (limit: number) => void;
   writeFeishu: boolean;
@@ -29,8 +31,10 @@ interface ExecutionPanelProps {
   onConfirmTextChange: (value: string) => void;
   onExecute: () => void;
   executing: boolean;
+  operationActive: boolean;
+  recordsReady: boolean;
   executionError: string;
-  execution: ExecutionPayload | null;
+  executionRecords: ExecutionRecord[];
 }
 
 const APPROVE_STATUS_LABELS: Record<string, string> = {
@@ -81,6 +85,7 @@ export function ExecutionPanel({
   preview,
   previewInvalidated,
   selection,
+  approvalProgress,
   limit,
   onLimitChange,
   writeFeishu,
@@ -89,22 +94,25 @@ export function ExecutionPanel({
   onConfirmTextChange,
   onExecute,
   executing,
+  operationActive,
+  recordsReady,
   executionError,
-  execution,
+  executionRecords,
 }: ExecutionPanelProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const canExecute = useMemo(() => {
-    if (preview === null || previewInvalidated) {
+    if (preview === null || previewInvalidated || !recordsReady || operationActive) {
       return false;
     }
     if (preview.status !== 'completed' || !preview.integrity_complete || !preview.is_fresh) {
       return false;
     }
-    if (!isValidExecutionLimit(limit) || selection.length === 0 || selection.length > limit) {
+    if (!isValidExecutionLimit(limit) || selection.length === 0 || selection.length > limit
+      || selection.some((applyId) => approvalProgress.has(applyId))) {
       return false;
     }
     return confirmText.trim().toLowerCase() === 'y';
-  }, [preview, previewInvalidated, selection, limit, confirmText]);
+  }, [preview, previewInvalidated, recordsReady, operationActive, selection, approvalProgress, limit, confirmText]);
 
   if (preview === null) {
     return (
@@ -124,7 +132,6 @@ export function ExecutionPanel({
     .map((row) => `${row.creator_name}（${row.apply_id}）`);
   const summaryRows = preview.rule_summary.map(splitSummaryLine);
   const feishuTarget = '达人关系管理(新) / 达人管理总表';
-  const effectiveWriteFeishu = execution?.write_feishu ?? writeFeishu;
 
   return (
     <Section>
@@ -155,7 +162,7 @@ export function ExecutionPanel({
                 onChange={onLimitChange}
                 min={1}
                 description="已选条数需要 ≤ 本次限量"
-                isDisabled={execution !== null}
+                isDisabled={operationActive || !recordsReady}
               />
               <Text type="supporting">当前已选 {selection.length} 条申请</Text>
             </Stack>
@@ -166,16 +173,14 @@ export function ExecutionPanel({
               </Stack>
               <Switch
                 label="批准后写入飞书"
-                value={effectiveWriteFeishu}
+                value={writeFeishu}
                 onChange={onWriteFeishuChange}
                 labelPosition="start"
                 labelSpacing="spread"
-                description={execution !== null
-                  ? `本批次设置：${effectiveWriteFeishu ? '已开启' : '已关闭'}，不可更改。`
-                  : effectiveWriteFeishu
-                    ? '已开启（默认）；仅需平台批准时可手动关闭。'
-                    : '已关闭；本次仅批准，不写入飞书。'}
-                isDisabled={execution !== null}
+                description={writeFeishu
+                  ? '已开启（默认）；仅需平台批准时可手动关闭。'
+                  : '已关闭；本次仅批准，不写入飞书。'}
+                isDisabled={operationActive || !recordsReady}
               />
               <Stack gap={1}>
                 <Text type="supporting">写入目标</Text>
@@ -215,6 +220,9 @@ export function ExecutionPanel({
         {executionError !== '' && (
           <Banner status="error" title="执行创建失败" description={executionError} />
         )}
+        {operationActive && (
+          <Banner status="info" title="正在处理" description="当前操作完成后，可继续选择其他待处理申请。" />
+        )}
 
         <Stack direction="horizontal" gap={2} vAlign="end">
           <TextInput
@@ -222,7 +230,7 @@ export function ExecutionPanel({
             value={confirmText}
             onChange={onConfirmTextChange}
             placeholder="y"
-            isDisabled={execution !== null}
+            isDisabled={operationActive || !recordsReady}
           />
           <Button
             label="执行限量批准"
@@ -242,7 +250,7 @@ export function ExecutionPanel({
           onOpenChange={setDialogOpen}
           title="确认执行限量批准"
           description={
-            `店铺：${preview.store_id}；限量 ${limit} 条；写飞书：${effectiveWriteFeishu ? '开（' + feishuTarget + '）' : '关'}。` +
+            `店铺：${preview.store_id}；限量 ${limit} 条；写飞书：${writeFeishu ? '开（' + feishuTarget + '）' : '关'}。` +
             `名单：${selectedNames.join('、') || '无'}。` +
             '本次按自定义标准，不代表完整 SOP 通过。平台同意不可撤销，批准前已生成本地备份。'
           }
@@ -254,55 +262,46 @@ export function ExecutionPanel({
           }}
         />
 
-        {execution !== null && (
+        {executionRecords.length > 0 && (
           <Stack gap={2}>
-            <Heading level={3}>
-              执行批次 {execution.execution_id} · 状态 {execution.status}
-            </Heading>
-            {execution.error_summary !== '' && (
-              <Banner status="error" title="执行批次失败" description={execution.error_summary} />
-            )}
-            <Stack gap={2}>
-              {execution.items.map((item) => {
-                const approveLabel =
-                  APPROVE_STATUS_LABELS[item.approve_status] ?? item.approve_status;
-                const feishuLabel =
-                  FEISHU_STATUS_LABELS[item.feishu_relation_status] ??
-                  item.feishu_relation_status;
-                return (
-                  <Stack key={item.apply_id} gap={1}>
-                    <Stack direction="horizontal" gap={2} vAlign="center">
-                      <StatusDot
-                        variant={statusVariant(item.approve_status)}
-                        label={approveLabel}
-                      />
-                      <Text>
-                        {item.creator_name}（{item.apply_id}）平台：{approveLabel}
-                      </Text>
-                      <StatusDot
-                        variant={statusVariant(item.feishu_relation_status)}
-                        label={feishuLabel}
-                      />
-                      <Text>飞书：{feishuLabel}</Text>
-                    </Stack>
-                    {item.approve_error !== '' && (
-                      <Text type="supporting">批准说明：{item.approve_error}</Text>
-                    )}
-                    {item.feishu_error !== '' && (
-                      <Text type="supporting">飞书说明：{item.feishu_error}</Text>
-                    )}
-                  </Stack>
-                );
-              })}
-            </Stack>
-
-            {execution.status === 'completed' && (
-              <Banner
-                status="info"
-                title="执行完成"
-                description="平台列表约 10 分钟后刷新；请在下方独立的「核对与补写」区回读核对。任务完成不代表飞书已写入，不会重新批准。"
-              />
-            )}
+            <Heading level={3}>操作记录</Heading>
+            <Text type="supporting">每次操作单独留存；结果未知请先核对，不要重复批准。</Text>
+            {executionRecords.map((record) => (
+              <details key={record.execution_id}>
+                <summary>
+                  {new Date(record.created_at).toLocaleString()} · {record.items.length} 条 · {
+                    record.status === 'completed' ? '已完成'
+                      : record.status === 'needs_reconcile' ? '待核对'
+                        : record.status === 'queued' || record.status === 'running' ? '处理中'
+                          : '未完成'
+                  }
+                </summary>
+                <Stack gap={2} paddingBlockStart={2}>
+                  {record.items.map((item) => {
+                    const approveLabel =
+                      APPROVE_STATUS_LABELS[item.approve_status] ?? item.approve_status;
+                    const feishuLabel =
+                      FEISHU_STATUS_LABELS[item.feishu_relation_status] ?? item.feishu_relation_status;
+                    return (
+                      <Stack key={item.apply_id} gap={1}>
+                        <Stack direction="horizontal" gap={2} vAlign="center">
+                          <StatusDot variant={statusVariant(item.approve_status)} label={approveLabel} />
+                          <Text>{item.creator_name}（{item.apply_id}）平台：{approveLabel}</Text>
+                          <StatusDot variant={statusVariant(item.feishu_relation_status)} label={feishuLabel} />
+                          <Text>飞书：{feishuLabel}</Text>
+                        </Stack>
+                        {item.approve_error !== '' && (
+                          <Text type="supporting">批准说明：{item.approve_error}</Text>
+                        )}
+                        {item.feishu_error !== '' && (
+                          <Text type="supporting">飞书说明：{item.feishu_error}</Text>
+                        )}
+                      </Stack>
+                    );
+                  })}
+                </Stack>
+              </details>
+            ))}
           </Stack>
         )}
       </Stack>

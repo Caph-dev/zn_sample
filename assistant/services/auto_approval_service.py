@@ -16,13 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from assistant.database.models import (
     AutoApprovalCandidate,
     AutoApprovalExecution,
     AutoApprovalExecutionItem,
     AutoApprovalPreview,
+    Job,
 )
 from assistant.paths import ensure_user_dirs
 
@@ -507,6 +508,22 @@ def create_execution(
                 "禁止执行；请重新筛查。",
                 status_code=409,
             )
+        active_execution = session.scalar(
+            select(AutoApprovalExecution.id)
+            .join(Job, AutoApprovalExecution.job_id == Job.id)
+            .where(
+                AutoApprovalExecution.store_id == preview.store_id,
+                or_(
+                    AutoApprovalExecution.status.in_(("queued", "running")),
+                    Job.status.in_(("pending", "running")),
+                ),
+            ).limit(1)
+        )
+        if active_execution is not None:
+            raise AutoApprovalServiceError(
+                "approval-already-running", "当前店铺有批准操作正在处理，请完成后再继续。",
+                status_code=409,
+            )
         eligible_candidates = {
             candidate.apply_id: candidate
             for candidate in session.scalars(
@@ -524,6 +541,29 @@ def create_execution(
                 "candidate-not-eligible",
                 f"所选行不在可批准名单中: {disallowed}",
                 status_code=400,
+            )
+        previous_items = session.execute(
+            select(AutoApprovalExecution, AutoApprovalExecutionItem)
+            .join(AutoApprovalExecutionItem, AutoApprovalExecution.id == AutoApprovalExecutionItem.execution_id)
+            .where(
+                AutoApprovalExecution.store_id == preview.store_id,
+                AutoApprovalExecutionItem.apply_id.in_(normalized_ids),
+            )
+        ).all()
+        unavailable_ids = {
+            item.apply_id
+            for previous_execution, item in previous_items
+            if item.approve_status in {"approved", "unknown"}
+            or (
+                item.approve_status == "queued"
+                and previous_execution.status in {"failed", "cancelled", "interrupted"}
+            )
+        }
+        if unavailable_ids:
+            raise AutoApprovalServiceError(
+                "candidate-already-handled",
+                f"以下申请已批准或结果待核对，请勿重复批准: {sorted(unavailable_ids)}",
+                status_code=409,
             )
         from lib.auto_approval_sku import has_product_sku_evidence
 

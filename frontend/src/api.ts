@@ -2,6 +2,7 @@
 
 import type {
   ExecutionPayload,
+  ExecutionRecord,
   OptionsPayload,
   OrderBackfillCandidatesPayload,
   OrderBackfillStatePayload,
@@ -111,6 +112,22 @@ export function createExecution(payload: {
 
 export function getExecution(executionId: string): Promise<ExecutionPayload> {
   return fetchJson<ExecutionPayload>(`/api/auto-approval/executions/${executionId}`, {cache: 'no-store'});
+}
+
+export async function getStoreExecutions(storeId: string): Promise<ExecutionRecord[]> {
+  const records: ExecutionRecord[] = [];
+  let offset = 0;
+  let hasMore = true;
+  while (hasMore) {
+    const page = await fetchJson<{executions: ExecutionRecord[]; has_more: boolean}>(
+      `/api/auto-approval/executions?store_id=${encodeURIComponent(storeId)}&offset=${offset}&limit=100`,
+      {cache: 'no-store'},
+    );
+    records.push(...page.executions);
+    offset += page.executions.length;
+    hasMore = page.has_more;
+  }
+  return records;
 }
 
 export function getOrderBackfillCandidates(): Promise<OrderBackfillCandidatesPayload> {
