@@ -15,6 +15,14 @@ from assistant.web.routes import router as web_router
 
 
 def application_version() -> str:
+    from assistant.paths import _release_manifest
+
+    release = _release_manifest()
+    if release is not None:
+        application_version_value = release[1].get("application_version")
+        if not isinstance(application_version_value, str) or not application_version_value or application_version_value == "dev":
+            raise RuntimeError("release-version-required")
+        return application_version_value
     try:
         return version("zn-sample")
     except PackageNotFoundError:

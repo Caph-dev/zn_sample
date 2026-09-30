@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -23,7 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from assistant.paths import exports_dir, historical_export_dirs, validate_writable_path  # noqa: E402
+from assistant.paths import (  # noqa: E402
+    ReleasePathError,
+    exports_dir,
+    historical_export_dirs,
+    is_packaged_distribution,
+    require_verified_historical_exports,
+    validate_writable_path,
+)
 from lib.creator_detail import (  # noqa: E402
     extract_creator_detail,
     go_back_to_list,
@@ -106,29 +114,53 @@ def _load_sent_intro_audit() -> tuple[set[tuple[str, str]], set[str]]:
     """
     sent_target_keys: set[tuple[str, str]] = set()
     sent_apply_ids: set[str] = set()
+    strict_audit = is_packaged_distribution()
+    historical_intro_digests = require_verified_historical_exports() if strict_audit else {}
     export_directories = dict.fromkeys(
         (exports_dir(development_root=ROOT), *historical_export_dirs())
     )
-    export_paths = (
+    export_paths = [
         export_path
         for directory in export_directories
         for export_path in directory.glob("sample_intro_*.json")
-    )
+    ]
+    if strict_audit and not historical_intro_digests.keys() <= set(export_paths):
+        raise ReleasePathError("release-history-invalid", "历史发送审计读取期间文件缺失，禁止真发。")
     for export_path in export_paths:
         try:
-            data = json.loads(export_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            audit_bytes = export_path.read_bytes()
+            expected_digest = historical_intro_digests.get(export_path)
+            if expected_digest is not None and hashlib.sha256(audit_bytes).hexdigest() != expected_digest:
+                raise ReleasePathError("release-history-invalid", "历史发送审计读取期间发生变化，禁止真发。")
+            data = json.loads(audit_bytes.decode("utf-8"))
+        except (OSError, ValueError):
+            if strict_audit:
+                raise ReleasePathError("release-history-invalid", "介绍信发送审计不可读，请人工核对，禁止真发。") from None
             continue
-        rows = data if isinstance(data, list) else data.get("rows") or data.get("items") or []
-        if not isinstance(rows, list):
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            rows = data.get("rows", data.get("items")) if strict_audit else data.get("rows") or data.get("items") or []
+        else:
+            rows = None
+        if not isinstance(rows, list) or (strict_audit and any(not isinstance(row, dict) for row in rows)):
+            if strict_audit:
+                raise ReleasePathError("release-history-invalid", "介绍信发送审计结构无效，请人工核对，禁止真发。")
             continue
         for row in rows:
+            if strict_audit:
+                status = row.get("send_status")
+                known_statuses = {"sent", "already-sent", "dry-run", "skipped", "skipped-limit", "send-failed"}
+                if not isinstance(status, str) or status not in known_statuses:
+                    raise ReleasePathError("release-history-invalid", "介绍信发送审计缺少状态或有未知写结果，请人工核对，禁止重试。")
             if not isinstance(row, dict) or row.get("send_status") != "sent":
                 continue
             apply_id = str(row.get("apply_id") or "").strip()
             if apply_id:
                 sent_apply_ids.add(apply_id)
             target_key = _intro_target_key(row)
+            if strict_audit and not apply_id and not (target_key[0] and target_key[1]):
+                raise ReleasePathError("release-history-invalid", "已发送介绍信缺少去重身份，请人工核对，禁止真发。")
             if target_key[0] and target_key[1]:
                 sent_target_keys.add(target_key)
     return sent_target_keys, sent_apply_ids
@@ -316,6 +348,12 @@ def main() -> int:
     if args.max_rows and len(targets) > args.max_rows:
         targets = targets[: args.max_rows]
 
+    try:
+        sent_intro_keys, sent_intro_apply_ids = _load_sent_intro_audit()
+    except ReleasePathError as error:
+        logger.error("[发送审计] %s；先人工核对历史文件。预演/诊断不会发送。", error)
+        return 2
+
     default_sid = default_scan_store(
         disabled=args.no_default_store,
         config_path=args.config,
@@ -337,7 +375,6 @@ def main() -> int:
     limit = args.execute_limit if args.execute_limit > 0 else DEFAULT_EXECUTE_LIMIT
     sent = 0
     results: list[dict[str, Any]] = []
-    sent_intro_keys, sent_intro_apply_ids = _load_sent_intro_audit()
     current_run_intro_keys: set[tuple[str, str]] = set()
     current_run_apply_ids: set[str] = set()
     logger.info("=" * 60)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and prove private runtimes, without launching any business service.
+"""Build private runtimes and complete directory bundles without running business.
 
 CLI remains an explicit, technician-installed external prerequisite. Native
 build tools are used only on the build machine; PATH is never changed.
@@ -23,8 +23,10 @@ from pathlib import Path
 
 if __package__:
     from . import runtime_artifacts as artifacts
+    from . import resources
 else:
     import runtime_artifacts as artifacts
+    import resources
 
 ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
@@ -256,13 +258,22 @@ def write_json(destination: Path, data: dict) -> None:
 
 
 def create_manifest(
-    bundle_root: Path, target_name: str, target: dict, recipe: dict
+    bundle_root: Path, target_name: str, target: dict, recipe: dict,
+    *, scope: str = "runtime-proof-not-full-application",
 ) -> dict:
     entries = []
     for path in sorted(bundle_root.rglob("*")):
         relative_path = path.relative_to(bundle_root).as_posix()
+        if relative_path == "release-manifest.json":
+            continue
         if path.is_symlink():
-            if not path.resolve().is_relative_to(bundle_root.resolve()):
+            link_value = os.readlink(path)
+            if (
+                Path(link_value).is_absolute()
+                or "\\" in link_value
+                or re.match(r"^[A-Za-z]:", link_value)
+                or not path.resolve().is_relative_to(bundle_root.resolve())
+            ):
                 raise RuntimeBlocked("manifest-symlink-escape")
             entries.append({"path": relative_path, "symlink": os.readlink(path)})
         elif path.is_file():
@@ -276,7 +287,7 @@ def create_manifest(
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return {
         "schema_version": 1,
-        "scope": "runtime-proof-not-full-application",
+        "scope": scope,
         "application_version": project["project"]["version"],
         "target": target_name,
         "executables": {
@@ -301,6 +312,102 @@ def create_manifest(
         "ffmpeg_recipe": recipe,
         "files": entries,
     }
+
+
+def build_static_assets(runtime_root: Path, target: dict) -> None:
+    """Use private Node and its npm JS entry; do not depend on shell shims."""
+    node_path = runtime_root / target["node_executable"]
+    npm_relative_path = (
+        "runtime/node/node_modules/npm/bin/npm-cli.js"
+        if target["system"] == "Windows"
+        else "runtime/node/lib/node_modules/npm/bin/npm-cli.js"
+    )
+    npm_path = runtime_root / npm_relative_path
+    if not npm_path.is_file():
+        raise RuntimeBlocked("build-private-npm-entry-required")
+    run_checked(
+        [str(node_path), str(npm_path), "ci", "--ignore-scripts"],
+        cwd=ROOT, label="frontend-locked-install", timeout=600,
+    )
+    run_checked(
+        [str(node_path), str(ROOT / "setup/release/build_static_assets.mjs"), "web"],
+        cwd=ROOT, label="frontend-complete-build", timeout=300,
+    )
+
+
+def copy_verified_runtime(runtime_root: Path, destination_root: Path, target_name: str) -> dict:
+    """Reuse a verified 006 runtime without copying user data or old bundles."""
+    manifest = verify_manifest(runtime_root, target_name, verify_nested_bundle=False)
+    if manifest.get("scope") != "runtime-proof-not-full-application":
+        raise RuntimeBlocked("runtime-proof-manifest-required")
+    if destination_root.exists() or destination_root.is_symlink():
+        raise RuntimeBlocked("runtime-destination-must-be-new")
+    destination_root.mkdir(parents=True)
+    for entry in manifest["files"]:
+        source_path = runtime_root / entry["path"]
+        destination_path = destination_root / entry["path"]
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if "symlink" in entry:
+            destination_path.symlink_to(entry["symlink"])
+        else:
+            shutil.copy2(source_path, destination_path)
+    write_json(destination_root / "release-manifest.json", manifest)
+    verify_manifest(destination_root, target_name)
+    return manifest
+
+
+def build_application_bundle(
+    bundle_root: Path, target_name: str, target: dict, arguments,
+) -> dict:
+    """Assemble a new immutable payload; preserve earlier recognized bundles."""
+    if bundle_root.is_symlink() or bundle_root.resolve() != bundle_root.absolute():
+        raise RuntimeBlocked("bundle-root-must-not-be-symlinked")
+    if bundle_root.exists():
+        if not arguments.rebuild:
+            raise RuntimeBlocked("bundle-exists-use-rebuild-to-preserve")
+        try:
+            previous_manifest = json.loads((bundle_root / "release-manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise RuntimeBlocked("bundle-rebuild-refuses-unrecognized-payload") from error
+        if previous_manifest.get("scope") != resources.APPLICATION_SCOPE or previous_manifest.get("target") != target_name:
+            raise RuntimeBlocked("bundle-rebuild-refuses-unrecognized-payload")
+    # Fail before runtime downloads when the lifecycle work has not been installed.
+    for relative_path in resources.FIXED_RESOURCES:
+        if not relative_path.startswith("assistant/web/static/"):
+            resources.require_regular_resource(ROOT, relative_path)
+    bundle_root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="application-build-", dir=bundle_root.parent) as temporary:
+        staging_root = Path(temporary) / "payload"
+        runtime_source_root = ROOT / "build/release" / target_name
+        if (runtime_source_root / "release-manifest.json").is_file():
+            copy_verified_runtime(runtime_source_root, staging_root, target_name)
+        else:
+            build_runtime(staging_root, target_name, target, arguments)
+        runtime_manifest_path = staging_root / "release-manifest.json"
+        runtime_manifest = verify_manifest(staging_root, target_name)
+        build_static_assets(staging_root, target)
+        resources.copy_application_resources(ROOT, staging_root)
+        resources.write_platform_launchers(ROOT, staging_root, target_name, target["python_executable"])
+        remove_python_bytecode(staging_root)
+        runtime_manifest_path.chmod(0o644)
+        runtime_manifest_path.unlink()
+        manifest = create_manifest(
+            staging_root, target_name, target, runtime_manifest["ffmpeg_recipe"],
+            scope=resources.APPLICATION_SCOPE,
+        )
+        write_json(runtime_manifest_path, manifest)
+        verify_manifest(staging_root, target_name)
+        runtime_manifest_path.chmod(0o444)
+        if bundle_root.exists():
+            # Keep generated history outside the 006 runtime-proof root.
+            history_root = bundle_root.parent.parent / ".previous"
+            if history_root.is_symlink():
+                raise RuntimeBlocked("build-history-root-must-not-be-symlinked")
+            history_root.mkdir(exist_ok=True)
+            preserved_root = Path(tempfile.mkdtemp(prefix="bundle-", dir=history_root))
+            bundle_root.rename(preserved_root / "payload")
+        staging_root.rename(bundle_root)
+    return manifest
 
 
 def build_runtime(bundle_root: Path, target_name: str, target: dict, arguments) -> None:
@@ -403,7 +510,9 @@ def remove_upstream_package_manager(python_root: Path, target: dict) -> None:
         shutil.rmtree(metadata)
 
 
-def verify_manifest(bundle_root: Path, target_name: str) -> dict:
+def verify_manifest(
+    bundle_root: Path, target_name: str, *, verify_nested_bundle: bool = True,
+) -> dict:
     try:
         manifest = json.loads(
             (bundle_root / "release-manifest.json").read_text(encoding="utf-8")
@@ -429,6 +538,12 @@ def verify_manifest(bundle_root: Path, target_name: str) -> dict:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             raise RuntimeBlocked("invalid-runtime-manifest-entry")
         artifacts.validate_member_name(entry["path"])
+        entry_path = Path(entry["path"])
+        if manifest.get("scope") == resources.APPLICATION_SCOPE and (
+            "__pycache__" in entry_path.parts
+            or entry_path.suffix in {".pyc", ".pyo"}
+        ):
+            raise RuntimeBlocked("application-bytecode-forbidden")
         path = bundle_root / entry["path"]
         if entry["path"] in expected_paths:
             raise RuntimeBlocked("runtime-manifest-duplicate-entry")
@@ -444,17 +559,42 @@ def verify_manifest(bundle_root: Path, target_name: str) -> dict:
             or artifacts.hash_file(path) != entry["sha256"]
         ):
             raise RuntimeBlocked("runtime-file-hash-mismatch")
+    managed_bundle = bundle_root / "bundle"
+    has_managed_bundle = (
+        manifest.get("scope") == "runtime-proof-not-full-application"
+        and (managed_bundle.exists() or managed_bundle.is_symlink())
+    )
+    if has_managed_bundle and verify_nested_bundle:
+        if managed_bundle.is_symlink():
+            raise RuntimeBlocked("runtime-nested-bundle-symlink")
+        nested_manifest = verify_manifest(managed_bundle, target_name)
+        if nested_manifest.get("scope") != resources.APPLICATION_SCOPE:
+            raise RuntimeBlocked("runtime-nested-bundle-unrecognized")
     actual_paths = {
         path.relative_to(bundle_root).as_posix()
         for path in bundle_root.rglob("*")
         if (path.is_file() or path.is_symlink())
         and path.name != "release-manifest.json"
+        and not (has_managed_bundle and path.is_relative_to(managed_bundle))
     }
     if not expected_paths or actual_paths != expected_paths:
         raise RuntimeBlocked("runtime-unmanifested-or-missing-files")
     if (bundle_root / "runtime/ziniao").exists():
         raise RuntimeBlocked("external-cli-must-not-be-bundled")
     return manifest
+
+
+def remove_python_bytecode(bundle_root: Path) -> None:
+    """Exclude interpreter cache artifacts from every release payload."""
+    for bytecode_directory in sorted(bundle_root.rglob("__pycache__"), reverse=True):
+        if bytecode_directory.is_symlink():
+            bytecode_directory.unlink()
+        elif bytecode_directory.is_dir():
+            shutil.rmtree(bytecode_directory)
+    for suffix in ("*.pyc", "*.pyo"):
+        for bytecode_path in bundle_root.rglob(suffix):
+            if bytecode_path.is_symlink() or bytecode_path.is_file():
+                bytecode_path.unlink()
 
 
 def verify_ffmpeg_license(license_output: str, version_output: str) -> None:
@@ -633,6 +773,16 @@ def execute(arguments) -> tuple[dict, int]:
         bundle_root = ROOT / "build/release" / arguments.target
         if bundle_root.resolve() != bundle_root.absolute():
             raise RuntimeBlocked("build-root-must-not-be-symlinked")
+        if arguments.command == "bundle":
+            manifest = build_application_bundle(bundle_root / "bundle", arguments.target, target, arguments)
+            report["checks"].append({"name": "full_application_assembly", "status": "passed"})
+            report.update(
+                status="PASSED", scope=manifest["scope"],
+                application_version=manifest["application_version"],
+                bundle=f"build/release/{arguments.target}/bundle",
+                bundle_smoke_verified=False,
+            )
+            return report, 0
         if arguments.command == "probe":
             build_runtime(bundle_root, arguments.target, target, arguments)
         report["checks"].append(
@@ -700,7 +850,7 @@ def execute(arguments) -> tuple[dict, int]:
 def main() -> int:
     configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("probe", "verify-runtime"))
+    parser.add_argument("command", choices=("probe", "verify-runtime", "bundle"))
     parser.add_argument(
         "--target", required=True, choices=tuple(policy.RELEASE_TARGETS)
     )
@@ -712,7 +862,7 @@ def main() -> int:
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="Probe only: preserve an existing generated payload and build afresh",
+        help="Probe/bundle: preserve an existing generated payload and build afresh",
     )
     parser.add_argument(
         "--ffmpeg-shell", help="Build-only absolute native shell executable"
@@ -724,8 +874,8 @@ def main() -> int:
         "--ffmpeg-make", help="Build-only absolute native make executable"
     )
     arguments = parser.parse_args()
-    if arguments.rebuild and arguments.command != "probe":
-        parser.error("--rebuild is only supported by probe")
+    if arguments.rebuild and arguments.command not in {"probe", "bundle"}:
+        parser.error("--rebuild is only supported by probe or bundle")
     report, exit_code = execute(arguments)
     print(json.dumps(report, ensure_ascii=True))
     return exit_code

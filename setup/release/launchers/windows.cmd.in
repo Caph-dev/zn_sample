@@ -1,0 +1,23 @@
+@echo off
+setlocal DisableDelayedExpansion
+chcp 65001 >nul
+set "BUNDLE_ROOT=%~dp0"
+set "PYTHONHOME="
+set "PYTHONPATH="
+set "PYTHONSTARTUP="
+set "PYTHONUSERBASE="
+set "VIRTUAL_ENV="
+set "CONDA_PREFIX="
+set "__PYVENV_LAUNCHER__="
+set "NODE_OPTIONS="
+set "NODE_PATH="
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONDONTWRITEBYTECODE=1"
+"%BUNDLE_ROOT%@PYTHON_EXECUTABLE@" -I -B -X utf8 "%BUNDLE_ROOT%app\scripts\release_launcher.py" @MODE@
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" (
+  echo Release launcher failed ^(exit %RESULT%^). Review the diagnostic above and the user-data logs.
+  pause
+)
+exit /b %RESULT%

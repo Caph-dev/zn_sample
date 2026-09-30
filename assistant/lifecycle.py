@@ -191,12 +191,13 @@ def _existing_instance_url(state_path: Path) -> str | None:
     return None
 
 
-def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
+def run_assistant(*, uvicorn_runner: Callable = uvicorn.run,
+                  owned_instance_lock: InstanceLock | None = None) -> int:
     application_directory = ensure_user_dirs()
     runtime_directory = application_directory / "runtime"
     state_path = runtime_directory / "state.json"
-    instance_lock = InstanceLock(runtime_directory / "instance.lock")
-    if not instance_lock.acquire():
+    instance_lock = owned_instance_lock or InstanceLock(runtime_directory / "instance.lock")
+    if owned_instance_lock is None and not instance_lock.acquire():
         existing_url = _existing_instance_url(state_path)
         if existing_url:
             webbrowser.open(existing_url)
@@ -254,7 +255,8 @@ def run_assistant(*, uvicorn_runner: Callable = uvicorn.run) -> int:
         except Exception:
             logger.exception("failed to remove assistant state file")
         try:
-            instance_lock.release()
+            if owned_instance_lock is None:
+                instance_lock.release()
         except Exception:
             logger.exception("failed to release assistant instance lock")
     return 0

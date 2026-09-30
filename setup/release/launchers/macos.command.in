@@ -1,0 +1,16 @@
+#!/bin/zsh -f
+set -u
+BUNDLE_ROOT="${0:A:h}"
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX __PYVENV_LAUNCHER__
+unset NODE_OPTIONS NODE_PATH DYLD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_FRAMEWORK_PATH
+unset LD_LIBRARY_PATH LD_PRELOAD
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8 PYTHONDONTWRITEBYTECODE=1
+"${BUNDLE_ROOT}/@PYTHON_EXECUTABLE@" -I -B "${BUNDLE_ROOT}/app/scripts/release_launcher.py" @MODE@
+RESULT=$?
+if (( RESULT != 0 )); then
+  print -r -- "Release launcher failed (exit ${RESULT}). Review the diagnostic above and the user-data logs."
+  if [[ -t 0 ]]; then
+    read -r "REPLY?Press Enter to close..."
+  fi
+fi
+exit "$RESULT"

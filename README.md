@@ -52,6 +52,22 @@ uv run python -m pytest tests -q
 
 ## 本地网页操作台
 
+### 内测目录包：日常启动与安全停止
+
+技术人员初配后，目录包内双击 **`Start.command`**（Mac）或 **`Start.cmd`**（Windows 待原生验收）。不需要安装 Python/npm/uv；目录包自带运行时和已构建页面，官方紫鸟 CLI 仍由技术人员预装和授权。
+
+- **启动**：后台服务健康后才打开浏览器。重复双击只打开已有实例，不重启、不再备份或迁移；旧实例版本不同也只打开旧版，先安全停止再升级。
+- **停止**：双击 **`Stop.command` / `Stop.cmd`**。任何 pending/running 任务、页面操作或活动子进程存在时拒绝停止；第一版不会替你取消任务、清队列或强杀。停止成功须等 worker/子进程结束且实例锁释放。
+- **浏览器关页不等于服务停止**。升级、替换目录或运行独立脚本前，先等任务结束并用 Stop 确认停止。
+- **独立 0/1/2/3**：包内 `0-Prepare`、`1-Screen`、`2-Pipeline`、`3-Tracking` 分别保留原来的固定模式、交互确认与执行限额。先安全停止操作台；独立入口之间也互斥。`2-Pipeline` / `3-Tracking` 仍在终端输入 `y`，平台同意和发送不可撤销。
+- **初配或故障**：双击 **`Diagnose.command` / `Diagnose.cmd`**，仅离线检查资源、配置字段、版本和本地数据路径，不连接或重开紫鸟。`configuration-required` 请技术人员补齐提示的用户配置字段；不会自动填开发机默认店铺。
+- **日志**：用户数据目录的 `logs/release-service.log`；Mac 是 `~/Library/Application Support/ZnSampleAssistant/`，Windows 是 `%LOCALAPPDATA%\ZnSampleAssistant\`。安装根只读，配置、数据库、导出和日志继续保存在用户目录。
+- **拒绝启动/停止**：`existing-instance-unverified` / `runtime-state-invalid` / `instance-busy-or-unknown` 表示实例身份或锁无法证明；`residual-jobs-require-review` / `residual-subprocess-requires-review` 表示旧任务或崩溃子进程需核对；`database-unknown` / `stop-timeout-unknown` 不代表已经停止。保留数据库、WAL、报告和 runtime 标记交技术人员核查，**不要删锁/标记、改任务状态或反复重发**。
+
+同机升级只替换已停止的安装目录，不删除用户目录和原历史证据。**不要同时使用旧源码启动器、直接业务脚本和发布包**：新入口无法替旧程序补上全部互斥；源码启动器默认重启行为仍与下面说明一致。当前仅完成本机 Mac 离线内测证明；Windows 10/11 x64、干净 Mac、最低系统版本和签名/公证仍需后续原生验收。
+
+### 源码模式（开发/维护）
+
 ```bash
 python3 scripts/launch_assistant.py
 ```
@@ -80,6 +96,33 @@ Windows 与 macOS 使用同一网页按钮，不需要选择 `.bat` 或 `.comman
 页面正文由 React + Astryx 组件渲染（构建产物 `assistant/web/static/console/`，数据以 bootstrap JSON 注入），任务面板、确认弹窗和表单提交仍由既有 `app.js` 处理，写操作门闩与任务保护不变。新电脑或依赖更新后，在仓库根目录跑一次依赖安装脚本：Windows 双击 `setup\安装依赖.bat`，macOS 执行 `zsh setup/install_deps.sh`（含 `uv sync` / `npm ci` / `npm run build:web`，见《快速开始》第 9 节）。
 
 0/1/2/3 双击与「启动操作台」都**优先使用仓库 `.venv`**（由安装脚本或 `uv sync` 建立），没有 `.venv` 时才回退系统 Python；依赖不一致或报 `ModuleNotFoundError` 时先重跑安装脚本，不用手装包。
+
+---
+
+## 同机发布配置导入（技术人员维护）
+
+`setup/release/import_legacy_state.py` 只处理**明确选择的同机旧项目**，不跨电脑搬库、不扫描其它项目，不批准、不发信、不写飞书。日常业务员不需要运行。
+
+**当前只开放 dry-run。** 009 已实现发布入口“先取实例锁、再迁移数据库”，但本次没有解除 008 的公开 apply 门闩，也没有真实导入授权。现在即使加 `--apply --yes` 仍会被沿用的 `release-lifecycle-not-ready-009` 拦下；启用真实导入须另行核对旧入口停机、维护锁契约并明确授权具体旧项目路径，不要修改代码绕过。新版本不能约束旧版本在取锁前启动的数据库迁移。
+
+技术人员先正常停止操作台和所有独立 0/1/2/3、介绍信及自动审批脚本；维护期间不要启动任何新旧入口。然后在源码根运行（路径只填旧项目，不填密钥）：
+
+```bash
+uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/legacy/project"
+# 仅 009 验收完成并取得实际导入授权后：
+uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/legacy/project" --apply --yes
+```
+
+工具本身仅用 Python 标准库；已交付的完整包应由技术人员使用包内 Python 调用同一入口，不安装 uv 或改 PATH。`--apply --yes` 仅确认本地文件导入，不会变成业务 `--execute --yes`。
+
+- **报告**：stdout 是脱敏 JSON，只显示路径、分类、数量、字段名和诊断码，不显示配置值、聊天正文或证明密钥；不会自动写日志文件。`planned/imported/unchanged` 退出 0，`conflict/blocked` 通常退出 2，I/O 失败退出 1。把诊断码和脱敏摘要交技术人员，不要发送原配置或聊天报告。
+- **配置**：只接受 `[stores]`、`[feishu]`、`[feishu.bitable]`、`[content_review]` 的已知字段及项目实际使用的 `.env` 白名单。未知变量（包括 PATH/PYTHONPATH/NODE_OPTIONS）、重复变量、必需字段为空或机器路径需复核时阻止导入。默认相对缓存 `exports/content_review_cache` 可保留；外部 `.env`、自定义缓存、开发机 FFmpeg 路径不会自动扫描或改写，需技术人员先审查。完整原文件留在旧目录，导入成功后另有归档副本。
+- **冲突**：目标已有相同字节是 `unchanged`，不同内容是 `conflict`，没有强制覆盖开关。配置由技术人员安全比对、合并；不要删除去重登记、重签证据或清数据库来“消除冲突”。同一来源已完成的归档也不可用后续修改覆盖。
+- **数据库**：继续用原用户数据目录的 `assistant.sqlite3`（macOS 为 `~/Library/Application Support/ZnSampleAssistant/`，Windows 为 `%LOCALAPPDATA%\ZnSampleAssistant\`），不从旧项目猜数据库，不跑 Alembic、不改任务状态、不重放队列。实际导入通过 SQLite backup 生成 `backups/state-import-<source-id>/` 一致性副本，包含已提交 WAL；禁止直接复制运行中的主库。pending/running、中断写任务或未知写结果须先人工核对。dry-run 发现非空 WAL 会返回 `database-wal-needs-offline-check`，不会忽略 WAL 或创建 shm；正常停止旧入口后再检查，不要删 WAL。
+- **历史证据**：原目录**不要删、不要移动**。归档位于用户目录 `legacy/<source-id>/`，按原字节保留导出、缓存和本地 `.proof-key`；`import-manifest.json` 只保存文件索引/哈希，最后才提交 `config/historical-exports.json` v2 完成登记。副本不进入新 `latest` 集合，也不是可直接批准的名单。数据库里的绝对证据路径仍指向原件；归档不会修复旧 HMAC、manifest 路径或过期证据。移走旧目录须另立迁移方案。
+- **失败恢复**：只清本次临时文件，不回滚已有配置、数据库或已发布副本；未完成登记的归档不能用于发送。修复 I/O 后，在源字节未变且停止全部入口的条件下可重复检查/导入；存在冲突或未知写结果时交人工，不自动重试业务写入。POSIX 新敏感文件 0600、配置/归档/备份目录 0700；Windows 依赖当前用户目录的 ACL 继承，技术人员须核验，chmod 不等于 ACL。首版拒绝符号链接，单个归档文件上限 1 GiB、来源总量 10 GiB/10 万文件，数据库及 WAL 各限 256 MiB，超限另行审查，不自行放宽。
+
+**发布版介绍信的失败关闭保护**：发送去重读取当前 exports 与已完成且逐文件校验的历史归档并集，匹配键仍是达人+商品及旧 apply_id 兜底。归档/登记缺失、字节损坏、损坏 JSON、去重身份缺失或未知写结果都会在访问平台之前返回 2；预演也可报告这些错误，不会发送。不要把“审计读不到”当成“从未发送”。007 的 v1 目录登记仅保留源码兼容，发布真发须有完整 v2 导入校验；源码模式对旧报告的宽容行为不变。已记 `sent` 但 postcheck 未确认的行仍算已发送，禁止重试。
 
 ---
 

@@ -168,9 +168,18 @@ def historical_export_dirs() -> tuple[Path, ...]:
     """Read only explicitly registered roots; no discovery or migration here."""
     registry_path = configuration_dir() / "historical-exports.json"
     if not registry_path.exists() and not registry_path.is_symlink():
+        legacy_root = user_data_dir() / "legacy"
+        if is_packaged_distribution():
+            try:
+                if legacy_root.is_symlink() or (legacy_root.exists() and any(legacy_root.iterdir())):
+                    raise ReleasePathError("release-history-invalid", "历史归档存在但登记缺失，请人工核对。")
+            except OSError as error:
+                raise ReleasePathError("release-history-invalid", "历史归档状态不可读，请人工核对。") from error
         return ()
     try:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        if isinstance(registry, dict) and registry.get("schema_version") == 2:
+            return verify_historical_archives(registry)
         if not isinstance(registry, dict) or set(registry) != {"schema_version", "directories"}:
             raise ValueError("invalid registry")
         if registry["schema_version"] != 1 or not isinstance(registry["directories"], list):
@@ -187,6 +196,108 @@ def historical_export_dirs() -> tuple[Path, ...]:
         return tuple(directories)
     except (OSError, ValueError) as error:
         raise ReleasePathError("release-history-invalid", "登记的历史导出目录不可用，禁止当作未发送。") from error
+
+
+def _history_file_path(root: Path, relative_path: object) -> Path:
+    if not isinstance(relative_path, str) or not relative_path:
+        raise ValueError("invalid history path")
+    path_parts = PurePosixPath(relative_path)
+    if path_parts.is_absolute() or ".." in path_parts.parts or "\\" in relative_path or PureWindowsPath(relative_path).drive:
+        raise ValueError("history escape")
+    path = root / relative_path
+    if any(candidate.is_symlink() for candidate in (path, *path.parents)):
+        raise ValueError("history symlink")
+    if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+        raise ValueError("history missing")
+    return path
+
+
+def verify_historical_archives(registry: dict) -> tuple[Path, ...]:
+    """Verify immutable import manifests, file bytes and the intro inventory.
+
+    This verifies the local archive, not its business evidence. It neither
+    rewrites HMAC proofs nor turns moved reconciliation manifests into valid
+    approval credentials. Version 1 roots have no integrity contract.
+    """
+    try:
+        if set(registry) != {"schema_version", "archives"} or type(registry["schema_version"]) is not int or registry["schema_version"] != 2 or not isinstance(registry["archives"], list):
+            raise ValueError("invalid archive registry")
+        directories = []
+        for registration in registry["archives"]:
+            if not isinstance(registration, dict) or set(registration) != {"root", "manifest_sha256"}:
+                raise ValueError("invalid registration")
+            root_value = registration["root"]
+            if not isinstance(root_value, str) or not Path(root_value).is_absolute():
+                raise ValueError("absolute archive required")
+            root = Path(root_value)
+            manifest_path = _history_file_path(root, "import-manifest.json")
+            if manifest_path.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError("manifest too large")
+            manifest_bytes = manifest_path.read_bytes()
+            if hashlib.sha256(manifest_bytes).hexdigest() != registration["manifest_sha256"]:
+                raise ValueError("manifest hash mismatch")
+            manifest = json.loads(manifest_bytes)
+            if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "source", "files"} or type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1 or not isinstance(manifest["files"], list):
+                raise ValueError("invalid import manifest")
+            expected_paths = set()
+            for entry in manifest["files"]:
+                if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size", "category"}:
+                    raise ValueError("invalid file entry")
+                path = _history_file_path(root, entry["path"])
+                if path in expected_paths or type(entry["size"]) is not int or entry["size"] < 0 or path.stat().st_size != entry["size"]:
+                    raise ValueError("invalid history size or duplicate")
+                expected_paths.add(path)
+                with path.open("rb") as source:
+                    digest = hashlib.file_digest(source, "sha256").hexdigest()
+                if digest != entry["sha256"]:
+                    raise ValueError("history hash mismatch")
+            directory = root / "exports"
+            if not directory.is_dir() or directory.is_symlink():
+                raise ValueError("history exports missing")
+            if any(path not in expected_paths for path in directory.glob("sample_intro_*.json")):
+                raise ValueError("unregistered intro file")
+            if directory in directories:
+                raise ValueError("duplicate archive")
+            directories.append(directory)
+        return tuple(directories)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+        raise ReleasePathError("release-history-invalid", "历史归档缺失或校验失败，请人工核对，禁止发送介绍信。") from error
+
+
+def require_verified_historical_exports() -> dict[Path, str]:
+    """Return expected intro digests after checking completed v2 receipts.
+
+    The caller also hashes the bytes it actually parses, closing the gap
+    between archive verification and reading the sending audit.
+    """
+    registry_path = configuration_dir() / "historical-exports.json"
+    if not registry_path.exists() and not registry_path.is_symlink():
+        historical_export_dirs()
+        return {}
+    try:
+        if registry_path.is_symlink():
+            raise ValueError("registry symlink")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        verify_historical_archives(registry)
+        registered_roots = {Path(entry["root"]) for entry in registry["archives"]}
+        legacy_root = user_data_dir() / "legacy"
+        if legacy_root.is_symlink():
+            raise ValueError("legacy symlink")
+        if legacy_root.exists() and any(directory not in registered_roots for directory in legacy_root.iterdir()):
+            raise ValueError("incomplete or unregistered archive")
+        intro_digests = {}
+        for registration in registry["archives"]:
+            root = Path(registration["root"])
+            manifest_bytes = _history_file_path(root, "import-manifest.json").read_bytes()
+            if hashlib.sha256(manifest_bytes).hexdigest() != registration["manifest_sha256"]:
+                raise ValueError("manifest changed")
+            for entry in json.loads(manifest_bytes)["files"]:
+                relative_path = PurePosixPath(entry["path"])
+                if relative_path.parent == PurePosixPath("exports") and relative_path.match("sample_intro_*.json"):
+                    intro_digests[root / entry["path"]] = entry["sha256"]
+        return intro_digests
+    except (OSError, ValueError, TypeError) as error:
+        raise ReleasePathError("release-history-invalid", "历史发送审计需要完整导入及校验登记，请人工核对。") from error
 
 
 def _verify_tool_architecture(tool_path: Path, target: str) -> None:

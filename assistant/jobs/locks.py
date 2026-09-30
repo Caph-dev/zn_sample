@@ -13,6 +13,7 @@ from assistant.database.models import Job, Store
 from assistant.paths import runtime_dir
 from assistant.security.csrf import is_local_host
 from assistant.jobs.registry import ZINIAO_JOB_TYPES
+from assistant.services.release_lifecycle import admission_guard
 
 
 _cancelled_job_ids: set[str] = set()
@@ -64,7 +65,7 @@ def create_or_get_pending_job(
     result_summary: str = "",
 ) -> tuple[str, bool]:
     """Deduplicate local job creation across concurrent request threads."""
-    with _job_creation_lock:
+    with admission_guard(session_factory), _job_creation_lock:
         with session_factory() as session:
             existing_id = session.scalar(
                 select(Job.id)

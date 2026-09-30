@@ -17,6 +17,7 @@ from assistant.jobs.locks import (
 )
 from assistant.jobs.progress import append_event
 from assistant.jobs.registry import HandlerFailure, JobCancelled, get_handler
+from assistant.services.release_lifecycle import admission_guard, ServiceStopping
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,14 @@ def mark_stale_jobs_interrupted(session_factory) -> int:
 
 def _claim_next_job(session_factory) -> str | None:
     """Claim one oldest pending row under SQLite BEGIN IMMEDIATE."""
+    try:
+        with admission_guard(session_factory):
+            return _claim_pending_job(session_factory)
+    except ServiceStopping:
+        return None
+
+
+def _claim_pending_job(session_factory) -> str | None:
     engine = session_factory.kw.get("bind")
     if engine is None:
         raise RuntimeError("session-factory-missing-bind")
@@ -178,6 +187,17 @@ def _clear_active_job_state(job_id: str) -> None:
 
 def worker_loop_once(session_factory) -> str | None:
     """Claim and synchronously execute at most one durable job."""
+    coordinator = getattr(session_factory, "release_coordinator", None)
+    if coordinator is None:
+        return _execute_worker_iteration(session_factory)
+    try:
+        with coordinator.operation():
+            return _execute_worker_iteration(session_factory)
+    except ServiceStopping:
+        return None
+
+
+def _execute_worker_iteration(session_factory) -> str | None:
     job_id = _claim_next_job(session_factory)
     if job_id is None:
         return None

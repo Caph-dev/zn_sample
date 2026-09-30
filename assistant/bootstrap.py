@@ -76,9 +76,21 @@ def upgrade_database(
 
 
 def main() -> int:
-    load_dotenv()
-    configure_logging()
-    upgrade_database()
-    from assistant.lifecycle import run_assistant
+    import webbrowser
+    from assistant.lifecycle import InstanceLock, _existing_instance_url, run_assistant
 
-    return run_assistant()
+    application_directory = ensure_user_dirs()
+    instance_lock = InstanceLock(application_directory / "runtime" / "instance.lock")
+    if not instance_lock.acquire():
+        existing_url = _existing_instance_url(application_directory / "runtime" / "state.json")
+        if existing_url:
+            webbrowser.open(existing_url)
+            return 0
+        return 2
+    try:
+        load_dotenv()
+        configure_logging()
+        upgrade_database()
+        return run_assistant(owned_instance_lock=instance_lock)
+    finally:
+        instance_lock.release()
