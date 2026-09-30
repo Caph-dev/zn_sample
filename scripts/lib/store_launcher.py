@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .app_config import load_store_settings
 from .zclaw import (
     close_store,
     list_all_stores,
@@ -26,8 +27,33 @@ OPEN_STORE_TIMEOUT_SECONDS = 300
 PROBE_WAIT_SECONDS = 180.0
 PROBE_POLL_SECONDS = 3.0
 # 仅 0 号：工作台没有打开的店时默认开 2 号店（带 debugPort）。
+# 换客户/换公司改 config.toml [stores].prepare_store_*，不用改代码；
+# 这两个常量只在配置和环境变量都没有时兜底。
 DEFAULT_PREPARE_STORE_ID = "27506607043054"
 DEFAULT_PREPARE_STORE_NAME = "跨境2号店"
+
+
+def default_prepare_store(
+    *,
+    disabled: bool = False,
+    config_path: str | None = None,
+) -> dict[str, str | None]:
+    """0 号入口（打开店铺）的默认店。
+
+    优先级：config.toml [stores].prepare_store_id/name > 代码默认测试 2 号店。
+    ``disabled``（--no-default-store）返回空值。
+    """
+    if disabled:
+        return {"store_id": None, "store_name": None}
+    configured = load_store_settings(config_path=config_path)
+    store_id = configured["prepare_store_id"] or DEFAULT_PREPARE_STORE_ID
+    builtin_name = (
+        DEFAULT_PREPARE_STORE_NAME if store_id == DEFAULT_PREPARE_STORE_ID else None
+    )
+    return {
+        "store_id": store_id,
+        "store_name": configured["prepare_store_name"] or builtin_name,
+    }
 
 
 def ensure_sample_store_open(
@@ -133,13 +159,15 @@ def resolve_store_id_for_prepare(
     store_id: str | None = None,
     store_name: str | None = None,
     default_store_id: str | None = DEFAULT_PREPARE_STORE_ID,
+    default_store_name: str | None = None,
     list_running_stores_fn: Callable[[], list[dict[str, Any]]] = list_running_stores,
     list_all_stores_fn: Callable[..., list[dict[str, Any]]] = list_all_stores,
 ) -> str:
     """0 号开店用的 storeId。不回落到测试 1 号店。
 
     优先级：显式 id → running 精确店名 → running 恰好 1 家 →
-    list_stores 精确店名 → 无 running 时默认 2 号店。
+    list_stores 精确店名 → 无 running 时默认店
+    （默认店由调用方给：default_prepare_store()，可用 config.toml [stores] 覆盖）。
     """
     if store_id is not None and str(store_id).strip():
         sid = str(store_id).strip()
@@ -191,6 +219,7 @@ def resolve_store_id_for_prepare(
 
     default_sid = str(default_store_id or "").strip()
     if default_sid:
+        default_label = str(default_store_name or "").strip() or "默认店"
         if listed:
             default_hits = [
                 store for store in listed if _store_id_of(store) == default_sid
@@ -198,11 +227,10 @@ def resolve_store_id_for_prepare(
             if not default_hits:
                 raise RuntimeError(
                     f"工作台没有打开的店，账号下也找不到默认的 "
-                    f"{DEFAULT_PREPARE_STORE_NAME}（{default_sid}）。请传 --store-id。"
+                    f"{default_label}（{default_sid}）。请传 --store-id。"
                 )
         logger.info(
-            f"[店铺] 没有打开的店，默认打开 {DEFAULT_PREPARE_STORE_NAME} "
-            f"storeId={default_sid}"
+            f"[店铺] 没有打开的店，默认打开 {default_label} storeId={default_sid}"
         )
         return default_sid
 

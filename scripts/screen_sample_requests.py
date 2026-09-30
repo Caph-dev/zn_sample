@@ -11,7 +11,8 @@
 硬性纪律：
   - 默认禁止同意；仅 --execute --yes 可批
   - 用户须 **已手动** 打开：样品申请 → 待审核
-  - 测试环境默认 **1 号店** storeId=27437742526069
+  - 未显式传 --store-id 时用默认店：config.toml [stores].default_store_id
+    （未配置则为测试 1 号店 storeId=27437742526069）
   - 主推表仅飞书 wiki；达人关系表 bitable 见 [feishu.bitable]
 
 示例：
@@ -113,12 +114,13 @@ from lib.sample_write_api import (  # noqa: E402
     confirm_application_approved_api,
 )
 from lib.tracking_parse import is_order_id  # noqa: E402
-from lib.zclaw import ensure_store_exec_ready, resolve_store_id  # noqa: E402
+from lib.zclaw import (  # noqa: E402
+    default_scan_store,
+    ensure_store_exec_ready,
+    resolve_store_id,
+)
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TEST_STORE_ID = "27437742526069"
-DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
 DEFAULT_EXECUTE_LIMIT = 1
 PLATFORM_STATUS_LAG_MINUTES = 10
 ALREADY_EXECUTED_APPROVE_STATUSES = {"approved", "unknown"}
@@ -1569,7 +1571,11 @@ def main() -> int:
             "--execute --yes 可批准；批准默认调用 API；--write-feishu 才写达人关系管理(新)）"
         ),
     )
-    ap.add_argument("--store-id", default=None, help=f"默认测试 1 号店 {DEFAULT_TEST_STORE_ID}")
+    ap.add_argument(
+        "--store-id",
+        default=None,
+        help="目标店铺 storeId；默认店见 config.toml [stores]（未配置时为测试 1 号店）",
+    )
     ap.add_argument("--store-name", default=None)
     ap.add_argument("--no-default-store", action="store_true")
     ap.add_argument("--max-pages", type=int, default=50)
@@ -1822,8 +1828,12 @@ def main() -> int:
     explicit_store = bool(
         str(args.store_id or "").strip() or str(args.store_name or "").strip()
     )
-    # 从商家中心导航时：只开着一家店就用那家，不要静默落到测试 1 号店。
-    default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
+    # 从商家中心导航时：只开着一家店就用那家，不要静默落到默认店。
+    default_scan = default_scan_store(
+        disabled=args.no_default_store,
+        config_path=args.config,
+    )
+    default_sid = default_scan["store_id"]
     if args.from_seller_home and not explicit_store:
         default_sid = None
     try:
@@ -1836,8 +1846,13 @@ def main() -> int:
         logger.error(f"解析店铺失败: {e}")
         return 2
 
-    if store_id == DEFAULT_TEST_STORE_ID:
-        logger.info(f"[测试环境] 1 号店 {DEFAULT_TEST_STORE_NAME} ({store_id})")
+    if default_sid and store_id == default_sid:
+        default_label = str(default_scan["store_name"] or "").strip()
+        logger.info(
+            f"[默认店] {default_label} ({store_id})"
+            if default_label
+            else f"[默认店] storeId={store_id}"
+        )
 
     if args.from_export and (args.execute or args.confirm_export):
         allowed_source_stages = (

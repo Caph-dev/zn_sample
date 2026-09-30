@@ -61,9 +61,8 @@ from lib.shipped_dom import (  # noqa: E402
     ensure_sample_page_loaded,
     scrape_shipped_list,
 )
-from lib.zclaw import resolve_store_id  # noqa: E402
+from lib.zclaw import default_scan_store, resolve_store_id  # noqa: E402
 
-DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
 PENDING_SHIP_LOOKBACK = timedelta(hours=7 * 24)
 try:
@@ -211,7 +210,10 @@ def main() -> int:
         )
         return 2
 
-    default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
+    default_sid = default_scan_store(
+        disabled=args.no_default_store,
+        config_path=args.config,
+    )["store_id"]
     store_id = resolve_store_id(
         store_id=args.store_id,
         store_name=args.store_name,

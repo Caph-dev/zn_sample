@@ -51,11 +51,10 @@ from lib.im_dom import (  # noqa: E402
 )
 from lib.im_api import send_message_via_sdk  # noqa: E402
 from lib.message_templates import intro_message  # noqa: E402
-from lib.zclaw import resolve_store_id  # noqa: E402
+from lib.zclaw import default_scan_store, resolve_store_id  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
 
 EXPORT_FIELDS = [
@@ -305,7 +304,10 @@ def main() -> int:
     if args.max_rows and len(targets) > args.max_rows:
         targets = targets[: args.max_rows]
 
-    default_sid = None if args.no_default_store else DEFAULT_TEST_STORE_ID
+    default_sid = default_scan_store(
+        disabled=args.no_default_store,
+        config_path=args.config,
+    )["store_id"]
     store_id = resolve_store_id(
         store_id=args.store_id,
         store_name=args.store_name,

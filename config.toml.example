@@ -4,6 +4,18 @@
 # 优先级：CLI 参数 > 环境变量 > 本文件 > 代码默认值
 # Secret 勿提交 git、勿发到聊天记录
 
+# 默认店铺（换客户 / 换公司改这里，不用改代码）。
+# 改动后 0/1/2/3 双击与网页任务都会用新默认；CLI --store-id / --store-name
+# 与 --no-default-store 仍然优先/禁用。环境变量可用 ZN_SAMPLE_STORE_ID /
+# ZN_SAMPLE_STORE_NAME / ZN_SAMPLE_PREPARE_STORE_ID / ZN_SAMPLE_PREPARE_STORE_NAME。
+[stores]
+# 1/2/3 号入口（筛查 / 物流 / 私信）：running 无法唯一解析时的默认店
+default_store_id = "27437742526069"
+default_store_name = "跨境1号店（Lingerie Outlet）"
+# 0 号入口（打开店铺）：工作台一家店都没开时默认打开哪家
+prepare_store_id = "27506607043054"
+prepare_store_name = "跨境2号店"
+
 [feishu]
 # 主推表 wiki（SOP 条件 2）只读
 app_id = "cli_a96b1c39ac789bb4"

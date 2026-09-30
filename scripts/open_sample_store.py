@@ -12,8 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib.app_log import configure_logging  # noqa: E402
 from lib.store_launcher import (  # noqa: E402
-    DEFAULT_PREPARE_STORE_ID,
-    DEFAULT_PREPARE_STORE_NAME,
+    default_prepare_store,
     ensure_sample_store_open,
     prepare_sample_store_debug,
     resolve_store_id_for_prepare,
@@ -25,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     configure_logging()
+    # 默认店：config.toml [stores].prepare_store_* > 代码默认 2 号店（换客户只改配置）。
+    prepare_default = default_prepare_store()
     argument_parser = argparse.ArgumentParser(
         description=(
             "通过 GUI + ZClaw 打开店铺。"
@@ -58,18 +59,21 @@ def main() -> int:
         action="store_true",
         help=(
             "禁止 0 号在无 running 时默认打开 "
-            f"{DEFAULT_PREPARE_STORE_NAME}（{DEFAULT_PREPARE_STORE_ID}）"
+            f"{prepare_default['store_name'] or '默认店'}"
+            f"（{prepare_default['store_id']}，见 config.toml [stores]）"
         ),
     )
     arguments = argument_parser.parse_args()
     try:
         if arguments.reopen:
+            default_prepare = default_prepare_store(
+                disabled=arguments.no_default_store
+            )
             store_id = resolve_store_id_for_prepare(
                 store_id=arguments.store_id,
                 store_name=arguments.store_name or None,
-                default_store_id=(
-                    None if arguments.no_default_store else DEFAULT_PREPARE_STORE_ID
-                ),
+                default_store_id=default_prepare["store_id"],
+                default_store_name=default_prepare["store_name"],
             )
             result = prepare_sample_store_debug(
                 store_id,

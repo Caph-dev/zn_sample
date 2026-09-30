@@ -3,7 +3,7 @@
 
 优先级（高 → 低）：
   1. 函数/CLI 显式参数
-  2. 环境变量（FEISHU_*）
+  2. 环境变量（FEISHU_* / ZN_SAMPLE_STORE_* / ZN_SAMPLE_PREPARE_STORE_*）
   3. 仓库根目录 config.toml（或 --config 指定路径）
   4. 代码默认值
 
@@ -259,6 +259,40 @@ def load_bitable_settings(
         "app_token": resolved_app_token,
         "table_id": resolved_table_id,
         "view_id": resolved_view_id,
+        "config_path": str(resolved_path) if resolved_path else None,
+    }
+
+
+def load_store_settings(*, config_path: str | Path | None = None) -> dict[str, str | None]:
+    """合并默认店铺配置 [stores]。
+
+    优先级：环境变量 > config.toml [stores] > None（由调用方回落到代码默认值）。
+    返回:
+      default_store_id / default_store_name   1/2/3 号入口（筛查 / 物流 / 私信）默认店
+      prepare_store_id / prepare_store_name   0 号入口（打开店铺）默认店
+      config_path
+    """
+    raw = load_raw_config(config_path)
+    stores = _section(raw, "stores")
+    resolved_path = resolve_config_path(config_path)
+
+    return {
+        "default_store_id": _pick_str(
+            os.environ.get("ZN_SAMPLE_STORE_ID"),
+            stores.get("default_store_id"),
+        ),
+        "default_store_name": _pick_str(
+            os.environ.get("ZN_SAMPLE_STORE_NAME"),
+            stores.get("default_store_name"),
+        ),
+        "prepare_store_id": _pick_str(
+            os.environ.get("ZN_SAMPLE_PREPARE_STORE_ID"),
+            stores.get("prepare_store_id"),
+        ),
+        "prepare_store_name": _pick_str(
+            os.environ.get("ZN_SAMPLE_PREPARE_STORE_NAME"),
+            stores.get("prepare_store_name"),
+        ),
         "config_path": str(resolved_path) if resolved_path else None,
     }
 

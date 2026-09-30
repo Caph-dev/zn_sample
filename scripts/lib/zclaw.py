@@ -9,6 +9,7 @@ import subprocess
 import time
 from typing import Any
 
+from .app_config import load_store_settings
 from .time_budget import remaining_seconds
 from .zclaw_cli import run_ziniao_cli
 
@@ -316,6 +317,34 @@ def visit_page(store_id: str, url: str) -> dict:
     return outer
 
 
+# 1/2/3 号入口的代码默认店（测试 1 号店）。换客户/换公司改 config.toml [stores]，
+# 不用改代码；这两个常量只在配置和环境变量都没有时兜底。
+DEFAULT_TEST_STORE_ID = "27437742526069"
+DEFAULT_TEST_STORE_NAME = "跨境1号店（Lingerie Outlet）"
+
+
+def default_scan_store(
+    *,
+    disabled: bool = False,
+    config_path: str | None = None,
+) -> dict[str, str | None]:
+    """1/2/3 号入口（筛查 / 物流 / 私信）的默认店。
+
+    优先级：config.toml [stores].default_store_id > 代码默认测试 1 号店。
+    ``disabled``（--no-default-store）返回空值，调用方不应再回落到默认店。
+    """
+    if disabled:
+        return {"store_id": None, "store_name": None}
+    configured = load_store_settings(config_path=config_path)
+    store_id = configured["default_store_id"] or DEFAULT_TEST_STORE_ID
+    # 只有确实落到内置 1 号店时才显示它的名字，避免把内置名字安到客户自己的店上。
+    builtin_name = DEFAULT_TEST_STORE_NAME if store_id == DEFAULT_TEST_STORE_ID else None
+    return {
+        "store_id": store_id,
+        "store_name": configured["default_store_name"] or builtin_name,
+    }
+
+
 def resolve_store_id(
     *,
     store_id: str | None = None,
@@ -328,7 +357,8 @@ def resolve_store_id(
       1) 显式 --store-id
       2) --store-name 在 running 中精确唯一匹配
       3) running 恰好 1 家
-      4) default_store_id（测试默认 1 号店）且该店在 list 或 running 中可识别时可用
+      4) default_store_id（默认由 default_scan_store() 给：config.toml [stores]
+         > 代码默认测试 1 号店；--no-default-store 时为空）
     """
     if store_id is not None and str(store_id).strip():
         sid = str(store_id).strip()

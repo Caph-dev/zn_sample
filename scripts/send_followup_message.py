@@ -28,11 +28,9 @@ from lib.im_api import (  # noqa: E402
     thread_contains_message_predicate,
     thread_thanks_hold_reason,
 )
-from lib.zclaw import resolve_store_id  # noqa: E402
+from lib.zclaw import default_scan_store, resolve_store_id  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TEST_STORE_ID = "27437742526069"
 DEFAULT_EXECUTE_LIMIT = 1
 SENDABLE_STAGES = ("arrival", "day_3", "day_7", "content_found")
 MESSAGE_STAGES = ("arrival", "day_3", "day_7")
@@ -586,11 +584,13 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # 默认店：config.toml [stores].default_store_id > 代码默认测试 1 号店。
+    default_sid = default_scan_store(disabled=args.no_default_store)["store_id"]
     try:
         store_id = resolve_store_id(
             store_id=args.store_id,
             store_name=args.store_name,
-            default_store_id=None if args.no_default_store else DEFAULT_TEST_STORE_ID,
+            default_store_id=default_sid,
         )
     except RuntimeError as error:
         logger.error(f"[店铺] {error}")
