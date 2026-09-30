@@ -16,12 +16,18 @@ if not defined VALID (
   exit /b 2
 )
 
+REM 有项目虚拟环境就用它（setup 安装脚本 / uv sync 建的都在这里）；没有再用系统 Python。
 set "PY="
 set "SEEN_PY="
-py -3 -c "import sys" >nul 2>&1
-if not errorlevel 1 set "SEEN_PY=1"
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
-if not errorlevel 1 set "PY=py -3"
+set "VENV_PYTHON=%~dp0..\.venv\Scripts\python.exe"
+if exist "%VENV_PYTHON%" set "PY="%VENV_PYTHON%""
+
+if not defined PY (
+  py -3 -c "import sys" >nul 2>&1
+  if not errorlevel 1 set "SEEN_PY=1"
+  py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
+  if not errorlevel 1 set "PY=py -3"
+)
 if not defined PY (
   python -c "import sys" >nul 2>&1
   if not errorlevel 1 set "SEEN_PY=1"

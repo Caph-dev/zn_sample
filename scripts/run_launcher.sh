@@ -18,6 +18,12 @@ esac
 
 pick_python() {
   local c
+  # 有项目虚拟环境就用它（setup 安装脚本 / uv sync 建的都在这里）；没有再用系统 Python。
+  local venv_python="$ROOT/.venv/bin/python"
+  if [[ -x $venv_python ]]; then
+    print -- "$venv_python"
+    return 0
+  fi
   for c in python3 python; do
     if (( $+commands[$c] )); then
       print -- "${commands[$c]}"
