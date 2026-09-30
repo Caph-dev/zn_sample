@@ -44,6 +44,94 @@ NODE_ENGINE_RANGES = (
     ((22, 12, 0), None),
 )
 
+# Release-only policy. Development installation below remains unchanged.
+# CLI is technician-installed outside the bundle; never download or redistribute it.
+RELEASE_PYTHON_VERSION = "3.12.14"
+RELEASE_NODE_VERSION = "24.21.0"
+RELEASE_FFMPEG_VERSION = "9.0.2"
+RELEASE_EXTERNAL_CLI = {"name": "@ziniao-open/cli", "version": PINNED_ZINIAO_CLI}
+# Audited official 1.0.7 npm wrapper: only spawn its sibling native binary.
+RELEASE_EXTERNAL_CLI_RUNNER_SHA256 = (
+    "d2eefdf6f7f06d24272934ccfdfd2ab847e5e20a40353b4b176996d85a1db533"
+)
+RELEASE_PYTHON_LICENSE_SOURCE = (
+    "https://github.com/astral-sh/python-build-standalone/blob/20260929/docs/running.md"
+)
+RELEASE_NODE_LICENSE_SOURCE = (
+    f"https://raw.githubusercontent.com/nodejs/node/v{RELEASE_NODE_VERSION}/LICENSE"
+)
+RELEASE_FFMPEG_SOURCE = {
+    "version": RELEASE_FFMPEG_VERSION,
+    "url": f"https://ffmpeg.org/releases/ffmpeg-{RELEASE_FFMPEG_VERSION}.tar.xz",
+    "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+    "checksum_source": (
+        "https://github.com/Homebrew/homebrew-core/blob/"
+        "df0f5973faba506285051a1a21b1baa1e166719a/Formula/f/ffmpeg.rb"
+    ),
+    "license_source": "https://ffmpeg.org/legal.html",
+    "license": "LGPL-2.1-or-later (without GPL/nonfree/version3 components)",
+    "archive_root": f"ffmpeg-{RELEASE_FFMPEG_VERSION}",
+}
+RELEASE_FFMPEG_CONFIGURE = (
+    "--disable-autodetect", "--disable-gpl", "--disable-nonfree",
+    "--disable-version3", "--disable-shared", "--enable-static",
+    "--disable-network", "--disable-doc", "--disable-debug",
+    "--disable-x86asm", "--disable-everything", "--disable-ffplay",
+    "--disable-ffprobe", "--enable-ffmpeg", "--enable-swscale",
+    "--enable-protocol=file,pipe", "--enable-demuxer=mov,rawvideo",
+    "--enable-muxer=mp4,image2,image2pipe,null,rawvideo",
+    "--enable-decoder=h264,hevc,mpeg4,mjpeg,rawvideo,vp9,av1",
+    "--enable-parser=h264,hevc,mpeg4video,mjpeg,vp9,av1",
+    "--enable-encoder=mpeg4,mjpeg,rawvideo",
+    "--enable-filter=scale,fps,select,color,format,testsrc2",
+)
+RELEASE_TARGETS = {
+    "macos-arm64": {
+        "system": "Darwin", "machine": "arm64", "minimum_os": "13.5",
+        "python_executable": "runtime/python/bin/python3",
+        "node_executable": "runtime/node/bin/node",
+        "ffmpeg_executable": "runtime/ffmpeg/ffmpeg",
+        "python": {
+            "version": RELEASE_PYTHON_VERSION,
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260929/cpython-3.12.14%2B20260929-aarch64-apple-darwin-install_only.tar.gz",
+            "sha256": "de6b8f94fa765639b423ea353ab340669704c7186f96ee3cab389dcfde770c3c",
+            "checksum_source": "https://github.com/astral-sh/python-build-standalone/releases/tag/20260929",
+            "license_source": RELEASE_PYTHON_LICENSE_SOURCE,
+            "archive_root": "python",
+        },
+        "node": {
+            "version": RELEASE_NODE_VERSION,
+            "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz",
+            "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
+            "checksum_source": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+            "license_source": RELEASE_NODE_LICENSE_SOURCE,
+            "archive_root": "node-v24.21.0-darwin-arm64",
+        },
+    },
+    "windows-x64": {
+        "system": "Windows", "machine": "AMD64", "minimum_os": "10",
+        "python_executable": "runtime/python/python.exe",
+        "node_executable": "runtime/node/node.exe",
+        "ffmpeg_executable": "runtime/ffmpeg/ffmpeg.exe",
+        "python": {
+            "version": RELEASE_PYTHON_VERSION,
+            "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260929/cpython-3.12.14%2B20260929-x86_64-pc-windows-msvc-install_only.tar.gz",
+            "sha256": "28728baf30b65e263f0b25c5a85be8226e7ab0d212fbadd6a8f0f796139fa804",
+            "checksum_source": "https://github.com/astral-sh/python-build-standalone/releases/tag/20260929",
+            "license_source": RELEASE_PYTHON_LICENSE_SOURCE,
+            "archive_root": "python",
+        },
+        "node": {
+            "version": RELEASE_NODE_VERSION,
+            "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip",
+            "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+            "checksum_source": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+            "license_source": RELEASE_NODE_LICENSE_SOURCE,
+            "archive_root": "node-v24.21.0-win-x64",
+        },
+    },
+}
+
 VENV_PYTHON = ROOT / (
     ".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python"
 )
