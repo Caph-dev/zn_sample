@@ -448,6 +448,30 @@ class SendFollowupBackupTests(unittest.TestCase):
             self.assertEqual(payload["rows"], rows)
             self.assertIn("generated_at", payload)
 
+    def test_backup_default_uses_shared_exports_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            export_directory = Path(directory) / "user-exports"
+            with patch("send_followup_message.user_exports_dir", return_value=export_directory):
+                path = write_pre_execute_backup([{"task_id": 1}])
+            self.assertEqual(path.parent, export_directory)
+            self.assertTrue(path.is_file())
+
+    def test_explicit_backup_directory_overrides_shared_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("send_followup_message.user_exports_dir", side_effect=AssertionError("default must not be used")):
+                path = write_pre_execute_backup([], exports_directory=Path(directory))
+            self.assertEqual(path.parent, Path(directory))
+
+    def test_relative_attachment_uses_application_resource_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resource_directory = Path(directory) / "app"
+            attachment = resource_directory / "attachments" / "followup.png"
+            attachment.parent.mkdir(parents=True)
+            attachment.write_bytes(b"attachment")
+            with patch("send_followup_message.application_resource_dir", return_value=resource_directory):
+                resolved = resolve_attachment_path({"attachment_key": "attachments/followup.png"})
+            self.assertEqual(resolved, attachment)
+
     def test_attachment_path_resolves_repo_relative_key(self) -> None:
         row = {
             "attachment_key": "样品申请筛查sop/图片和附件/2-查看到货+达人跟进-b05.png"

@@ -23,6 +23,13 @@ import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+from assistant.paths import (
+    ReleasePathError,
+    bundled_tool_path,
+    is_packaged_distribution,
+    python_subprocess_environment,
+)
+
 from .app_config import load_content_review_settings
 from .creator_video_contract import (
     REVIEW_VERSION,
@@ -124,7 +131,18 @@ def _ffmpeg_base_args(media: Path) -> list[str]:
     ]
 
 
+def _resolve_ffmpeg_executable(settings: dict) -> str | None:
+    if not is_packaged_distribution():
+        return settings["ffmpeg_path"] or shutil.which("ffmpeg")
+    executable = bundled_tool_path("ffmpeg")
+    configured_path = settings.get("ffmpeg_path")
+    if configured_path and Path(configured_path).expanduser().resolve() != executable:
+        raise ReleasePathError("release-ffmpeg-config", "旧 FFmpeg 配置不属于发布运行时，请技术人员归一化配置。")
+    return executable.as_posix()
+
+
 def _run_ffmpeg(executable: str, arguments: list[str], remaining: float) -> bool:
+    environment_options = {"env": python_subprocess_environment()} if is_packaged_distribution() else {}
     completed = subprocess.run(
         [str(executable), *arguments],
         stdin=subprocess.DEVNULL,
@@ -132,6 +150,7 @@ def _run_ffmpeg(executable: str, arguments: list[str], remaining: float) -> bool
         stderr=subprocess.DEVNULL,
         timeout=remaining,
         check=False,
+        **environment_options,
     )
     return completed.returncode == 0
 
@@ -141,7 +160,7 @@ def _extract_frames(
 ) -> tuple[list[Path], int | None]:
     """Sample one frame per 10 seconds; fall back to the very first frame for
     short clips, where fps=1/10 legitimately yields zero frames."""
-    executable = settings["ffmpeg_path"] or shutil.which("ffmpeg")
+    executable = _resolve_ffmpeg_executable(settings)
     if not executable:
         raise ReviewUnavailable("ffmpeg_unavailable")
     remaining = min(45, deadline - time.monotonic())

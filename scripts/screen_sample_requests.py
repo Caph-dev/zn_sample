@@ -41,8 +41,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from assistant.paths import exports_dir, validate_writable_path  # noqa: E402
 from lib.approve_dom import click_approve_for_apply_id  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import is_verbose, set_verbose  # noqa: E402
@@ -625,7 +627,7 @@ def decide_api_approval_outcome(
 
 def _write_backup(rows: list[dict[str, Any]], prefix: Path) -> dict[str, Path]:
     """批准前备份：json 快照 + 标准导出三件套。"""
-    prefix = Path(prefix)
+    prefix = validate_writable_path(prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path = prefix.with_name(prefix.name + "_pre_execute.json")
     snapshot_path.write_text(
@@ -2219,7 +2221,7 @@ def main() -> int:
             f"type={x.get('creator_type')}\thero={x.get('is_hero')}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_prefix = args.out or (ROOT / "exports" / f"sample_screen_{ts}")
+    out_prefix = validate_writable_path(args.out or (exports_dir(development_root=ROOT) / f"sample_screen_{ts}"))
 
     if pending_result and pending_result.shadow_report:
         pending_result.shadow_report["detail_reports"] = detail_shadow_reports

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -67,12 +69,68 @@ class IntroDedupeKeyTests(unittest.TestCase):
         self.assertNotEqual(_intro_target_key(product_one), _intro_target_key(product_two))
 
     def test_load_sent_audit_keeps_same_application_fallback(self) -> None:
-        with patch("send_sample_intro.ROOT") as project_root:
-            export_path = project_root.__truediv__.return_value.__truediv__.return_value
-            export_path.glob.return_value = []
-            sent_keys, sent_apply_ids = _load_sent_intro_audit()
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            export_directory = project_root / "exports"
+            export_directory.mkdir()
+            (export_directory / "sample_intro_legacy.json").write_text(
+                json.dumps([{"apply_id": "legacy-application", "send_status": "sent"}]),
+                encoding="utf-8",
+            )
+            with (
+                patch("send_sample_intro.ROOT", project_root),
+                patch("send_sample_intro.historical_export_dirs", return_value=()),
+            ):
+                sent_keys, sent_apply_ids = _load_sent_intro_audit()
 
         self.assertEqual(sent_keys, set())
+        self.assertEqual(sent_apply_ids, {"legacy-application"})
+
+    def test_sent_audit_reads_current_and_registered_history_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            current_directory = temporary_root / "current"
+            historical_directory = temporary_root / "registered-history"
+            unregistered_directory = temporary_root / "exports"
+            for export_directory, creator_id in (
+                (current_directory, "current-creator"),
+                (historical_directory, "historical-creator"),
+                (unregistered_directory, "unregistered-creator"),
+            ):
+                export_directory.mkdir()
+                (export_directory / "sample_intro_sent.json").write_text(
+                    json.dumps(
+                        {
+                            "rows": [
+                                {
+                                    "creator_id": creator_id,
+                                    "product_id": "product",
+                                    "send_status": "sent",
+                                },
+                                {
+                                    "creator_id": "unsent-creator",
+                                    "product_id": "product",
+                                    "send_status": "dry-run",
+                                },
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            with (
+                patch("send_sample_intro.ROOT", unregistered_directory.parent),
+                patch("send_sample_intro.exports_dir", return_value=current_directory),
+                patch(
+                    "send_sample_intro.historical_export_dirs",
+                    return_value=(historical_directory, current_directory),
+                ),
+            ):
+                sent_keys, sent_apply_ids = _load_sent_intro_audit()
+
+        self.assertEqual(
+            sent_keys,
+            {("current-creator", "product"), ("historical-creator", "product")},
+        )
         self.assertEqual(sent_apply_ids, set())
 
 

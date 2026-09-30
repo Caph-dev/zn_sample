@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from assistant.paths import application_resource_dir, user_exports_dir, validate_writable_path  # noqa: E402
 from lib.app_config import load_dotenv  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.console import set_verbose  # noqa: E402
@@ -201,9 +202,7 @@ def write_pre_execute_backup(
     exports_directory: Path | None = None,
 ) -> Path:
     """Write the pre-send snapshot required by the follow-up send discipline."""
-    from assistant.paths import user_data_dir
-
-    directory = exports_directory or (user_data_dir() / "exports")
+    directory = validate_writable_path(exports_directory or user_exports_dir())
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = directory / f"followup_send_{stamp}_pre_execute.json"
@@ -224,7 +223,7 @@ def resolve_attachment_path(row: dict[str, Any]) -> Path | None:
         return None
     path = Path(key)
     if not path.is_absolute():
-        path = ROOT / path
+        path = application_resource_dir() / path
     return path if path.is_file() else None
 
 

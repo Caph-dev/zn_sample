@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -20,10 +19,15 @@ from assistant.database.models import Job
 from assistant.jobs.locks import is_cancellation_requested
 from assistant.jobs.progress import append_event, update_progress
 from assistant.jobs.registry import HandlerFailure, JobCancelled
-from assistant.paths import ensure_user_dirs
+from assistant.paths import (
+    application_resource_dir,
+    assert_private_interpreter,
+    ensure_user_dirs,
+    python_subprocess_environment,
+)
 from assistant.services import auto_approval_service
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+REPOSITORY_ROOT = application_resource_dir()
 AUTO_APPROVAL_SCRIPT = REPOSITORY_ROOT / "scripts" / "auto_approval.py"
 
 JOB_TYPE_TO_MODE = {
@@ -61,6 +65,7 @@ def _load_request(session_factory, job_id: str) -> tuple[str, dict]:
 
 def _fixed_argv(request_payload: dict, mode: str) -> list[str]:
     """组装固定 argv；只接受服务端写入的绝对路径与整数开关。"""
+    assert_private_interpreter()
     result_path = str(request_payload.get("result_path") or "").strip()
     if not result_path:
         raise HandlerFailure(
@@ -275,9 +280,7 @@ def run_auto_approval_job(job_id: str, session_factory) -> str:
         message=f"自动审批 {mode} 已启动",
     )
 
-    environment = os.environ.copy()
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8"
+    environment = python_subprocess_environment()
     creation_flags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if sys.platform == "win32"

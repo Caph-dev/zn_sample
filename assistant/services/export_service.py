@@ -14,7 +14,7 @@ from assistant.domain.followup_stage import (
     latest_due_unpublished_stage,
 )
 from assistant.domain.timeutil import beijing_now
-from assistant.paths import user_data_dir
+from assistant.paths import user_exports_dir, validate_writable_path
 
 
 EXPORT_FIELDS = (
@@ -50,7 +50,7 @@ def _is_current_day_10_node(*, shipment, today: date) -> bool:
 class ExportService:
     def __init__(self, session_factory, *, exports_directory: Path | None = None) -> None:
         self.session_factory = session_factory
-        self.exports_directory = exports_directory or user_data_dir() / "exports"
+        self.exports_directory = validate_writable_path(exports_directory or user_exports_dir())
 
     def export(self, kind: str) -> Path:
         normalized_kind = "day_10_list" if kind == "overdue_10" else kind

@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from assistant.paths import exports_dir, historical_export_dirs, validate_writable_path  # noqa: E402
 from lib.creator_detail import (  # noqa: E402
     extract_creator_detail,
     go_back_to_list,
@@ -104,7 +106,15 @@ def _load_sent_intro_audit() -> tuple[set[tuple[str, str]], set[str]]:
     """
     sent_target_keys: set[tuple[str, str]] = set()
     sent_apply_ids: set[str] = set()
-    for export_path in (ROOT / "exports").glob("sample_intro_*.json"):
+    export_directories = dict.fromkeys(
+        (exports_dir(development_root=ROOT), *historical_export_dirs())
+    )
+    export_paths = (
+        export_path
+        for directory in export_directories
+        for export_path in directory.glob("sample_intro_*.json")
+    )
+    for export_path in export_paths:
         try:
             data = json.loads(export_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -259,6 +269,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true", help="终端打印页面 API 明细")
     args = parser.parse_args()
+    if args.out is not None:
+        args.out = validate_writable_path(args.out)
     load_dotenv()
     configure_logging(verbose=bool(args.verbose))
     set_verbose(bool(args.verbose))
@@ -493,7 +505,7 @@ def main() -> int:
         results.append(out)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = args.out or (ROOT / "exports" / f"sample_intro_{ts}")
+    prefix = validate_writable_path(args.out or (exports_dir(development_root=ROOT) / f"sample_intro_{ts}"))
     paths = write_generic_reports(results, prefix, fieldnames=EXPORT_FIELDS)
     logger.info("--- 导出 ---")
     for key, path in paths.items():

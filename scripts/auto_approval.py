@@ -24,9 +24,13 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from assistant.paths import validate_writable_path  # noqa: E402
 from lib.app_log import configure_logging  # noqa: E402
 from lib.auto_approval_rules import (  # noqa: E402
     CONTENT_DISABLED_REASON,
@@ -1215,6 +1219,9 @@ def main() -> int:
     ap.add_argument("--detail-delay", type=float, default=1.0)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    args.out = validate_writable_path(args.out)
+    if args.backup_out is not None:
+        args.backup_out = validate_writable_path(args.backup_out)
     configure_logging(verbose=bool(args.verbose))
 
     if args.mode == "preview":

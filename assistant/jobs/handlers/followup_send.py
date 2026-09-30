@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime
@@ -11,7 +10,12 @@ from pathlib import Path
 from assistant.database.models import Job
 from assistant.jobs.progress import append_event, update_progress
 from assistant.jobs.registry import HandlerFailure
-from assistant.paths import ensure_user_dirs
+from assistant.paths import (
+    application_resource_dir,
+    assert_private_interpreter,
+    ensure_user_dirs,
+    python_subprocess_environment,
+)
 
 
 # 脚本退出码 → 页面文案。4 是「任务本身不可发送」（已发/未到期/平台状态不符），
@@ -73,10 +77,9 @@ def _load_task_id(session_factory, job_id: str) -> int:
 
 def _run_script(*, task_id: int, job_id: str, log_path: Path) -> int:
     """Run one fixed argv without a shell on macOS or Windows."""
-    root = Path(__file__).resolve().parents[3]
-    environment = os.environ.copy()
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8"
+    root = application_resource_dir()
+    assert_private_interpreter()
+    environment = python_subprocess_environment()
     creation_flags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if sys.platform == "win32"

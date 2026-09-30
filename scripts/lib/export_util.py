@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from assistant.paths import exports_dir as application_exports_dir, is_packaged_distribution, validate_writable_path
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_EXPORT_DIR = REPO_ROOT / "exports"
+DEFAULT_EXPORT_DIR = application_exports_dir()
 RECONCILIATION_MANIFEST_SUFFIX = "_reconcile.json"
 RECONCILIATION_STAGE_SCREEN = "screen"
 RECONCILIATION_STAGE_APPROVE = "approve"
@@ -24,7 +26,7 @@ class ReconciliationManifestError(RuntimeError):
 
 def latest_screen_export(exports_dir: Path | None = None) -> Path:
     """exports/ 里最新一份正式筛查 json，排除批准前备份。"""
-    directory = Path(exports_dir or DEFAULT_EXPORT_DIR)
+    directory = Path(exports_dir or (application_exports_dir() if is_packaged_distribution() else DEFAULT_EXPORT_DIR))
     candidates = [
         path
         for path in directory.glob("sample_screen_*.json")
@@ -163,7 +165,7 @@ def latest_reconciliation_export(
     exports_dir: Path | None = None,
 ) -> Path:
     """Find the newest verified manifest-backed export for specific stages."""
-    directory = Path(exports_dir or DEFAULT_EXPORT_DIR)
+    directory = Path(exports_dir or (application_exports_dir() if is_packaged_distribution() else DEFAULT_EXPORT_DIR))
     candidates: list[tuple[str, float, Path]] = []
     invalid_candidates: list[tuple[str, float, ReconciliationManifestError]] = []
     for manifest_path in directory.glob(f"*{RECONCILIATION_MANIFEST_SUFFIX}"):
@@ -632,7 +634,7 @@ def _write_xlsx_minimal(rows: list[dict], path: Path) -> Path:
 
 def write_reports(rows: Iterable[dict], out_prefix: Path) -> dict[str, Path]:
     rows = list(rows)
-    out_prefix = Path(out_prefix)
+    out_prefix = validate_writable_path(out_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
     return {
         "csv": write_csv(rows, out_prefix.with_suffix(".csv")),
@@ -679,7 +681,7 @@ def write_reconciliation_manifest(
     source_export: Path | None = None,
 ) -> Path:
     """Write a tamper-evident, append-only recovery sidecar for one stage."""
-    output_prefix = Path(out_prefix)
+    output_prefix = validate_writable_path(out_prefix)
     output_json_path = output_prefix.with_suffix(".json")
     if not output_json_path.is_file():
         raise ReconciliationManifestError(
@@ -733,7 +735,7 @@ def write_generic_reports(
     fieldnames: list[str] | None = None,
 ) -> dict[str, Path]:
     """任意列 json + csv（6–9 步导出用，不走筛查中文表头）。"""
-    out_prefix = Path(out_prefix)
+    out_prefix = validate_writable_path(out_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
     names = list(fieldnames or [])
     if not names:

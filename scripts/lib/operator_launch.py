@@ -14,6 +14,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from assistant.paths import (
+    application_resource_dir,
+    assert_private_interpreter,
+    exports_dir,
+    python_subprocess_environment,
+)
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -34,7 +41,7 @@ from .zclaw_cli import CLI_NOT_FOUND, fs_path, resolve_ziniao_cli_command
 
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = application_resource_dir()
 OPEN_SCRIPT = ROOT / "scripts" / "open_sample_store.py"
 SCREEN_SCRIPT = ROOT / "scripts" / "screen_sample_requests.py"
 INTRO_SCRIPT = ROOT / "scripts" / "send_sample_intro.py"
@@ -212,7 +219,7 @@ def parse_mode(name: str | None) -> LaunchMode:
 def default_out_prefix(mode: LaunchMode | str, *, now: datetime | None = None) -> Path:
     spec = parse_mode(mode) if isinstance(mode, str) else mode
     stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    return ROOT / "exports" / f"{spec.report_stem}_{stamp}"
+    return exports_dir(development_root=ROOT) / f"{spec.report_stem}_{stamp}"
 
 
 def pipeline_prefixes(*, now: datetime | None = None, base: Path | None = None) -> dict[str, Path]:
@@ -224,7 +231,7 @@ def pipeline_prefixes(*, now: datetime | None = None, base: Path | None = None) 
             "intro": base.parent / f"{base.name}_intro",
         }
     stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    exports = ROOT / "exports"
+    exports = exports_dir(development_root=ROOT)
     return {
         "screen": exports / f"sample_screen_{stamp}",
         "approve": exports / f"sample_screen_{stamp}_approved",
@@ -242,6 +249,7 @@ def build_step_argv(
     from_export: Path | None = None,
     writes_report: bool = True,
 ) -> list[str]:
+    assert_private_interpreter(python)
     argv = [python, fs_path(script), *extra_args]
     if from_export is not None:
         argv.extend(["--from-export", fs_path(from_export)])
@@ -585,7 +593,8 @@ def run_job(
     runner: RunnerFn | None = None,
 ) -> int:
     run = runner or subprocess.run
-    proc = run(list(argv), cwd=fs_path(ROOT))
+    assert_private_interpreter(str(argv[0]))
+    proc = run(list(argv), cwd=fs_path(ROOT), env=python_subprocess_environment())
     return int(proc.returncode)
 
 

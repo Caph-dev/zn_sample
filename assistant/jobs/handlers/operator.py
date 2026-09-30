@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -14,7 +13,12 @@ from assistant.database.models import Job
 from assistant.jobs.locks import cancel_flag_path
 from assistant.jobs.progress import update_progress
 from assistant.jobs.registry import HandlerFailure, JobCancelled
-from assistant.paths import ensure_user_dirs
+from assistant.paths import (
+    application_resource_dir,
+    assert_private_interpreter,
+    ensure_user_dirs,
+    python_subprocess_environment,
+)
 from lib.job_cancel import CANCEL_FLAG_ENV, EXIT_CODE_CANCELLED
 from lib.operator_launch import (
     MODES,
@@ -76,9 +80,8 @@ def _run_subprocess(
     ``cancel_flag`` is handed to the child as a sentinel path; the child stops
     at its own safe checkpoint instead of being killed mid-write.
     """
-    environment = os.environ.copy()
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8"
+    assert_private_interpreter(str(argv[0]))
+    environment = python_subprocess_environment()
     if cancel_flag is not None:
         environment[CANCEL_FLAG_ENV] = str(cancel_flag)
     creation_flags = (
@@ -89,7 +92,7 @@ def _run_subprocess(
     with log_path.open("a", encoding="utf-8", errors="replace") as log_file:
         completed_process = subprocess.run(
             list(argv),
-            cwd=str(Path(__file__).resolve().parents[3]),
+            cwd=str(application_resource_dir()),
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,

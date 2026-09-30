@@ -17,6 +17,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from assistant.paths import (
+    configuration_dir,
+    content_review_cache_dir,
+    is_packaged_distribution,
+    resolve_content_cache_path,
+)
+
 # scripts/lib/app_config.py → 仓库根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATHS = (
@@ -64,7 +71,8 @@ def resolve_config_path(explicit: str | Path | None = None) -> Path | None:
         if not path.is_file():
             raise AppConfigError(f"ZN_SAMPLE_CONFIG 指向的文件不存在: {path}")
         return path
-    for candidate in DEFAULT_CONFIG_PATHS:
+    candidates = (configuration_dir() / "config.toml",) if is_packaged_distribution() else DEFAULT_CONFIG_PATHS
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
@@ -95,7 +103,8 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
 
 def load_dotenv(env_path: str | Path | None = None) -> Path | None:
     """把仓库根目录 `.env` 载入环境变量；已存在的环境变量不覆盖。"""
-    path = Path(env_path).expanduser() if env_path is not None else DEFAULT_ENV_PATH
+    default_path = configuration_dir() / ".env" if is_packaged_distribution() else DEFAULT_ENV_PATH
+    path = Path(env_path).expanduser() if env_path is not None else default_path
     if not path.is_file():
         return None
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -322,7 +331,7 @@ def load_content_review_settings() -> dict[str, Any]:
 
     defaults = {
         "enabled": True,
-        "cache_dir": str(PROJECT_ROOT / "exports" / "content_review_cache"),
+        "cache_dir": str(content_review_cache_dir() if is_packaged_distribution() else PROJECT_ROOT / "exports" / "content_review_cache"),
         "external_env_path": "",
         "tikhub_api_key": "",
         "ark_api_key": "",
@@ -338,7 +347,8 @@ def load_content_review_settings() -> dict[str, Any]:
     section = _section(load_raw_config(), "content_review")
     mapping = {key: "CONTENT_REVIEW_" + key.upper() for key in defaults}
     mapping.update(tikhub_api_key="TIKHUB_API_KEY", ark_api_key="ARK_API_KEY", ark_model="ARK_MODEL", ffmpeg_path="FFMPEG_PATH")
-    project_env = read_values(DEFAULT_ENV_PATH, set(mapping.values()))
+    default_env_path = configuration_dir() / ".env" if is_packaged_distribution() else DEFAULT_ENV_PATH
+    project_env = read_values(default_env_path, set(mapping.values()))
     external_path = section.get("external_env_path") or project_env.get(mapping["external_env_path"]) or os.environ.get(mapping["external_env_path"])
     external_values = read_values(Path(external_path).expanduser(), {"TIKHUB_API_KEY", "ARK_API_KEY", "ARK_MODEL"}) if external_path else {}
     if external_path and not external_values.get("ARK_API_KEY"):
@@ -373,5 +383,5 @@ def load_content_review_settings() -> dict[str, Any]:
             if not 1 <= value <= default:
                 raise AppConfigError("Content review limits may only be reduced")
         result[key] = value
-    result["cache_dir"] = str((PROJECT_ROOT / Path(result["cache_dir"]).expanduser()).resolve())
+    result["cache_dir"] = str(resolve_content_cache_path(result["cache_dir"], development_root=PROJECT_ROOT))
     return result
