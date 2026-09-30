@@ -7,6 +7,8 @@
 
 不要改系统或启动器 `PATH`。Windows 上 `ziniao-cli.cmd` 只解析成 `node` + `run.js` 的**绝对 POSIX 路径**（`C:/...`），子进程固定 UTF-8。日志用 `logging`，入口 `configure_logging`，库代码 `getLogger`。
 
+依赖统一口径只写在 `setup/install_deps.py` 顶部常量里（Python 3.12、`@ziniao-open/cli` 1.0.7、vite 7 的 Node 范围），Windows 入口 `setup/安装依赖.bat`、macOS 入口 `setup/install_deps.sh`；改依赖 = 改锁文件 + 常量，再在每台机器重跑一次脚本。0/1/2/3 与「启动操作台」入口一律**优先用仓库 `.venv`**（`uv sync` / 安装脚本建立），没有才回退系统 Python——不要再改回「只用系统 Python」，新机器会缺 `httpx` 等依赖。
+
 ---
 
 ## 非协商
@@ -32,9 +34,9 @@
    未带该开关：用户须已停在 **样品申请 → 待审核**。  
    1/2/3 导航失败只报错退出，不重开、不切店。
 
-3. **测试默认 1 号店（筛查/物流）**  
-   `跨境1号店（Lingerie Outlet）` / `27437742526069`。  
-   未传 `--store-id` / `--store-name` 且 running 无法唯一解析时可用。生产/多店必须显式 ID。`--no-default-store` 禁用默认。  
+3. **默认店（筛查/物流 = 1 号；开店 = 2 号）**  
+   未传 `--store-id` / `--store-name` 且 running 无法唯一解析时用默认店。生产/多店必须显式 ID。`--no-default-store` 禁用默认。  
+   默认店由 `config.toml [stores]` 决定（`default_store_id` 给 1/2/3，`prepare_store_id` 给 0 号；环境变量 `ZN_SAMPLE_STORE_ID` / `ZN_SAMPLE_PREPARE_STORE_ID` 优先），**换客户/换公司只改这份配置，不改代码**；未配置时才用代码内置默认（1 号店 `27437742526069`、2 号店 `27506607043054`）。  
    **1/2/3 勿默认操作 2 号店。**  
    **例外：0 号** 在工作台没有打开的店、且未传 `--store-id`/`--store-name` 时，默认 `open_store` 2 号店 `跨境2号店` / `27506607043054`（带 debugPort）。已有恰好一家 running 则重开那一家，不切到 2 号店。`--no-default-store` 禁用该默认。
 
@@ -214,6 +216,8 @@
 - 跟进/物流私信语言：飞书「使用语言」优先；否则详情简介 `detect_creator_lang`（LLM JSON）；空简介默认英语。已有会话语言不改判。密钥只放 `.env`，勿提交、勿进聊天。
 
 脚本入口：`scripts/open_sample_store.py`、`screen_sample_requests.py`、`send_sample_intro.py`、`sync_shipped_tracking.py`。日常 0 号双击走 `--reopen`。`hero_xlsx.py` 已废。密钥在 gitignore 的 `config.toml`。
+
+依赖入口：`setup/install_deps.py`（Windows 双击 `setup/安装依赖.bat`；macOS `zsh setup/install_deps.sh`；`--no-build` / `--with-test`）。它只安装依赖与构建，不写平台、不写飞书、不填密钥；本地离线回归仍是 `uv run python -m pytest tests -q`。
 
 ---
 

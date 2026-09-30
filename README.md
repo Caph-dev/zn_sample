@@ -4,7 +4,7 @@
 
 | 文档 | 读谁 |
 |------|------|
-| [快速开始.md](./快速开始.md) | 新电脑装 Python / Node / `ziniao-cli` |
+| [快速开始.md](./快速开始.md) | 新电脑装依赖（`setup/` 一键脚本）、Node / Python / `ziniao-cli` |
 | 本文 | 日常双击、检查环境、出问题 |
 | [AGENTS.md](./AGENTS.md) | Agent / 维护：门闩、阈值、页面契约 |
 | [样品申请筛查 SOP](./样品申请筛查sop/1-样品申请筛查sop.md) | 规则原文 |
@@ -77,7 +77,9 @@ Windows 与 macOS 使用同一网页按钮，不需要选择 `.bat` 或 `.comman
 
 **运行准备**页会显示当前打开的店铺和调试口状态。调试口以 `execute_script` 实际探活为准：就绪后“打开店铺”按钮变为浅灰色，表示可以进入下一步，但按钮仍可点击以重新打开；未就绪时按钮保持高亮。状态检查只读，不会自动开店或重开店铺；**自动批准**页只显示状态条和“去运行准备”链接，不重复探活。
 
-页面正文由 React + Astryx 组件渲染（构建产物 `assistant/web/static/console/`，数据以 bootstrap JSON 注入），任务面板、确认弹窗和表单提交仍由既有 `app.js` 处理，写操作门闩与任务保护不变。新电脑或前端代码更新后，技术人员在仓库根目录执行 `npm run build:web`（见《快速开始》第 9 节）。
+页面正文由 React + Astryx 组件渲染（构建产物 `assistant/web/static/console/`，数据以 bootstrap JSON 注入），任务面板、确认弹窗和表单提交仍由既有 `app.js` 处理，写操作门闩与任务保护不变。新电脑或依赖更新后，在仓库根目录跑一次依赖安装脚本：Windows 双击 `setup\安装依赖.bat`，macOS 执行 `zsh setup/install_deps.sh`（含 `uv sync` / `npm ci` / `npm run build:web`，见《快速开始》第 9 节）。
+
+0/1/2/3 双击与「启动操作台」都**优先使用仓库 `.venv`**（由安装脚本或 `uv sync` 建立），没有 `.venv` 时才回退系统 Python；依赖不一致或报 `ModuleNotFoundError` 时先重跑安装脚本，不用手装包。
 
 ---
 
@@ -185,6 +187,8 @@ chmod +x \
 
 新电脑或双击报「找不到 Python / ziniao-cli」：先按 [快速开始.md](./快速开始.md) 装官网包，不要手改系统 PATH。
 
+依赖报错（`ModuleNotFoundError`）或两台机器结果不一致：在仓库根目录跑一次依赖安装脚本（Windows 双击 `setup\安装依赖.bat`，macOS `zsh setup/install_deps.sh`），它按 `uv.lock` / `package-lock.json` 把依赖和前端产物统一回来；0/1/2/3 与操作台都会优先用仓库 `.venv`。
+
 macOS：
 
 ```bash
@@ -219,6 +223,7 @@ ziniao-cli doctor
 |---|---|
 | 找不到 Python 3 / 版本太旧 | 按《快速开始》装官网 Python。Windows 新开 **cmd** 跑 `py -3 --version`。不要用微软商店 Python |
 | 还没配完 / 找不到 ziniao-cli | 按《快速开始》装官网 Node 和 `@ziniao-open/cli`。新开终端跑 `ziniao-cli --version`。不要用 nvm，不要手改 PATH |
+| 双击报 `ModuleNotFoundError`（如 `httpx`）/ 两台机器结果不一致 | 跑一次依赖安装脚本：Windows 双击 `setup\安装依赖.bat`，macOS `zsh setup/install_deps.sh`。它按锁文件统一依赖并重建前端，不改 PATH、不填密钥 |
 | `python` 弹出 Microsoft Store | 占位符，不是真 Python。装官网包，验收只认 `py -3` |
 | 需要跑两回 / 第一回开两个浏览器 | 先双击「0-打开店铺」，等窗口起来并登录，再双击 1/2/3 |
 | 还在登录页 / 空白页 | 自己登录商家中心（不必停在首页），再双击「1-只出名单」 |
@@ -227,7 +232,7 @@ ziniao-cli doctor
 | 扫到 0 行 | 确认是「待审核」tab，等列表加载完再跑 |
 | `Bridge` 失败 | 再跑 `ziniao-cli doctor` |
 | `runtime.reopen` | 先双击「0-打开店铺」；若仍出现，找技术人员 |
-| `无法解析 storeId` / 多家店 | 只留一家店开着 |
+| `无法解析 storeId` / 多家店 | 只留一家店开着；默认店可在 `config.toml [stores]` 改（换客户只改配置，不改代码） |
 | 飞书主推表读失败 | 找管理员查 `config.toml` |
 | 内容审查为 `needs_review` / 缺少视频证据 | 不批准；由技术人员检查内容服务配置和采集完整性，补齐证据后重新筛查 |
 | 旧名单无法批准 | 没有第 5 步内容通过证据的旧导出不能新批准；重新筛查，历史核对/补写仍走 `--confirm-export` |
