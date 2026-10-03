@@ -325,6 +325,56 @@ class ExecutionBoundaryTests(unittest.TestCase):
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].apply_id, "apply-1")
 
+    def test_short_circuit_checks_and_blocks_survive_preview_persistence(self) -> None:
+        from assistant.services.auto_approval_service import sync_preview_result
+        from lib.auto_approval_rules import evaluate_custom_row, validate_custom_rule
+
+        payload = _valid_rule_payload()
+        payload["video_live"] = {
+            "enabled": True, "logic": "either",
+            "video": {"enabled": True, "gpm": 10, "avg_views": 300, "engagement": 2},
+            "live": {"enabled": False},
+        }
+        product_id = ALLOWED_PRODUCTS[0]["product_id"]
+        rule = validate_custom_rule(payload, allowed_product_ids={product_id})
+        rows = []
+        for apply_id, sku_description, approvable in (
+            ("apply-1", None, True), ("apply-2", "6PCS,L", False),
+        ):
+            row = {
+                "apply_id": apply_id, "creator_id": "creator-test",
+                "creator_name": "creator_test", "product_id": product_id,
+                "sku_desc": sku_description, "fulfillment_n": 90,
+                "can_be_approved": approvable,
+            }
+            evaluation = evaluate_custom_row(
+                row, rule, hero_keys={product_id}, allowed_product_ids={product_id},
+                defer_detail=True,
+            )
+            row.update(
+                custom_checks=evaluation["checks"], custom_overall=evaluation["overall"],
+                custom_eligible=evaluation["custom_eligible"], blocked=evaluation["blocked"],
+                safety_blocks=evaluation["safety_blocks"],
+            )
+            rows.append(row)
+        result_path = Path(self.temporary_directory.name) / "prefilter-preview.json"
+        result_path.write_text(json.dumps({"integrity_complete": True, "rows": rows}), encoding="utf-8")
+        with self.session_factory() as session:
+            session.get(AutoApprovalPreview, "preview-1").result_path = str(result_path)
+            session.commit()
+        sync_preview_result(self.session_factory, "preview-1", status="completed")
+        with self.session_factory() as session:
+            self.assertTrue(session.get(AutoApprovalPreview, "preview-1").integrity_complete)
+            candidates = session.query(AutoApprovalCandidate).filter_by(preview_id="preview-1").order_by(AutoApprovalCandidate.apply_id).all()
+            self.assertEqual(len(candidates), 2)
+            for candidate, row in zip(candidates, rows):
+                self.assertEqual(json.loads(candidate.checks_json), row["custom_checks"])
+                self.assertEqual(json.loads(candidate.safety_blocks_json), row["safety_blocks"])
+                self.assertNotIn("detail_checked", json.loads(candidate.metrics_json))
+                self.assertFalse(candidate.custom_eligible)
+            self.assertEqual(candidates[0].overall, "needs_review")
+            self.assertEqual(candidates[1].overall, "failed")
+
 
 class RuleDraftMemoryTests(unittest.TestCase):
     """自定义规则记忆：严格校验后才保存，读取时再次校验。"""

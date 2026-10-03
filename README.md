@@ -136,6 +136,10 @@ uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/
 
 **B005 固定 SKU 限制（仅自定义审核链）：** 商品 ID `1732414717062320994` 的申请，SKU 文本包含 `6PCS`（不区分大小写）就不符合、不批准；未取得 SKU 则待复核、不可批准。只有确认不含 `6PCS` 且其余条件通过才可批准，其他商品没有此限制。页面选中 B005 后显示固定说明，点击结果中的达人可查看 SKU 原文和判定原因。关闭视频/直播、内容审核或恢复记忆都不会关闭此限制；旧结果缺少 SKU 检查证据时须重新筛查，批准前仍会重新读取 SKU 核对。人工核对时展开该达人的申请记录，检查**对应商品、对应申请**的「SKU」字段，不看商品标题里的 “6-Pack”，也不把其他申请的 SKU 混入本条。
 
+**自定义预览先安全预筛，再补详情（2026-10-03 起）：** 列表确定不达标、SKU 含 6PCS/缺失或安全拦截的申请，不再浪费详情请求；结果仍保留每条申请。停止行的启用详情项显示「因基础条件/SKU/安全拦截已停止，本项未采集」，标待复核，不代表规则关闭、通过或接口故障；已有确定失败仍显示不符合，SKU 缺失仍待复核。启用视频/直播组时，不会因列表 GPM、客单价或履约率低/缺失就淘汰，仍给详情值补齐的机会；关闭该组则保持列表口径，不额外采集。
+
+同一轮里，同达人 ID 且名字一致、非空的成功 **API** 详情可复用，但每条申请的 SKU、商品与安全检查仍独立判定。名字冲突/缺失、DOM 回退和失败不复用，不跨任务缓存。真实请求保留原等待，复用不等待；真实故障仍会禁止整批执行，熔断后的目标不会靠缓存恢复。正式 1/2/3 筛查与批准门闩不变。
+
 与正式 SOP 的关系：
 
 - 页面首次进入是**标准 SOP 只读展示**；点「复制为自定义」才创建本次草稿，**不改正式默认阈值**，也不替换 1/2/3 入口。
@@ -155,7 +159,7 @@ uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/
 - `preview_total` 是本次预览函数的总时间，包含导航、读主推表、筛查和导出，不含任务排队或子进程启动。`navigation` / `hero_load` 单列前置耗时。
 - `list_scan` 看扫表；`detail_enrichment` 看整段补齐；`detail_context` / `detail_profile` / `detail_dom` 分别看页面上下文、四类详情逻辑请求、DOM 回退。`detail_delay` 是主动等待，不是网络慢。`detail_profile_calls` 不是底层 HTTP 重试次数。
 - `content_review` 看内容总时间；`video_page_fetch` 只看视频列表 fetch，`video_detail_fetch` 看视频详情；`media_download`、`frame_extract`、`vision_model` 分别定位下载、抽帧和模型。分页回调中也可能做视觉审核，**父子阶段时间不能相加当总时间**。
-- 看 `visual_attempts` 与 `vision_model_calls` 的差别：下载失败也会占视觉尝试，但不算模型调用。`visual_cache_hit`、`creator_reuse`、`proof_reuse` 是不同层复用，不能当成真实采集。`detail_cache_hit` / `detail_prefilter_skipped` 目前为 0，`detail_circuit_skipped` 表示详情熔断后没再采集的申请行。
+- 看 `visual_attempts` 与 `vision_model_calls` 的差别：下载失败也会占视觉尝试，但不算模型调用。`visual_cache_hit`、`creator_reuse`、`proof_reuse` 是不同层复用，不能当成真实采集。`detail_cache_hit` 是本轮 API 详情复用申请数；`detail_prefilter_skipped` 是勾选商品中安全预筛停止的申请数；`detail_circuit_skipped` 表示剩余目标中熔断跳过的申请数，不能混算为预筛。`detail_target_rows` 是预筛后的目标数（含复用），`detail_collections` 才是真实详情采集次数。
 
 **详情系统错误的两道保护（正式筛查与自定义预览共用）：** API `business_code=100000`，或诊断出现 `code=100000` / `Please remove the plugin`，从第一条起就不走 auto DOM 回退；连续 3 次真实系统失败后，停止本轮剩余 API/DOM 请求和主动等待，只记一次熔断汇总。剩余行标 `detail-api-systemic-failure`，不会当成通过；自定义预览的 `integrity_complete=false`，整批不能执行。普通超时/结构失败仍可回退 DOM，真实成功或普通失败/异常中断连续性，跳过和缓存复用不改变计数。显式 dom/shadow 行为保持原样。触发后请人工检查插件/浏览器环境或等待平台恢复，脚本不会替你关插件、重开店或自动重跑。
 

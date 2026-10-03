@@ -19,6 +19,7 @@ import json
 import logging
 import sys
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from lib.auto_approval_rules import (  # noqa: E402
     SCHEMA_VERSION,
     AutoApprovalRuleError,
     CustomRule,
+    evaluate_custom_precheck,
     rule_hash,
     rule_summary_lines,
     validate_custom_rule,
@@ -90,6 +92,13 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_DATA_SOURCE = "auto"
 EXECUTE_DELAY_SECONDS = 1.5
+DETAIL_METRIC_FIELDS = (
+    "video_gpm", "live_gpm", "avg_video_views", "video_engagement",
+    "avg_live_views", "live_engagement", "est_post_rate", "overall_gpm",
+    "revenue_per_buyer", "creator_type", "video_gpm_n", "live_gpm_n",
+    "avg_video_views_n", "avg_live_views_n", "video_engagement_n",
+    "live_engagement_n", "overall_gpm_n", "aov_detail_n", "est_post_rate_n",
+)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -138,29 +147,9 @@ def _hero_allowed_product_ids(hero_data: dict[str, Any]) -> set[str]:
 
 
 def _overlay_detail_fields(row: dict[str, Any], detail: dict[str, Any]) -> None:
-    for key in (
-        "video_gpm",
-        "live_gpm",
-        "avg_video_views",
-        "video_engagement",
-        "avg_live_views",
-        "live_engagement",
-        "est_post_rate",
-        "overall_gpm",
-        "revenue_per_buyer",
-        "creator_type",
-        "video_gpm_n",
-        "live_gpm_n",
-        "avg_video_views_n",
-        "avg_live_views_n",
-        "video_engagement_n",
-        "live_engagement_n",
-        "overall_gpm_n",
-        "aov_detail_n",
-        "est_post_rate_n",
-    ):
+    for key in DETAIL_METRIC_FIELDS:
         if key in detail:
-            row[key] = detail[key]
+            row[key] = deepcopy(detail[key])
     row["detail_checked"] = True
 
 
@@ -277,26 +266,36 @@ def _run_preview_observed(args: argparse.Namespace) -> int:
         return 1
 
     rows = [enrich_row(raw) for raw in raw_rows]
+    selected_allowed = set(rule.product_ids)
+    for row in rows:
+        for identifier_field in ("apply_id", "creator_id", "product_id"):
+            row[identifier_field] = str(row.get(identifier_field) or "").strip()
+    prechecks = [
+        evaluate_custom_precheck(
+            row, rule, hero_keys=hero_keys, allowed_product_ids=selected_allowed,
+        )
+        for row in rows
+    ]
 
     # 视频/直播组启用才需要拉详情；其余条件不强拉（履约按列表口径可判）。
     with screening_stage("detail_enrichment") as observation:
         logger.info("[筛查进度] 按规则补齐详情（关闭或无目标则跳过）")
         _enrich_preview_details(
             args, rule, rows, raw_rows, integrity_notes, integrity_failures, observation,
+            prechecks=prechecks,
         )
 
-    selected_allowed = set(rule.product_ids)
     evaluated_rows: list[dict[str, Any]] = []
     with screening_stage("rule_evaluation") as observation:
         logger.info("[筛查进度] 计算自定义规则")
         observation.add("rule_rows", len(rows))
-        for row in rows:
-            row["product_id"] = str(row.get("product_id") or "")
+        for row, precheck in zip(rows, prechecks):
             evaluation = evaluate_custom_row(
                 row,
                 rule,
                 hero_keys=hero_keys,
                 allowed_product_ids=selected_allowed,
+                defer_detail=rule.video_live.enabled and bool(precheck["stop_reasons"]),
             )
             row.update(
                 {
@@ -398,18 +397,38 @@ def _enrich_preview_details(
     integrity_notes: list[str],
     integrity_failures: list[str],
     observation: StageObservation,
+    *,
+    prechecks: list[dict[str, Any]],
 ) -> None:
     for count_name in ("detail_cache_hit", "detail_prefilter_skipped", "detail_circuit_skipped"):
         observation.add(count_name, 0)
     if rule.video_live.enabled:
         list_href = (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "")
-        detail_targets = [
-            row for row in rows if row.get("product_id") in rule.product_ids
-        ]
+        detail_targets = []
+        for row, precheck in zip(rows, prechecks):
+            if precheck["should_fetch_detail"]:
+                detail_targets.append(row)
+            elif row.get("product_id") in rule.product_ids:
+                observation.add("detail_prefilter_skipped")
+                row["detail_skip_reason"] = "|".join(
+                    reason["code"] for reason in precheck["stop_reasons"]
+                )
         observation.add("detail_target_rows", len(detail_targets))
         if not detail_targets:
             observation.skip("no_targets")
-        logger.info(f"视频/直播组启用：拉详情 {len(detail_targets)} 行")
+        logger.info(f"视频/直播组启用：安全预筛后详情目标 {len(detail_targets)} 行")
+        # Check the whole snapshot before sharing: a later conflicting/missing
+        # name must also prevent reuse between earlier rows with the same ID.
+        names_by_creator: dict[str, set[str]] = {}
+        for row in rows:
+            creator_id = row["creator_id"]
+            creator_name = str(row.get("creator_name") or "").strip()
+            names_by_creator.setdefault(creator_id, set()).add(creator_name)
+        reusable_creator_ids = {
+            creator_id for creator_id, names in names_by_creator.items()
+            if creator_id and len(names) == 1 and "" not in names
+        }
+        detail_cache: dict[tuple[str, str], dict[str, Any]] = {}
         detail_circuit = DetailFailureCircuit()
         skipped_detail_rows = 0
         for index, row in enumerate(detail_targets, 1):
@@ -418,6 +437,11 @@ def _enrich_preview_details(
                 row["detail_error"] = "detail-api-systemic-failure"
                 skipped_detail_rows += 1
                 observation.add("detail_circuit_skipped")
+                continue
+            cache_key = (str(args.store_id), row["creator_id"])
+            if cache_key in detail_cache:
+                _overlay_detail_fields(row, detail_cache[cache_key])
+                observation.add("detail_cache_hit")
                 continue
             logger.info(
                 f"  [{index}/{len(detail_targets)}] {row.get('creator_name')}"
@@ -451,6 +475,16 @@ def _enrich_preview_details(
                 )
                 continue
             _overlay_detail_fields(row, result["detail"])
+            if (
+                detail_result.source_used == "api"
+                and row["creator_id"] in reusable_creator_ids
+            ):
+                # API identity is bound by creator_oec_id in the request, not by
+                # a display name or a constructed DOM navigation URL.
+                detail_cache[cache_key] = {
+                    key: deepcopy(result["detail"][key])
+                    for key in DETAIL_METRIC_FIELDS if key in result["detail"]
+                }
             if args.detail_delay:
                 with screening_stage("detail_delay") as delay_observation:
                     delay_observation.add("detail_delay_calls")

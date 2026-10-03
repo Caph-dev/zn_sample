@@ -504,12 +504,74 @@ def rule_summary_lines(
     return lines
 
 
+DETAIL_OVERRIDABLE_BASIC_KEYS = frozenset({"gpm", "aov", "fulfillment"})
+DEFERRED_DETAIL_NOTE = "因基础条件/SKU/安全拦截已停止，本项未采集"
+
+
+def evaluate_custom_precheck(
+    row: dict[str, Any],
+    rule: CustomRule,
+    *,
+    hero_keys: set[str],
+    allowed_product_ids: set[str] | None,
+) -> dict[str, Any]:
+    """Evaluate only decisive list/application evidence, without any network IO.
+
+    Share the full evaluator's checks, but leave detail-overridable metrics
+    undecided when detail collection is enabled. They cannot authorize an early exit.
+    """
+    evaluation = _evaluate_custom_checks(
+        row, rule, hero_keys=hero_keys, allowed_product_ids=allowed_product_ids,
+        defer_detail=rule.video_live.enabled,
+    )
+    reasons = [
+        {"code": check["key"], "status": check["status"], "detail": check["detail"]}
+        for check in evaluation["checks"]
+        if check["source"] != "detail-uncollected"
+        and check["status"] in ("failed", "needs_review")
+    ]
+    reasons.extend(
+        {**block, "status": "blocked"} for block in evaluation["safety_blocks"]
+    )
+    return {
+        **evaluation,
+        "should_fetch_detail": rule.video_live.enabled and not reasons,
+        "stop_reasons": reasons,
+    }
+
+
 def evaluate_custom_row(
     row: dict[str, Any],
     rule: CustomRule,
     *,
     hero_keys: set[str],
     allowed_product_ids: set[str] | None,
+    defer_detail: bool = False,
+) -> dict[str, Any]:
+    """Full evaluation by default; only proven preview early exits may defer detail.
+
+    This keyword is never restored from serialized row fields. Execution always
+    recomputes the complete evidence, regardless of diagnostic skip markers.
+    """
+    if defer_detail:
+        precheck = evaluate_custom_precheck(
+            row, rule, hero_keys=hero_keys, allowed_product_ids=allowed_product_ids,
+        )
+        if not rule.video_live.enabled or not precheck["stop_reasons"]:
+            _reject("invalid-detail-deferral", "没有安全预筛停止证据，不能跳过详情判定")
+    return _evaluate_custom_checks(
+        row, rule, hero_keys=hero_keys, allowed_product_ids=allowed_product_ids,
+        defer_detail=defer_detail,
+    )
+
+
+def _evaluate_custom_checks(
+    row: dict[str, Any],
+    rule: CustomRule,
+    *,
+    hero_keys: set[str],
+    allowed_product_ids: set[str] | None,
+    defer_detail: bool = False,
 ) -> dict[str, Any]:
     """按自定义规则对单行做判定；返回逐项结果与总体结论。
 
@@ -535,7 +597,13 @@ def evaluate_custom_row(
         detail: str = "",
     ) -> str:
         status: str
-        if value is None:
+        detail_dependent = key in DETAIL_OVERRIDABLE_BASIC_KEYS or source == "detail"
+        if defer_detail and detail_dependent:
+            status = "needs_review"
+            value = None
+            source = "detail-uncollected"
+            detail = DEFERRED_DETAIL_NOTE
+        elif value is None:
             status = "needs_review" if detail_unavailable else "failed"
             missing_note = "详情采集失败，未取到值" if detail_unavailable else "指标缺失"
             detail = f"{detail}；{missing_note}" if detail else missing_note
@@ -779,8 +847,11 @@ def evaluate_custom_row(
                 "label": "视频/直播",
                 "status": group_status,
                 "value": None,
-                "source": "detail",
-                "detail": f"组逻辑={group.logic}；视频={video_status}；直播={live_status}",
+                "source": "detail-uncollected" if defer_detail else "detail",
+                "detail": (
+                    DEFERRED_DETAIL_NOTE if defer_detail else
+                    f"组逻辑={group.logic}；视频={video_status}；直播={live_status}"
+                ),
             }
         )
         absorb(group_status)
