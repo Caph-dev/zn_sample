@@ -682,6 +682,84 @@ def test_first_page_display_evidence_does_not_fetch_second_page(settings, monkey
     assert review.validate_content_review(row, now=NOW)[0]
 
 
+@pytest.mark.parametrize(
+    "related_count,has_more,unknown_anchor,positive,expected_status,expected_reason",
+    [
+        (3, False, False, False, "failed", "fewer_than_four_related_shopping_videos"),
+        (3, True, False, False, "needs_review", "collection_incomplete"),
+        (3, False, True, False, "needs_review", "unknown_shopping_anchor_evidence"),
+        (4, True, False, True, "passed", "four_related_videos_and_visible_product_demonstration"),
+        (4, False, False, False, "needs_review", "sparse_visual_evidence_inconclusive"),
+    ],
+    ids=["complete-three", "partial-three", "unknown-three", "positive-four", "negative-four"],
+)
+def test_old_page_cannot_hide_later_content_or_change_proof_semantics(
+    settings, monkeypatch, related_count, has_more, unknown_anchor,
+    positive, expected_status, expected_reason,
+):
+    settings["max_pages"] = 2
+    recent_videos = [
+        detail(number, anchors=shopping_anchor(PRODUCT))
+        for number in range(related_count)
+    ]
+    if unknown_anchor:
+        recent_videos.append(detail(90, anchors=unparsed_shopping_anchor()))
+    pages = iter([
+        {"aweme_list": [detail(99, age=30)], "has_more": 1, "max_cursor": 101},
+        {"aweme_list": recent_videos, "has_more": int(has_more), "max_cursor": 102},
+    ])
+    page_requests = []
+
+    def fetch_page(self, endpoint, parameters):
+        assert endpoint == "fetch_user_post_videos"
+        page_requests.append(dict(parameters))
+        return next(pages)
+
+    monkeypatch.setattr(review.TikHubClient, "fetch", fetch_page)
+    attempts = patch_candidate_visuals(
+        monkeypatch,
+        positive_video_ids={recent_videos[0]["aweme_id"]} if positive else set(),
+    )
+    with screening_run("synthetic") as recorder:
+        row = review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )[0]
+    assert [request["max_cursor"] for request in page_requests] == [0, 101]
+    assert recorder.counts["video_page_calls"] == 2
+    expected_attempts = 0
+    if related_count >= 4:
+        expected_attempts = 1 if positive else related_count
+    assert len(attempts) == expected_attempts
+    assert row["content_review_status"] == expected_status
+    assert row["content_review_reason"] == expected_reason
+    assert row["content_review_related_count"] == related_count
+    assert row["eligible"] is (expected_status == "passed")
+
+    envelope = json.loads(Path(row["content_review_evidence_path"]).read_text())
+    proof = envelope["proof"]
+    if positive:
+        expected_stop_reason = "stopped"
+    elif has_more:
+        expected_stop_reason = "pagination_limit"
+    else:
+        expected_stop_reason = "complete"
+    assert proof["complete"] is (expected_stop_reason == "complete")
+    assert proof["stop_reason"] == expected_stop_reason
+    assert [video["metadata"]["aweme_id"] for video in proof["videos"]] == [
+        video["aweme_id"] for video in recent_videos
+    ]
+    assert review._proof_verdict(proof, Path(settings["cache_dir"])) == (
+        expected_status, expected_reason, related_count,
+    )
+    # The positive lower bound still passes independent signature/frame validation.
+    if positive:
+        assert review.validate_content_review(row, now=NOW) == (
+            True, "content_review_proof_valid",
+        )
+    else:
+        assert review.validate_content_review(row, now=NOW)[0] is False
+
+
 def test_first_three_with_possible_display_do_not_open_visual_gate(
     settings, monkeypatch
 ):

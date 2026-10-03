@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "source": "Synthetic pagination cases only; not evidence of supplier ordering or pin semantics",
+  "baseline_utc": "2026-10-03T00:00:00+00:00",
+  "window_days": 7,
+  "handle": "synthetic_creator",
+  "sec_uid": "synthetic-sec-uid",
+  "cases": [
+    {
+      "name": "old_pinned_first_then_recent_on_later_page",
+      "trusted_contract": false,
+      "synthetic_pinned_video_ids": ["7000000000000000001"],
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000002", "age_seconds": 86400}], "has_more": 1, "max_cursor": 101},
+        {"videos": [{"video_id": "7000000000000000003", "age_seconds": 172800}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000002", "7000000000000000003"], "complete": true, "stop_reason": "complete", "request_cursors": [0, 101]}
+    },
+    {
+      "name": "entire_old_page_does_not_prove_window_end",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000002", "age_seconds": 1296000}], "has_more": 1, "max_cursor": 102},
+        {"videos": [{"video_id": "7000000000000000003", "age_seconds": 86400}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000003"], "complete": true, "stop_reason": "complete", "request_cursors": [0, 102]}
+    },
+    {
+      "name": "same_page_time_disorder",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 172800}, {"video_id": "7000000000000000002", "age_seconds": 2592000}, {"video_id": "7000000000000000003", "age_seconds": 86400}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001", "7000000000000000003"], "complete": true, "stop_reason": "complete", "request_cursors": [0]}
+    },
+    {
+      "name": "descending_observations_then_cross_page_rebound",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}, {"video_id": "7000000000000000002", "age_seconds": 172800}], "has_more": 1, "max_cursor": 103},
+        {"videos": [{"video_id": "7000000000000000003", "age_seconds": 691200}], "has_more": 1, "max_cursor": 104},
+        {"videos": [{"video_id": "7000000000000000004", "age_seconds": 777600}], "has_more": 1, "max_cursor": 105},
+        {"videos": [{"video_id": "7000000000000000005", "age_seconds": 43200}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001", "7000000000000000002", "7000000000000000005"], "complete": true, "stop_reason": "complete", "request_cursors": [0, 103, 104, 105]}
+    },
+    {
+      "name": "inclusive_seven_day_start_and_fixed_end",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 604800}, {"video_id": "7000000000000000002", "age_seconds": 604801}, {"video_id": "7000000000000000003", "age_seconds": 0}, {"video_id": "7000000000000000004", "age_seconds": -300}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001", "7000000000000000003"], "complete": true, "stop_reason": "complete", "request_cursors": [0]}
+    },
+    {
+      "name": "invalid_future_after_old_video_is_rejected",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000002", "age_seconds": -301}], "has_more": 0}
+      ],
+      "expected": {"error": "invalid_video_metadata", "request_cursors": [0]}
+    },
+    {
+      "name": "consistent_same_and_cross_page_duplicates",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}, {"video_id": "7000000000000000001", "age_seconds": 86400}], "has_more": 1, "max_cursor": 106},
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}, {"video_id": "7000000000000000002", "age_seconds": 86400}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001", "7000000000000000002"], "complete": true, "stop_reason": "complete", "request_cursors": [0, 106]}
+    },
+    {
+      "name": "conflicting_cross_page_duplicate",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}], "has_more": 1, "max_cursor": 107},
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 172800}], "has_more": 0}
+      ],
+      "expected": {"error": "conflicting_video_metadata", "request_cursors": [0, 107]}
+    },
+    {
+      "name": "old_duplicate_conflict_cannot_be_hidden_by_window_filter",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000001", "age_seconds": 1296000}], "has_more": 0}
+      ],
+      "expected": {"error": "conflicting_video_metadata", "request_cursors": [0]}
+    },
+    {
+      "name": "cursor_repeat_after_old_page_is_partial",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}], "has_more": 1, "max_cursor": 108},
+        {"videos": [{"video_id": "7000000000000000002", "age_seconds": 2592000}], "has_more": 1, "max_cursor": 108}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001"], "complete": false, "stop_reason": "pagination_stalled", "request_cursors": [0, 108]}
+    },
+    {
+      "name": "empty_continuing_page_is_partial",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}], "has_more": 1, "max_cursor": 109},
+        {"videos": [], "has_more": 1, "max_cursor": 110}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001"], "complete": false, "stop_reason": "pagination_stalled", "request_cursors": [0, 109]}
+    },
+    {
+      "name": "page_cap_with_unseen_recent_video_is_partial",
+      "trusted_contract": false,
+      "settings": {"max_pages": 1},
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}], "has_more": 1, "max_cursor": 111},
+        {"videos": [{"video_id": "7000000000000000002", "age_seconds": 86400}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": [], "complete": false, "stop_reason": "pagination_limit", "request_cursors": [0]}
+    },
+    {
+      "name": "video_cap_includes_old_unique_metadata",
+      "trusted_contract": false,
+      "settings": {"max_videos": 1},
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000002", "age_seconds": 86400}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": [], "complete": false, "stop_reason": "video_limit", "request_cursors": [0]}
+    },
+    {
+      "name": "wrong_author_after_old_video_is_rejected",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}, {"video_id": "7000000000000000002", "age_seconds": 2592000, "author_override": {"unique_id": "synthetic_impostor"}}], "has_more": 0}
+      ],
+      "expected": {"error": "creator_identity_mismatch", "request_cursors": [0]}
+    },
+    {
+      "name": "sec_uid_conflict_on_later_old_page_is_rejected",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 2592000}], "has_more": 1, "max_cursor": 112},
+        {"videos": [{"video_id": "7000000000000000002", "age_seconds": 1296000, "author_override": {"sec_uid": "synthetic-conflicting-sec-uid"}}], "has_more": 0}
+      ],
+      "expected": {"error": "creator_identity_mismatch", "request_cursors": [0, 112]}
+    },
+    {
+      "name": "ten_page_conservative_scan_finishes_naturally",
+      "trusted_contract": false,
+      "pages": [
+        {"videos": [{"video_id": "7000000000000000001", "age_seconds": 86400}], "has_more": 1, "max_cursor": 201},
+        {"videos": [{"video_id": "7000000000000000002", "age_seconds": 604800}], "has_more": 1, "max_cursor": 202},
+        {"videos": [{"video_id": "7000000000000000003", "age_seconds": 691200}], "has_more": 1, "max_cursor": 203},
+        {"videos": [{"video_id": "7000000000000000004", "age_seconds": 777600}], "has_more": 1, "max_cursor": 204},
+        {"videos": [{"video_id": "7000000000000000005", "age_seconds": 864000}], "has_more": 1, "max_cursor": 205},
+        {"videos": [{"video_id": "7000000000000000006", "age_seconds": 950400}], "has_more": 1, "max_cursor": 206},
+        {"videos": [{"video_id": "7000000000000000007", "age_seconds": 1036800}], "has_more": 1, "max_cursor": 207},
+        {"videos": [{"video_id": "7000000000000000008", "age_seconds": 1123200}], "has_more": 1, "max_cursor": 208},
+        {"videos": [{"video_id": "7000000000000000009", "age_seconds": 1209600}], "has_more": 1, "max_cursor": 209},
+        {"videos": [{"video_id": "7000000000000000010", "age_seconds": 1296000}], "has_more": 0}
+      ],
+      "expected": {"in_window_ids": ["7000000000000000001", "7000000000000000002"], "complete": true, "stop_reason": "complete", "request_cursors": [0, 201, 202, 203, 204, 205, 206, 207, 208, 209]}
+    }
+  ]
+}
