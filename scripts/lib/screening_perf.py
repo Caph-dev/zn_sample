@@ -46,7 +46,7 @@ REASONS = frozenset({
     "frame_extraction_failed", "frame_byte_limit", "visual_response_incomplete",
     "visual_response_missing", "visual_schema_invalid", "video_list_missing",
     "video_time_missing", "pagination_stalled", "page_limit", "video_limit",
-    "complete", "positive_evidence", "stopped", "missing_creator_id",
+    "complete", "positive_evidence", "stopped", "missing_creator_id", "systemic_api_error",
 })
 REASON_COUNTS = frozenset(f"reason_{reason}" for reason in REASONS)
 

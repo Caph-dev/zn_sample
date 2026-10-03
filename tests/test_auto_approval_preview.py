@@ -428,6 +428,140 @@ def _preview_arguments(tmp_path, rule):
     )
 
 
+@pytest.mark.parametrize("failure_kind", ["structured", "marker", "exception", "ordinary"])
+def test_preview_real_source_boundary_and_isolated_counts(tmp_path, caplog, failure_kind):
+    from lib.screening_perf import screening_run_active
+
+    caplog.set_level(logging.INFO)
+    rule = json.loads(json.dumps(RULE_PAYLOAD))
+    rule["content"] = {"enabled": True, "days": 7, "min_related": 4}
+    args = _preview_arguments(tmp_path, rule)
+    args.detail_delay = 0.25
+    systemic = failure_kind != "ordinary"
+    api_result = {
+        "ok": False,
+        "error": "code=100000 SECRET_SENTINEL" if failure_kind == "marker" else "timeout",
+    }
+    if failure_kind == "structured":
+        api_result.update(business_code=100000, error="")
+
+    def fetch_api(*arguments, **keywords):
+        assert screening_run_active()
+        if failure_kind == "exception":
+            raise RuntimeError("Please remove the plugin")
+        return dict(api_result)
+
+    with (
+        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+        patch.object(auto_approval, "load_pending_rows", side_effect=lambda *args, **kwargs:
+                     SimpleNamespace(rows=_pending_rows(10), source_used="api", fallback_reason="")),
+        patch("lib.sample_data_source.fetch_creator_detail_api", side_effect=fetch_api) as api_fetch,
+        patch("lib.sample_data_source.fetch_detail_for_row", return_value={
+            "ok": True, "detail": {
+                "video_gpm_n": 15, "avg_video_views_n": 800, "video_engagement_n": 3,
+            },
+        }) as dom_fetch,
+        patch.object(auto_approval, "review_creator_rows", side_effect=lambda rows: [
+            {**row, "content_review_status": "passed", "content_review_complete": True,
+             "content_review_related_count": 4} for row in rows
+        ]) as content_review,
+        patch.object(auto_approval, "approve_application_api") as approve,
+        patch.object(auto_approval, "create_creator_relation_record") as write_feishu,
+        patch.object(auto_approval.time, "sleep") as delay,
+    ):
+        assert not screening_run_active()
+        # A fresh task must start a fresh circuit and run-local recorder.
+        for iteration in range(2):
+            args.preview_id = f"source-boundary-{iteration}"
+            assert auto_approval._run_preview(args) == 0
+            assert not screening_run_active()
+            envelope = json.loads(args.out.read_text(encoding="utf-8"))
+            assert envelope["integrity_complete"] == (not systemic)
+            assert envelope["stats"]["eligible"] == (0 if systemic else 10)
+            assert sum(row.get("detail_error") == "detail-api-systemic-failure"
+                       for row in envelope["rows"][3:]) == (7 if systemic else 0)
+            total = _perf_events(caplog)[-1]
+            assert total["run_id"] == args.preview_id
+            assert total["counts"]["detail_api_calls"] == (3 if systemic else 10)
+            assert total["counts"]["detail_api_failure"] == (3 if systemic else 10)
+            assert total["counts"]["detail_dom_calls"] == (0 if systemic else 10)
+            assert total["counts"]["detail_circuit_skipped"] == (7 if systemic else 0)
+            assert total["counts"]["detail_collections"] == (3 if systemic else 10)
+        assert api_fetch.call_count == (6 if systemic else 20)
+        assert dom_fetch.call_count == (0 if systemic else 20)
+        assert delay.call_count == (0 if systemic else 20)
+        assert content_review.call_count == (0 if systemic else 2)
+        approve.assert_not_called()
+        write_feishu.assert_not_called()
+    summaries = [record for record in caplog.records if "连续 3 行" in record.getMessage()]
+    assert len(summaries) == (2 if systemic else 0)
+    assert "SECRET_SENTINEL" not in json.dumps(_perf_events(caplog))
+
+
+@pytest.mark.parametrize("middle", ["success", "ordinary", "exception"])
+def test_preview_interrupts_consecutive_failures_and_keeps_integrity(middle):
+    outcomes = iter(["systemic", middle, "systemic", "systemic", "systemic", "skipped"])
+
+    def collect_detail(row):
+        outcome = next(outcomes)
+        if outcome == "exception":
+            raise RuntimeError("ordinary timeout")
+        if outcome == "success":
+            return CreatorDetailResult({"ok": True, "detail": {
+                "video_gpm_n": 15, "avg_video_views_n": 800, "video_engagement_n": 3,
+            }}, "api")
+        return CreatorDetailResult({
+            "ok": False, "error": "code=100000" if outcome == "systemic" else "schema failure",
+        }, "api")
+
+    exit_code, envelope, detail_calls = PreviewFailFastTests()._run_with_detail_results(
+        row_count=6, detail_result_factory=collect_detail,
+    )
+    assert exit_code == 0
+    assert len(detail_calls) == 5
+    assert envelope["rows"][-1]["detail_error"] == "detail-api-systemic-failure"
+    assert not envelope["integrity_complete"]
+    assert envelope["stats"]["eligible"] == int(middle == "success")
+
+
+def test_preview_cancellation_propagates_and_resets_context(tmp_path):
+    from lib.operation_cancel import OperationCancelled
+    from lib.screening_perf import screening_run_active
+
+    args = _preview_arguments(tmp_path, RULE_PAYLOAD)
+    with (
+        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+        patch.object(auto_approval, "load_pending_rows", return_value=SimpleNamespace(
+            rows=_pending_rows(2), source_used="api", fallback_reason="",
+        )),
+        patch("lib.sample_data_source.fetch_creator_detail_api",
+              side_effect=OperationCancelled("cancelled")) as api_fetch,
+        patch("lib.sample_data_source.fetch_detail_for_row") as dom_fetch,
+        pytest.raises(OperationCancelled),
+    ):
+        auto_approval._run_preview(args)
+    assert not screening_run_active()
+    assert not args.out.exists()
+    api_fetch.assert_called_once()
+    dom_fetch.assert_not_called()
+
+
+def test_preview_rejects_success_that_masks_systemic_api_failure():
+    exit_code, envelope, detail_calls = PreviewFailFastTests()._run_with_detail_results(
+        row_count=10,
+        detail_result_factory=lambda row: CreatorDetailResult(
+            {"ok": True, "detail": {
+                "video_gpm_n": 15, "avg_video_views_n": 800, "video_engagement_n": 3,
+            }}, "dom-fallback", fallback_reason="code=100000",
+        ),
+    )
+    assert exit_code == 0
+    assert len(detail_calls) == 3
+    assert not envelope["integrity_complete"]
+    assert envelope["stats"]["eligible"] == 0
+    assert all(not row.get("detail_checked") for row in envelope["rows"])
+
+
 @pytest.mark.parametrize("scenario", ["disabled", "no_targets", "enabled"])
 def test_preview_offline_counts_match_calls_and_preserve_envelope(tmp_path, caplog, scenario):
     from contextlib import nullcontext

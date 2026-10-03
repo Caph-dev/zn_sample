@@ -13,11 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from lib.sample_data_source import (  # noqa: E402
+    CreatorDetailResult,
+    DetailFailureCircuit,
     compare_creator_details,
     load_creator_detail,
     load_pending_rows,
 )
 from lib.screening_perf import screening_run  # noqa: E402
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 
 
 class PendingDataSourceTests(unittest.TestCase):
@@ -248,6 +251,114 @@ def test_observed_fallback_counts_actual_sources_without_secret(caplog, dom_fail
     assert events[-1]["counts"]["reason_api_fallback"] == 1
     assert events[-1]["status"] == ("error" if dom_failure else "success")
     assert len(events) == 4
+
+
+@pytest.mark.parametrize("api_result,systemic", [
+    ({"ok": False, "business_code": 100000, "error": ""}, True),
+    ({"ok": False, "error": "business failure code=100000"}, True),
+    ({"ok": False, "error": "Please remove the plugin and try again"}, True),
+    ({"ok": False, "error": ""}, False),
+    ({"ok": False, "error": "request timeout"}, False),
+    ({"ok": False, "error_type": "profile-schema-error", "error": "schema"}, False),
+    ({"ok": False, "error": "request 100000 timed out"}, False),
+])
+def test_auto_systemic_failure_never_calls_successful_dom(api_result, systemic, caplog):
+    caplog.set_level(logging.INFO)
+    with (
+        patch("lib.sample_data_source.fetch_creator_detail_api", return_value=api_result),
+        patch("lib.sample_data_source.fetch_detail_for_row", return_value={
+            "ok": True, "detail": {"video_gpm_n": 15},
+        }) as dom_fetch,
+        screening_run("systemic-source-test") as recorder,
+    ):
+        result = load_creator_detail("test", {}, data_source="auto", list_href="", wait=0)
+    assert dom_fetch.call_count == int(not systemic)
+    assert result.source_used == ("api" if systemic else "dom-fallback")
+    assert bool(result.result["ok"]) == (not systemic)
+    if systemic:
+        assert result.result == api_result
+        assert recorder.counts["reason_systemic_api_error"] == 1
+        assert "detail_dom_calls" not in recorder.counts
+
+
+@pytest.mark.parametrize("data_source", ["dom", "shadow", "api"])
+@pytest.mark.parametrize("dom_success", [True, False])
+def test_explicit_sources_preserve_systemic_api_and_dom_authority(data_source, dom_success):
+    with (
+        patch("lib.sample_data_source.fetch_creator_detail_api", return_value={
+            "ok": False, "error": "code=100000", "business_code": 100000,
+        }) as api_fetch,
+        patch("lib.sample_data_source.fetch_detail_for_row", return_value={
+            "ok": dom_success, "detail": {"video_gpm_n": 15}, "error": "ordinary failure",
+        }) as dom_fetch,
+    ):
+        result = load_creator_detail("test", {}, data_source=data_source, list_href="", wait=0)
+    assert api_fetch.call_count == int(data_source != "dom")
+    assert dom_fetch.call_count == int(data_source != "api")
+    assert result.result["ok"] == (False if data_source == "api" else dom_success)
+    circuit = DetailFailureCircuit()
+    assert circuit.observe(result, data_source=data_source) == (not result.result["ok"])
+    assert circuit.consecutive_failures == int(
+        data_source == "api" or (data_source == "shadow" and not dom_success)
+    )
+    if data_source == "shadow":
+        assert result.source_used == "dom-shadow"
+        assert not result.shadow_report["ok"]
+
+
+@pytest.mark.parametrize("data_source", ["auto", "api"])
+@pytest.mark.parametrize("sequence,expected_counts", [
+    (["systemic", "success", "systemic", "systemic", "systemic"], [1, 0, 1, 2, 3]),
+    (["systemic", "ordinary", "systemic"], [1, 0, 1]),
+    (["systemic", "exception", "systemic"], [1, 0, 1]),
+    (["systemic", "skip", "systemic", "cache", "systemic"], [1, 1, 2, 2, 3]),
+    (["systemic_exception", "systemic_exception", "systemic_exception"], [1, 2, 3]),
+    (["inconsistent", "inconsistent", "inconsistent"], [1, 2, 3]),
+])
+def test_circuit_tracks_only_real_collections(data_source, sequence, expected_counts):
+    circuit = DetailFailureCircuit()
+    outcomes = {
+        "systemic": CreatorDetailResult({"ok": False, "business_code": 100000}, "api"),
+        "success": CreatorDetailResult({"ok": True, "detail": {}}, "api"),
+        "ordinary": CreatorDetailResult({"ok": False, "error": "timeout"}, "api"),
+        "exception": RuntimeError("schema failure"),
+        "systemic_exception": RuntimeError("Please remove the plugin"),
+        "inconsistent": CreatorDetailResult(
+            {"ok": True, "detail": {}}, "dom-fallback", fallback_reason="code=100000",
+        ),
+        "skip": CreatorDetailResult({"ok": False, "business_code": 100000}, "api"),
+        "cache": CreatorDetailResult({"ok": True, "detail": {}}, "api"),
+    }
+    for event, expected_count in zip(sequence, expected_counts):
+        failed = circuit.observe(
+            outcomes[event], data_source=data_source, collected=event not in ("skip", "cache"),
+        )
+        assert circuit.consecutive_failures == expected_count
+        assert circuit.is_open == (expected_count == 3)
+        assert failed == (event not in ("success", "skip", "cache"))
+    assert not DetailFailureCircuit().is_open
+
+
+def test_circuit_cancellation_propagates_without_mutation():
+    circuit = DetailFailureCircuit(consecutive_failures=2)
+    with pytest.raises(OperationCancelled):
+        circuit.observe(OperationCancelled("cancelled"), data_source="auto")
+    assert circuit.consecutive_failures == 2
+
+
+def test_auto_does_not_attribute_dom_only_error_to_api():
+    circuit = DetailFailureCircuit(consecutive_failures=2)
+    assert circuit.observe(CreatorDetailResult(
+        {"ok": False, "error": "code=100000"}, "dom-fallback", fallback_reason="API timeout",
+    ), data_source="auto")
+    assert circuit.consecutive_failures == 0
+
+
+@pytest.mark.parametrize("data_source", ["dom", "shadow"])
+def test_legacy_exception_keeps_existing_streak(data_source):
+    circuit = DetailFailureCircuit(consecutive_failures=2)
+    assert circuit.observe(RuntimeError("ordinary timeout"), data_source=data_source)
+    assert circuit.consecutive_failures == 2
 
 
 if __name__ == "__main__":

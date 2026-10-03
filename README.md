@@ -157,9 +157,11 @@ uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/
 - `content_review` 看内容总时间；`video_page_fetch` 只看视频列表 fetch，`video_detail_fetch` 看视频详情；`media_download`、`frame_extract`、`vision_model` 分别定位下载、抽帧和模型。分页回调中也可能做视觉审核，**父子阶段时间不能相加当总时间**。
 - 看 `visual_attempts` 与 `vision_model_calls` 的差别：下载失败也会占视觉尝试，但不算模型调用。`visual_cache_hit`、`creator_reuse`、`proof_reuse` 是不同层复用，不能当成真实采集。`detail_cache_hit` / `detail_prefilter_skipped` 目前为 0，`detail_circuit_skipped` 表示详情熔断后没再采集的申请行。
 
+**详情系统错误的两道保护（正式筛查与自定义预览共用）：** API `business_code=100000`，或诊断出现 `code=100000` / `Please remove the plugin`，从第一条起就不走 auto DOM 回退；连续 3 次真实系统失败后，停止本轮剩余 API/DOM 请求和主动等待，只记一次熔断汇总。剩余行标 `detail-api-systemic-failure`，不会当成通过；自定义预览的 `integrity_complete=false`，整批不能执行。普通超时/结构失败仍可回退 DOM，真实成功或普通失败/异常中断连续性，跳过和缓存复用不改变计数。显式 dom/shadow 行为保持原样。触发后请人工检查插件/浏览器环境或等待平台恢复，脚本不会替你关插件、重开店或自动重跑。
+
 `status=skipped` 的 `reason_disabled` / `reason_no_targets` 表示未启用或无目标；`status=error` 表示阶段采集/处理失败，不是达人销售指标不达标。具体日志契约见 [候选筛选流程](./docs/spec/自动审批候选筛选流程.md#61-阶段耗时日志契约)。新增日志不输出密钥、达人 handle、媒体 URL 或模型原文；原有日志仍应按业务敏感资料保管，不要整份公开。
 
-本次覆盖自定义 preview 全链路及独立内容库运行；**不代表正式 1/2 入口的详情循环已有整轮统计**。本项只增加观测，不改变请求数、阈值、预算或批准证据，也不代表完成实店性能验收。
+观测覆盖自定义 preview 全链路及独立内容库运行。正式 1/2 入口仅在只读详情循环内建立独立临时 `run_id`（已有上下文则复用），`detail_enrichment` 汇总只代表本段详情，**不是整轮筛查统计**。`reason_systemic_api_error` 是固定原因码，不含远端原文；10 行连续系统故障的离线样本计数为 3 次 API 失败、0 次 DOM、7 行 `detail_circuit_skipped`。阈值、预算和批准证据不变；离线验证不代表完成实店性能验收。
 
 ### 订单号补写（常驻入口）
 

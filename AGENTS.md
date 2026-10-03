@@ -69,7 +69,7 @@
 
 读路径：`auto` 日常推荐（API 失败回退 DOM）；`api` 失败即报错。页面 API 用异步 `fetch` + `request_id` 轮询（兼容 2 号店同步 XHR 空响应）。批准默认 `--write-source api`，DOM 须显式指定。简介仍走详情 DOM。
 
-**详情接口系统级故障熔断**：错误串含 `code=100000` 或 `Please remove the plugin` 视为逐行复现的故障（TikTok 反爬判定浏览器环境/插件流量）。连续 3 行（`SYSTEMIC_DETAIL_FAILURE_LIMIT`）即停止逐行 API 与 DOM 回退，剩余行标 `detail-api-systemic-failure` → needs_review，只记一条汇总。禁止把该错误当成单行失败继续刷表；出现后先关插件/换干净 profile 或等平台恢复。实测证据见 `达人资料补齐接口故障排查-20260906.md` 顶部更正。
+**详情接口系统级故障熔断**：API `business_code=100000` 或错误串含 `code=100000` / `Please remove the plugin` 视为逐行复现的故障（TikTok 反爬判定浏览器环境/插件流量）。`auto` 从首个已知系统错误起就不回退 DOM；`auto/api` 连续 3 次真实采集命中（`SYSTEMIC_DETAIL_FAILURE_LIMIT`）才停止本轮后续 API/DOM 与等待，剩余行标 `detail-api-systemic-failure` → needs_review，只记一条汇总。真实成功、普通失败或普通异常清零连续性；跳过/缓存不增不清，取消直接传播，新任务重新计数。普通 API 失败仍可 auto DOM 回退，显式 dom/shadow 权威与既有失败处理不变。禁止把该错误当成单行失败继续刷表；出现后人工检查插件/浏览器环境或等平台恢复，不自动关插件或重开店。实测证据见 `达人资料补齐接口故障排查-20260906.md` 顶部更正。
 
 ---
 

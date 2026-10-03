@@ -107,7 +107,7 @@ from lib.sample_api import (  # noqa: E402
 from lib.sample_data_source import (  # noqa: E402
     DATA_SOURCE_CHOICES,
     SYSTEMIC_DETAIL_FAILURE_LIMIT,
-    is_systemic_detail_error,
+    DetailFailureCircuit,
     load_creator_detail,
     load_pending_rows,
 )
@@ -115,6 +115,7 @@ from lib.sample_write_api import (  # noqa: E402
     approve_application_api,
     confirm_application_approved_api,
 )
+from lib.screening_perf import screening_run, screening_stage  # noqa: E402
 from lib.tracking_parse import is_order_id  # noqa: E402
 from lib.zclaw import (  # noqa: E402
     default_scan_store,
@@ -156,6 +157,125 @@ FEISHU_RELATION_RECORD_STATUSES = {
     "duplicate-existing",
     "duplicate",
 }
+
+
+def _enrich_screen_details(
+    store_id: str,
+    detail_targets: list[dict[str, Any]],
+    raw_rows: list[dict[str, Any]],
+    *,
+    data_source: str,
+    list_href: str,
+    page_wait: float,
+    detail_delay: float,
+    shadow_reports: list[dict[str, Any]],
+    screened_rows: list[dict[str, Any]],
+) -> int:
+    """Collect read-only details; observations cover this segment, not the full run."""
+    strict_api_failures = 0
+    detail_circuit = DetailFailureCircuit()
+    skipped_detail_count = 0
+    rows_by_key = {
+        row.get("apply_id") or row.get("creator_name"): row for row in screened_rows
+    }
+    with screening_run(reuse=True):
+        with screening_stage("detail_enrichment", summary=True) as observation:
+            observation.add("detail_target_rows", len(detail_targets))
+            if not detail_targets:
+                observation.skip("no_targets")
+            for index, target in enumerate(detail_targets, 1):
+                if detail_circuit.is_open:
+                    target["detail_error"] = "detail-api-systemic-failure"
+                    skipped_detail_count += 1
+                    observation.add("detail_circuit_skipped")
+                    continue
+                logger.info(
+                    f"  [{index}/{len(detail_targets)}] {target.get('creator_name')}"
+                )
+                source_row = next(
+                    (
+                        row for row in raw_rows
+                        if str(row.get("apply_id")) == str(target.get("apply_id"))
+                        or row.get("creator_name") == target.get("creator_name")
+                    ),
+                    target,
+                )
+                try:
+                    observation.add("detail_collections")
+                    detail_result = load_creator_detail(
+                        store_id, source_row, data_source=data_source,
+                        list_href=list_href, wait=max(3.5, page_wait + 1.5),
+                    )
+                    result = detail_result.result
+                except Exception as error:
+                    detail_circuit.observe(error, data_source=data_source)
+                    observation.fail()
+                    logger.info(f"    失败: {error}")
+                    target["detail_error"] = str(error)
+                    if data_source == "api":
+                        strict_api_failures += 1
+                    continue
+                if is_verbose():
+                    logger.info(f"    详情数据源={detail_result.source_used}")
+                if detail_result.shadow_report:
+                    shadow_reports.append(detail_result.shadow_report)
+                if detail_circuit.observe(detail_result, data_source=data_source):
+                    observation.fail()
+                    if data_source in ("dom", "shadow"):
+                        target["detail_error"] = result.get("error")
+                    else:
+                        target["detail_error"] = (
+                            result.get("error") or detail_result.fallback_reason
+                            or "unknown-detail-error"
+                        )
+                    logger.info(f"    失败: {target['detail_error']}")
+                    if data_source == "api":
+                        strict_api_failures += 1
+                else:
+                    detail = result["detail"]
+                    destination_row = rows_by_key.get(
+                        target.get("apply_id") or target.get("creator_name")
+                    ) or target
+                    if is_verbose():
+                        logger.info(
+                            f"    VideoGPM={detail.get('video_gpm')} LiveGPM={detail.get('live_gpm')} "
+                            f"avgViews={detail.get('avg_video_views')} eng={detail.get('video_engagement')} "
+                            f"type={detail.get('creator_type')}"
+                        )
+                    for field_name in (
+                        "video_gpm", "live_gpm", "avg_video_views", "video_engagement",
+                        "avg_live_views", "live_engagement", "est_post_rate", "overall_gpm",
+                        "revenue_per_buyer", "creator_type", "video_gpm_n", "live_gpm_n",
+                        "avg_video_views_n", "avg_live_views_n", "video_engagement_n",
+                        "live_engagement_n", "overall_gpm_n", "aov_detail_n", "est_post_rate_n",
+                        "has_cn_video_card", "has_en_video_card", "extract_via", "text_head",
+                        "profile_type_field_counts", "_detail_data_source", "_detail_fallback_reason",
+                    ):
+                        if field_name in detail:
+                            destination_row[field_name] = detail[field_name]
+                    destination_row["detail_checked"] = True
+                    if not detail.get("video_gpm") and not detail.get("live_gpm") and is_verbose():
+                        logger.info(
+                            f"    警告: 视频/直播GPM仍为空 "
+                            f"cn_card={detail.get('has_cn_video_card')} "
+                            f"en_card={detail.get('has_en_video_card')} "
+                            f"overall={detail.get('overall_gpm')} via={detail.get('extract_via')}"
+                        )
+                should_delay = detail_delay and (
+                    data_source in ("dom", "shadow") or not detail_circuit.is_open
+                )
+                if should_delay:
+                    with screening_stage("detail_delay") as delay_observation:
+                        delay_observation.add("detail_delay_calls")
+                        time.sleep(detail_delay)
+            if detail_circuit.is_open:
+                logger.error(
+                    f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
+                    "已停止本轮后续 API/DOM 请求；"
+                    f"剩余 {skipped_detail_count} 行未取详情，按待复核处理；"
+                    "请人工检查插件/浏览器环境或等待平台恢复"
+                )
+    return strict_api_failures
 
 
 def _load_export_rows(path: Path) -> list[dict[str, Any]]:
@@ -2043,130 +2163,12 @@ def main() -> int:
                 detail_targets = [x for x in pre if x.get("eligible")]
             logger.info(f"详情复筛：共 {len(detail_targets)} 人")
 
-            by_key = {
-                (x.get("apply_id") or x.get("creator_name")): x for x in pre
-            }
-            systemic_failure_reason = ""
-            consecutive_systemic_failures = 0
-            skipped_detail_count = 0
-            for i, target in enumerate(detail_targets, 1):
-                if systemic_failure_reason:
-                    # 系统级故障已确认：不再逐行请求，也不回退 DOM（会白等）。
-                    target["detail_error"] = "detail-api-systemic-failure"
-                    skipped_detail_count += 1
-                    continue
-                key = target.get("apply_id") or target.get("creator_name")
-                logger.info(
-                    f"  [{i}/{len(detail_targets)}] {target.get('creator_name')}")
-                # 合并 raw 字段给 fetch
-                src = next(
-                    (
-                        r
-                        for r in raw_rows
-                        if str(r.get("apply_id")) == str(target.get("apply_id"))
-                        or r.get("creator_name") == target.get("creator_name")
-                    ),
-                    target,
-                )
-                try:
-                    detail_result = load_creator_detail(
-                        store_id,
-                        src,
-                        data_source=args.data_source,
-                        list_href=list_href,
-                        wait=max(3.5, args.page_wait + 1.5),
-                    )
-                    res = detail_result.result
-                except Exception as e:
-                    logger.info(f"    失败: {e}")
-                    target["detail_error"] = str(e)
-                    if args.data_source == "api":
-                        strict_api_detail_failure_count += 1
-                    continue
-                if is_verbose():
-                    logger.info(f"    详情数据源={detail_result.source_used}")
-                if detail_result.shadow_report:
-                    detail_shadow_reports.append(detail_result.shadow_report)
-                if not res.get("ok"):
-                    logger.info(f"    失败: {res.get('error')}")
-                    target["detail_error"] = res.get("error")
-                    if args.data_source == "api":
-                        strict_api_detail_failure_count += 1
-                    if is_systemic_detail_error(
-                        detail_result.fallback_reason or res.get("error")
-                    ):
-                        consecutive_systemic_failures += 1
-                        if (
-                            consecutive_systemic_failures
-                            >= SYSTEMIC_DETAIL_FAILURE_LIMIT
-                        ):
-                            systemic_failure_reason = str(
-                                detail_result.fallback_reason
-                                or res.get("error")
-                                or "detail-api-systemic-failure"
-                            )
-                    else:
-                        consecutive_systemic_failures = 0
-                else:
-                    consecutive_systemic_failures = 0
-                    d = res["detail"]
-                    if is_verbose():
-                        logger.info(
-                            f"    VideoGPM={d.get('video_gpm')} LiveGPM={d.get('live_gpm')} "
-                            f"avgViews={d.get('avg_video_views')} eng={d.get('video_engagement')} "
-                            f"type={d.get('creator_type')}")
-                    # 写回 pre 行
-                    row = by_key.get(key) or target
-                    for k in (
-                        "video_gpm",
-                        "live_gpm",
-                        "avg_video_views",
-                        "video_engagement",
-                        "avg_live_views",
-                        "live_engagement",
-                        "est_post_rate",
-                        "overall_gpm",
-                        "revenue_per_buyer",
-                        "creator_type",
-                        "video_gpm_n",
-                        "live_gpm_n",
-                        "avg_video_views_n",
-                        "avg_live_views_n",
-                        "video_engagement_n",
-                        "live_engagement_n",
-                        "overall_gpm_n",
-                        "aov_detail_n",
-                        "est_post_rate_n",
-                        "has_cn_video_card",
-                        "has_en_video_card",
-                        "extract_via",
-                        "text_head",
-                        "profile_type_field_counts",
-                        "_detail_data_source",
-                        "_detail_fallback_reason",
-                    ):
-                        if k in d:
-                            row[k] = d[k]
-                    row["detail_checked"] = True
-                    if not d.get("video_gpm") and not d.get("live_gpm") and is_verbose():
-                        logger.info(
-                            f"    警告: 视频/直播GPM仍为空 "
-                            f"cn_card={d.get('has_cn_video_card')} "
-                            f"en_card={d.get('has_en_video_card')} "
-                            f"overall={d.get('overall_gpm')} "
-                            f"via={d.get('extract_via')}")
-                if args.detail_delay:
-                    time.sleep(args.detail_delay)
-
-            if systemic_failure_reason:
-                logger.error(
-                    f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
-                    f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
-                )
-                logger.error(
-                    f"[详情数据源] 剩余 {skipped_detail_count} 行未取详情，按待复核处理；"
-                    "请关闭浏览器插件或等平台恢复后重试"
-                )
+            strict_api_detail_failure_count = _enrich_screen_details(
+                store_id, detail_targets, raw_rows,
+                data_source=args.data_source, list_href=list_href,
+                page_wait=args.page_wait, detail_delay=args.detail_delay,
+                shadow_reports=detail_shadow_reports, screened_rows=pre,
+            )
 
             # 带详情重判。只有初筛通过者才要求详情指标；初筛淘汰者保留原始原因，
             # 避免导出出现并未获取详情所产生的额外 failure。

@@ -80,7 +80,7 @@ from lib.feishu_hero import FeishuHeroError, load_hero_from_feishu  # noqa: E402
 from lib.sample_api import check_pending_application_api  # noqa: E402
 from lib.sample_data_source import (  # noqa: E402
     SYSTEMIC_DETAIL_FAILURE_LIMIT,
-    is_systemic_detail_error,
+    DetailFailureCircuit,
     load_creator_detail,
     load_pending_rows,
 )
@@ -410,11 +410,10 @@ def _enrich_preview_details(
         if not detail_targets:
             observation.skip("no_targets")
         logger.info(f"视频/直播组启用：拉详情 {len(detail_targets)} 行")
-        systemic_failure_reason = ""
-        consecutive_systemic_failures = 0
+        detail_circuit = DetailFailureCircuit()
         skipped_detail_rows = 0
         for index, row in enumerate(detail_targets, 1):
-            if systemic_failure_reason:
+            if detail_circuit.is_open:
                 # 已确认系统级故障：不再逐行请求，也不回退 DOM（会白等）。
                 row["detail_error"] = "detail-api-systemic-failure"
                 skipped_detail_rows += 1
@@ -434,48 +433,37 @@ def _enrich_preview_details(
                 )
                 result = detail_result.result
             except Exception as error:
+                detail_circuit.observe(error, data_source=PREVIEW_DATA_SOURCE)
                 observation.fail()
                 row["detail_error"] = str(error)
                 integrity_failures.append(
                     f"详情失败 {row.get('creator_name')}: {error}"
                 )
                 continue
-            if not result.get("ok"):
+            if detail_circuit.observe(detail_result, data_source=PREVIEW_DATA_SOURCE):
                 observation.fail()
-                row["detail_error"] = result.get("error")
-                integrity_failures.append(
-                    f"详情失败 {row.get('creator_name')}: {result.get('error')}"
+                row["detail_error"] = (
+                    result.get("error") or detail_result.fallback_reason
+                    or "unknown-detail-error"
                 )
-                if is_systemic_detail_error(
-                    detail_result.fallback_reason or result.get("error")
-                ):
-                    consecutive_systemic_failures += 1
-                    if consecutive_systemic_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT:
-                        systemic_failure_reason = str(
-                            detail_result.fallback_reason
-                            or result.get("error")
-                            or "detail-api-systemic-failure"
-                        )
-                else:
-                    consecutive_systemic_failures = 0
+                integrity_failures.append(
+                    f"详情失败 {row.get('creator_name')}: {row['detail_error']}"
+                )
                 continue
-            consecutive_systemic_failures = 0
             _overlay_detail_fields(row, result["detail"])
             if args.detail_delay:
                 with screening_stage("detail_delay") as delay_observation:
                     delay_observation.add("detail_delay_calls")
                     time.sleep(args.detail_delay)
-        if systemic_failure_reason:
+        if detail_circuit.is_open:
             logger.error(
                 f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
-                f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
-            )
-            logger.error(
-                f"[详情数据源] 剩余 {skipped_detail_rows} 行未取详情，按 needs_review 处理；"
-                "请关闭浏览器插件或等平台恢复后重试"
+                "已停止本轮后续 API/DOM 请求；"
+                f"剩余 {skipped_detail_rows} 行未取详情，按 needs_review 处理；"
+                "请人工检查插件/浏览器环境或等待平台恢复"
             )
             integrity_failures.append(
-                f"详情接口系统级故障（{systemic_failure_reason[:120]}）："
+                "详情接口系统级故障："
                 f"剩余 {skipped_detail_rows} 行未取详情，按待复核处理"
             )
     else:

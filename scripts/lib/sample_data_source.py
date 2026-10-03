@@ -11,6 +11,7 @@ from typing import Any
 
 from .creator_api import fetch_creator_detail_api
 from .creator_detail import fetch_detail_for_row
+from .operation_cancel import OperationCancelled
 from .sample_api import scrape_pending_list_api
 from .sample_dom import scrape_pending_list
 from .screening_perf import screening_stage
@@ -32,6 +33,18 @@ def is_systemic_detail_error(reason: Any) -> bool:
     if not text:
         return False
     return any(marker in text for marker in SYSTEMIC_DETAIL_ERROR_MARKERS)
+
+
+def is_systemic_detail_result(
+    result: dict[str, Any], *, fallback_reason: str = "",
+) -> bool:
+    """Recognize only the registered business code and diagnostic markers."""
+    return (
+        result.get("business_code") == 100000
+        or is_systemic_detail_error(result.get("error"))
+        or is_systemic_detail_error(fallback_reason)
+    )
+
 
 SHADOW_FIELDS = (
     "apply_id",
@@ -72,6 +85,57 @@ class CreatorDetailResult:
     source_used: str
     fallback_reason: str = ""
     shadow_report: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DetailFailureCircuit:
+    """One detail loop's consecutive real failures, never a global breaker."""
+
+    consecutive_failures: int = 0
+
+    @property
+    def is_open(self) -> bool:
+        return self.consecutive_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT
+
+    def observe(
+        self,
+        outcome: CreatorDetailResult | Exception,
+        *,
+        data_source: str,
+        collected: bool = True,
+    ) -> bool:
+        """Return whether this collection failed; skips/reuse do not change state."""
+        if isinstance(outcome, OperationCancelled):
+            raise outcome
+        if not collected or self.is_open:
+            return False
+        if isinstance(outcome, Exception):
+            if data_source in ("auto", "api"):
+                systemic_failure = is_systemic_detail_error(outcome)
+                self.consecutive_failures = (
+                    self.consecutive_failures + 1 if systemic_failure else 0
+                )
+            # Preserve legacy dom/shadow exception handling (no observation).
+            return True
+
+        failed = not outcome.result.get("ok")
+        if data_source in ("auto", "api"):
+            api_result = (
+                outcome.result if data_source == "api" or outcome.source_used == "api" else {}
+            )
+            systemic_failure = is_systemic_detail_result(
+                api_result, fallback_reason=outcome.fallback_reason,
+            )
+            # A fallback success cannot mask a known API failure.
+            failed = failed or systemic_failure
+        else:
+            systemic_failure = failed and is_systemic_detail_error(
+                outcome.fallback_reason or outcome.result.get("error")
+            )
+        self.consecutive_failures = (
+            self.consecutive_failures + 1 if systemic_failure else 0
+        )
+        return failed
 
 
 DETAIL_COMPARE_FIELDS = (
@@ -349,14 +413,16 @@ def _observe_detail_api(store_id: str, row: dict[str, Any]) -> dict[str, Any]:
         observation.add("detail_api_calls")
         try:
             result = fetch_creator_detail_api(store_id, row)
-        except BaseException:
+        except BaseException as error:
             observation.add("detail_api_failure")
+            if not isinstance(error, OperationCancelled) and is_systemic_detail_error(error):
+                observation.add("reason_systemic_api_error")
             raise
         if result.get("ok"):
             observation.add("detail_api_success")
         else:
             observation.add("detail_api_failure")
-            observation.fail({
+            observation.fail("systemic_api_error" if is_systemic_detail_result(result) else {
                 "profile-business-error": "profile_business_error",
                 "profile-schema-error": "profile_schema_error",
                 "missing-creator-id": "missing_creator_id",
@@ -430,6 +496,14 @@ def load_creator_detail(
                 source_used="api",
             )
         fallback_reason = str(api_result.get("error") or "unknown-api-detail-error")
+        if is_systemic_detail_result(api_result):
+            fallback_reason = str(api_result.get("error") or "detail-api-systemic-failure")
+            logger.info("    [详情数据源] systemic_api_error：不回退 DOM")
+            return CreatorDetailResult(
+                result=_mark_detail_result(api_result, "api"),
+                source_used="api",
+                fallback_reason=fallback_reason,
+            )
         logger.info(
             f"    [详情数据源] API 传输/结构失败，回退 DOM: {fallback_reason}")
         dom_result = _observe_detail_dom(
