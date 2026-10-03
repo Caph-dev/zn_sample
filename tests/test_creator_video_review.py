@@ -123,6 +123,28 @@ def settings(monkeypatch, tmp_path):
     return values
 
 
+@pytest.fixture
+def created_proof_directories(monkeypatch):
+    directories = []
+    create_directory = review.tempfile.mkdtemp
+
+    def record_directory(*arguments, **keywords):
+        directory = create_directory(*arguments, **keywords)
+        directories.append(Path(directory))
+        return directory
+
+    monkeypatch.setattr(review.tempfile, "mkdtemp", record_directory)
+    return directories
+
+
+def read_cache_files(cache_root):
+    return {
+        path.relative_to(cache_root): path.read_bytes()
+        for path in cache_root.rglob("*")
+        if path.is_file()
+    }
+
+
 def patch_provider(
     monkeypatch,
     count=4,
@@ -174,6 +196,24 @@ def patch_provider(
 
     monkeypatch.setattr(review.TikHubClient, "collect", collect)
     monkeypatch.setattr(review, "_review_video", visual or default_visual)
+    return calls
+
+
+def patch_cached_provider(monkeypatch):
+    calls = patch_provider(monkeypatch)
+    synthetic_visual = review._review_video
+
+    def save_visual(candidate_detail, products, client, handle, sec_uid, settings, deadline):
+        visual = synthetic_visual(
+            candidate_detail, products, client, handle, sec_uid, settings, deadline,
+        )
+        return review._save_visual_cache(
+            candidate_detail, products, settings,
+            [Path(frame["path"]) for frame in visual["frames"]],
+            visual["interval_seconds"], visual["result"],
+        )
+
+    monkeypatch.setattr(review, "_review_video", save_visual)
     return calls
 
 
@@ -424,6 +464,12 @@ def test_count_and_sparse_negative(settings, monkeypatch, count):
     )
     # Once the count gate opens, all four candidates deserve a visual attempt.
     assert calls["visual"] == (0 if count < 4 else 4)
+    evidence_path = Path(output["content_review_evidence_path"])
+    assert evidence_path.parent.is_dir()
+    proof = json.loads(evidence_path.read_bytes())["proof"]
+    assert review._proof_verdict(proof, Path(settings["cache_dir"]))[0] == (
+        output["content_review_status"]
+    )
 
 
 @pytest.mark.parametrize("positive_position", [1, 2, 3])
@@ -780,24 +826,184 @@ def test_first_three_with_possible_display_do_not_open_visual_gate(
 
 @pytest.mark.parametrize("cancel_at", ["collect", "visual"])
 def test_content_cancellation_propagates_without_trying_next_candidate(
-    settings, monkeypatch, cancel_at
+    settings, monkeypatch, created_proof_directories, cancel_at
 ):
-    patch_provider(monkeypatch)
+    provider_calls = patch_provider(monkeypatch)
     calls = []
+    cancellation = OperationCancelled("read-only operation cancelled")
+    parent = Path(settings["cache_dir"]) / review.REVIEW_VERSION / "alice"
 
-    def cancel(*args, **kwargs):
-        calls.append(cancel_at)
-        raise OperationCancelled("read-only operation cancelled")
+    def cancel_current_attempt(handle):
+        calls.append(handle)
+        assert handle == "alice"
+        assert len(created_proof_directories) == 1
+        directory = created_proof_directories[0]
+        assert directory.parent == parent
+        assert directory.name.startswith("review-")
+        assert directory.is_dir()
+        (directory / "unfinished.tmp").write_bytes(b"unfinished synthetic proof")
+        raise cancellation
+
+    def cancel_collect(self, handle, *arguments, **keywords):
+        cancel_current_attempt(handle)
+
+    def cancel_visual(candidate_detail, products, client, handle, *arguments):
+        cancel_current_attempt(handle)
 
     if cancel_at == "collect":
-        monkeypatch.setattr(review.TikHubClient, "collect", cancel)
+        monkeypatch.setattr(review.TikHubClient, "collect", cancel_collect)
     else:
-        monkeypatch.setattr(review, "_review_video", cancel)
-    with pytest.raises(OperationCancelled):
+        monkeypatch.setattr(review, "_review_video", cancel_visual)
+    with pytest.raises(OperationCancelled) as captured:
         review.review_creator_rows(
-            [{"creator_name": "alice", "eligible": True}], now=NOW
+            [
+                {"creator_name": "alice", "eligible": True},
+                {"creator_name": "bob", "eligible": True},
+            ], now=NOW,
         )
-    assert calls == [cancel_at]
+    assert captured.value is cancellation
+    assert calls == ["alice"]
+    assert provider_calls == {"collect": int(cancel_at == "visual"), "visual": 0}
+    assert len(created_proof_directories) == 1
+    assert not created_proof_directories[0].exists()
+    assert parent.is_dir()
+    assert list(parent.glob("review-*")) == []
+
+
+def test_cancelled_attempt_preserves_same_handle_proof_frames_and_shared_cache(
+    settings, monkeypatch, created_proof_directories,
+):
+    provider_calls = patch_cached_provider(monkeypatch)
+    original_row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW,
+    )[0]
+    assert review.validate_content_review(original_row, now=NOW) == (
+        True, "content_review_proof_valid",
+    )
+    cache_root = Path(settings["cache_dir"])
+    evidence_path = Path(original_row["content_review_evidence_path"])
+    proof = json.loads(evidence_path.read_bytes())["proof"]
+    frame_path = Path(proof["videos"][0]["visual"]["frames"][0]["path"])
+    shared_cache = review._visual_cache_dir(settings, detail(0)["aweme_id"])
+    assert frame_path.parent == shared_cache
+    assert (shared_cache / "result.json").is_file()
+    assert (cache_root / ".proof-key").is_file()
+    original_files = read_cache_files(cache_root)
+    original_directories = {
+        path.relative_to(cache_root) for path in cache_root.rglob("*") if path.is_dir()
+    }
+    cancellation = OperationCancelled("read-only operation cancelled")
+    calls = []
+
+    def cancel_collect(self, handle, *arguments, **keywords):
+        calls.append(handle)
+        assert len(created_proof_directories) == 2
+        directory = created_proof_directories[-1]
+        assert directory.parent == evidence_path.parent.parent
+        assert directory != evidence_path.parent
+        assert directory.is_dir()
+        (directory / "unfinished.tmp").write_bytes(b"unfinished synthetic proof")
+        raise cancellation
+
+    monkeypatch.setattr(review.TikHubClient, "collect", cancel_collect)
+    with pytest.raises(OperationCancelled) as captured:
+        # No carried proof: this must be a fresh attempt, not proof reuse.
+        review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW,
+        )
+    assert captured.value is cancellation
+    assert calls == ["alice"]
+    assert provider_calls == {"collect": 1, "visual": 1}
+    assert not created_proof_directories[-1].exists()
+    assert read_cache_files(cache_root) == original_files
+    assert {
+        path.relative_to(cache_root) for path in cache_root.rglob("*") if path.is_dir()
+    } == original_directories
+    assert review.validate_content_review(original_row, now=NOW) == (
+        True, "content_review_proof_valid",
+    )
+
+
+def test_batch_cancellation_preserves_preceding_creator_proof(
+    settings, monkeypatch, created_proof_directories,
+):
+    provider_calls = patch_cached_provider(monkeypatch)
+    collect = review.TikHubClient.collect
+    write_proof = review._write_proof
+    cache_root = Path(settings["cache_dir"])
+    saved_proofs = []
+    collected_handles = []
+    cancellation = OperationCancelled("read-only operation cancelled")
+
+    def record_proof(proof, root, directory):
+        evidence_path = write_proof(proof, root, directory)
+        saved_proofs.append((evidence_path, proof, read_cache_files(root)))
+        return evidence_path
+
+    def cancel_second_creator(self, handle, *arguments, **keywords):
+        collected_handles.append(handle)
+        if handle == "bob":
+            assert len(saved_proofs) == 1
+            assert len(created_proof_directories) == 2
+            directory = created_proof_directories[-1]
+            assert directory.parent == cache_root / review.REVIEW_VERSION / "bob"
+            assert directory.is_dir()
+            (directory / "unfinished.tmp").write_bytes(b"unfinished synthetic proof")
+            raise cancellation
+        return collect(self, handle, *arguments, **keywords)
+
+    monkeypatch.setattr(review, "_write_proof", record_proof)
+    monkeypatch.setattr(review.TikHubClient, "collect", cancel_second_creator)
+    with pytest.raises(OperationCancelled) as captured:
+        review.review_creator_rows(
+            [{"creator_name": handle, "eligible": True} for handle in ("alice", "bob", "carol")],
+            now=NOW,
+        )
+    assert captured.value is cancellation
+    assert collected_handles == ["alice", "bob"]
+    assert provider_calls == {"collect": 1, "visual": 1}
+    assert len(saved_proofs) == 1
+    evidence_path, proof, saved_files = saved_proofs[0]
+    assert evidence_path.parent == created_proof_directories[0]
+    assert evidence_path.is_file()
+    assert read_cache_files(cache_root) == saved_files
+    assert review._proof_verdict(proof, cache_root)[0] == "passed"
+    assert len(created_proof_directories) == 2
+    assert not created_proof_directories[1].exists()
+    assert not (cache_root / review.REVIEW_VERSION / "carol").exists()
+
+
+def test_cancellation_before_directory_creation_does_not_remove_other_files(
+    settings, monkeypatch,
+):
+    patch_provider(monkeypatch)
+    original_row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW,
+    )[0]
+    cache_root = Path(settings["cache_dir"])
+    original_files = read_cache_files(cache_root)
+    cancellation = OperationCancelled("cancelled before directory creation")
+    creation_calls = []
+
+    def cancel_creation(*arguments, **keywords):
+        creation_calls.append(keywords)
+        assert keywords["prefix"] == "review-"
+        assert keywords["dir"] == cache_root / review.REVIEW_VERSION / "alice"
+        raise cancellation
+
+    def unexpected_cleanup(*arguments, **keywords):
+        pytest.fail("no attempt directory was allocated; nothing may be deleted")
+
+    monkeypatch.setattr(review.tempfile, "mkdtemp", cancel_creation)
+    monkeypatch.setattr(review.shutil, "rmtree", unexpected_cleanup)
+    with pytest.raises(OperationCancelled) as captured:
+        review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW,
+        )
+    assert captured.value is cancellation
+    assert len(creation_calls) == 1
+    assert read_cache_files(cache_root) == original_files
+    assert review.validate_content_review(original_row, now=NOW)[0]
 
 
 def test_partial_collection_passes_on_lower_bound(settings, monkeypatch):
@@ -1444,8 +1650,12 @@ def test_external_proof_and_symlink_rejected(settings, tmp_path):
         assert not valid
 
 
-def test_provider_error_redacted(settings, monkeypatch):
+def test_provider_error_redacted(settings, monkeypatch, created_proof_directories):
     def fail(*args):
+        assert len(created_proof_directories) == 1
+        directory = created_proof_directories[0]
+        assert directory.is_dir()
+        (directory / "unfinished.tmp").write_bytes(b"unfinished synthetic proof")
         raise RuntimeError(
             "Authorization Bearer SECRET https://signed.example?token=SECRET"
         )
@@ -1455,6 +1665,12 @@ def test_provider_error_redacted(settings, monkeypatch):
         [{"creator_name": "alice", "eligible": True}], now=NOW
     )[0]
     assert row["content_review_status"] == "needs_review"
+    assert row["content_review_reason"] == "content_review_unavailable"
+    assert row["eligible"] is False
+    assert row["content_review_evidence_path"] == ""
+    assert len(created_proof_directories) == 1
+    assert not created_proof_directories[0].exists()
+    assert created_proof_directories[0].parent.is_dir()
     assert "SECRET" not in json.dumps(row)
 
 

@@ -909,6 +909,8 @@ def _review_creator_rows(
                         ],
                     )
                 except OperationCancelled:
+                    if proof_dir is not None:
+                        shutil.rmtree(proof_dir, ignore_errors=True)
                     raise
                 except Exception as error:  # noqa: BLE001 - isolate and redact provider failures
                     if observation is not None:
