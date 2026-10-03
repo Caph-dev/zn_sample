@@ -48,6 +48,7 @@ from lib.auto_approval_rules import (  # noqa: E402
 from lib.creator_video_review import review_creator_rows  # noqa: E402
 from lib.auto_approval_sku import evaluate_product_sku  # noqa: E402
 from lib.filters import enrich_row  # noqa: E402
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 from lib.sample_navigation import navigate_from_seller_home_to_pending  # noqa: E402
 from lib.screening_perf import StageObservation, screening_run, screening_stage  # noqa: E402
 
@@ -541,6 +542,8 @@ def _review_preview_content(
                     ):
                         original[key] = reviewed.get(key)
                     original["sales_eligible"] = True
+            except OperationCancelled:
+                raise
             except Exception as error:
                 observation.fail()
                 logger.error("[内容审核] 审核未完成，相关行转待复核: %s", error)

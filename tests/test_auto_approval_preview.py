@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 import auto_approval  # noqa: E402
+from lib.operation_cancel import OperationCancelled  # noqa: E402
 from lib.sample_data_source import (  # noqa: E402
     SYSTEMIC_DETAIL_FAILURE_LIMIT,
     CreatorDetailResult,
@@ -525,7 +526,6 @@ def test_preview_interrupts_consecutive_failures_and_keeps_integrity(middle):
 
 
 def test_preview_cancellation_propagates_and_resets_context(tmp_path):
-    from lib.operation_cancel import OperationCancelled
     from lib.screening_perf import screening_run_active
 
     args = _preview_arguments(tmp_path, RULE_PAYLOAD)
@@ -544,6 +544,92 @@ def test_preview_cancellation_propagates_and_resets_context(tmp_path):
     assert not args.out.exists()
     api_fetch.assert_called_once()
     dom_fetch.assert_not_called()
+
+
+def test_preview_content_wrapper_propagates_cancellation_without_mutating_targets(caplog):
+    from lib.screening_perf import StageObservation
+
+    caplog.set_level(logging.INFO)
+    rule_payload = json.loads(json.dumps(RULE_PAYLOAD))
+    rule_payload["content"] = {"enabled": True, "days": 7, "min_related": 4}
+    rule = auto_approval.validate_custom_rule(
+        rule_payload, allowed_product_ids={HERO_PRODUCT_ID},
+    )
+    target = _pending_rows(1)[0]
+    original_target = dict(target)
+    cancellation = OperationCancelled("content review cancelled")
+    observation = StageObservation("content_review")
+
+    with (
+        patch.object(auto_approval, "review_creator_rows", side_effect=cancellation) as content_review,
+        patch.object(observation, "fail") as mark_failed,
+        pytest.raises(OperationCancelled) as captured,
+    ):
+        auto_approval._review_preview_content(rule, [target], observation)
+
+    assert captured.value is cancellation
+    assert target == original_target
+    content_review.assert_called_once_with([{**original_target, "sales_eligible": True}])
+    mark_failed.assert_not_called()
+    assert "相关行转待复核" not in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+@pytest.mark.parametrize("existing_output", [False, True], ids=["new-output", "existing-output"])
+def test_preview_content_cancellation_preserves_output_and_resets_context(
+    tmp_path, caplog, existing_output,
+):
+    from lib.screening_perf import current_screening_stage, screening_run_active
+
+    caplog.set_level(logging.INFO)
+    rule_payload = json.loads(json.dumps(RULE_PAYLOAD))
+    rule_payload["content"] = {"enabled": True, "days": 7, "min_related": 4}
+    args = _preview_arguments(tmp_path, rule_payload)
+    sentinel_bytes = b"previous synthetic preview\x00\xff\r\n"
+    if existing_output:
+        args.out.write_bytes(sentinel_bytes)
+    cancellation = OperationCancelled("content review cancelled")
+
+    with (
+        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+        patch.object(auto_approval, "load_pending_rows", return_value=SimpleNamespace(
+            rows=_pending_rows(1), source_used="api", fallback_reason="",
+        )),
+        patch.object(auto_approval, "load_creator_detail", return_value=CreatorDetailResult(
+            {"ok": True, "detail": {
+                "video_gpm_n": 15, "avg_video_views_n": 800, "video_engagement_n": 3,
+            }}, "api",
+        )) as detail_fetch,
+        patch.object(auto_approval, "review_creator_rows", side_effect=cancellation) as content_review,
+        patch.object(auto_approval, "approve_application_api") as approve,
+        patch.object(auto_approval, "create_creator_relation_record") as write_feishu,
+        pytest.raises(OperationCancelled) as captured,
+    ):
+        auto_approval._run_preview(args)
+
+    assert captured.value is cancellation
+    detail_fetch.assert_called_once()
+    content_review.assert_called_once()
+    review_inputs = content_review.call_args.args[0]
+    assert len(review_inputs) == 1
+    assert review_inputs[0]["custom_eligible"] is True
+    assert review_inputs[0]["custom_overall"] == "passed"
+    approve.assert_not_called()
+    write_feishu.assert_not_called()
+    if existing_output:
+        assert args.out.read_bytes() == sentinel_bytes
+    else:
+        assert not args.out.exists()
+    assert "预览已写入" not in caplog.text
+    assert "相关行转待复核" not in caplog.text
+    events = _perf_events(caplog)
+    for stage in ("content_review", "preview_total"):
+        stage_events = [event for event in events if event["stage"] == stage]
+        assert [event["event"] for event in stage_events] == ["begin", "end"]
+        assert stage_events[-1]["status"] == "error"
+        assert stage_events[-1]["counts"]["reason_cancelled"] >= 1
+    assert not screening_run_active()
+    assert current_screening_stage() is None
 
 
 def test_preview_rejects_success_that_masks_systemic_api_failure():
@@ -679,7 +765,18 @@ def test_preview_failed_or_empty_phases_always_end(tmp_path, caplog, failure):
         content.assert_not_called()
         assert events[-1]["status"] == "error"
     else:
-        assert json.loads(args.out.read_text(encoding="utf-8"))["stats"]["eligible"] == 0
+        envelope = json.loads(args.out.read_text(encoding="utf-8"))
+        assert envelope["stats"]["eligible"] == 0
+        if failure == "content":
+            content.assert_called_once()
+            detail.assert_not_called()
+            assert envelope["integrity_complete"] is True
+            assert envelope["stats"]["needs_review"] == 1
+            assert envelope["rows"][0]["custom_overall"] == "needs_review"
+            assert envelope["rows"][0]["content_review_status"] == "needs_review"
+            assert envelope["rows"][0]["content_review_reason"] == f"内容审核异常: {sentinel}"
+            assert "相关行转待复核" in caplog.text
+            assert caplog.records[-1].getMessage().startswith("预览已写入:")
 
 
 if __name__ == "__main__":
