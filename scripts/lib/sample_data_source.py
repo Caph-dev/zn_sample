@@ -13,6 +13,7 @@ from .creator_api import fetch_creator_detail_api
 from .creator_detail import fetch_detail_for_row
 from .sample_api import scrape_pending_list_api
 from .sample_dom import scrape_pending_list
+from .screening_perf import screening_stage
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +344,52 @@ def _mark_detail_result(
     return marked_result
 
 
+def _observe_detail_api(store_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    with screening_stage("detail_api") as observation:
+        observation.add("detail_api_calls")
+        try:
+            result = fetch_creator_detail_api(store_id, row)
+        except BaseException:
+            observation.add("detail_api_failure")
+            raise
+        if result.get("ok"):
+            observation.add("detail_api_success")
+        else:
+            observation.add("detail_api_failure")
+            observation.fail({
+                "profile-business-error": "profile_business_error",
+                "profile-schema-error": "profile_schema_error",
+                "missing-creator-id": "missing_creator_id",
+            }.get(result.get("error_type"), "unexpected_error"))
+        return result
+
+
+def _observe_detail_dom(
+    store_id: str,
+    row: dict[str, Any],
+    *,
+    list_href: str,
+    wait: float,
+    reason: str,
+) -> dict[str, Any]:
+    with screening_stage("detail_dom") as observation:
+        observation.add("detail_dom_calls")
+        observation.add(f"reason_{reason}")
+        try:
+            result = fetch_detail_for_row(
+                store_id, row, list_href=list_href, prefer_url=True, wait=wait,
+            )
+        except BaseException:
+            observation.add("detail_dom_failure")
+            raise
+        if result.get("ok"):
+            observation.add("detail_dom_success")
+        else:
+            observation.add("detail_dom_failure")
+            observation.fail()
+        return result
+
+
 def load_creator_detail(
     store_id: str,
     row: dict[str, Any],
@@ -356,12 +403,12 @@ def load_creator_detail(
         raise ValueError(f"未知 data_source={data_source!r}")
 
     if data_source == "dom":
-        result = fetch_detail_for_row(
+        result = _observe_detail_dom(
             store_id,
             row,
             list_href=list_href,
-            prefer_url=True,
             wait=wait,
+            reason="direct_dom",
         )
         return CreatorDetailResult(
             result=_mark_detail_result(result, "dom"),
@@ -369,14 +416,14 @@ def load_creator_detail(
         )
 
     if data_source == "api":
-        result = fetch_creator_detail_api(store_id, row)
+        result = _observe_detail_api(store_id, row)
         return CreatorDetailResult(
             result=_mark_detail_result(result, "api"),
             source_used="api",
         )
 
     if data_source == "auto":
-        api_result = fetch_creator_detail_api(store_id, row)
+        api_result = _observe_detail_api(store_id, row)
         if api_result.get("ok"):
             return CreatorDetailResult(
                 result=_mark_detail_result(api_result, "api"),
@@ -385,12 +432,12 @@ def load_creator_detail(
         fallback_reason = str(api_result.get("error") or "unknown-api-detail-error")
         logger.info(
             f"    [详情数据源] API 传输/结构失败，回退 DOM: {fallback_reason}")
-        dom_result = fetch_detail_for_row(
+        dom_result = _observe_detail_dom(
             store_id,
             row,
             list_href=list_href,
-            prefer_url=True,
             wait=wait,
+            reason="api_fallback",
         )
         return CreatorDetailResult(
             result=_mark_detail_result(
@@ -402,13 +449,13 @@ def load_creator_detail(
             fallback_reason=fallback_reason,
         )
 
-    api_result = fetch_creator_detail_api(store_id, row)
-    dom_result = fetch_detail_for_row(
+    api_result = _observe_detail_api(store_id, row)
+    dom_result = _observe_detail_dom(
         store_id,
         row,
         list_href=list_href,
-        prefer_url=True,
         wait=wait,
+        reason="shadow_dom",
     )
     api_error = "" if api_result.get("ok") else str(api_result.get("error") or "")
     if api_result.get("ok") and dom_result.get("ok"):

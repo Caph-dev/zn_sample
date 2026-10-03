@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -13,6 +17,7 @@ from lib.sample_data_source import (  # noqa: E402
     load_creator_detail,
     load_pending_rows,
 )
+from lib.screening_perf import screening_run  # noqa: E402
 
 
 class PendingDataSourceTests(unittest.TestCase):
@@ -203,6 +208,46 @@ class CreatorDetailDataSourceTests(unittest.TestCase):
             result.result["detail"]["_detail_data_source"],
             "dom-shadow",
         )
+
+
+@pytest.mark.parametrize("dom_failure", [False, True])
+def test_observed_fallback_counts_actual_sources_without_secret(caplog, dom_failure):
+    caplog.set_level(logging.INFO)
+    sequence = []
+
+    def api_read(*args, **kwargs):
+        sequence.append("api")
+        return {"ok": False, "error": "SIGNED_MEDIA_URL_SECRET", "error_type": "profile-business-error"}
+
+    def dom_read(*args, **kwargs):
+        sequence.append("dom")
+        assert kwargs == {"list_href": "https://example.test/", "prefer_url": True, "wait": 3.5}
+        if dom_failure:
+            raise RuntimeError("Authorization=SECRET_SENTINEL")
+        return {"ok": True, "detail": {"video_gpm_n": 12}}
+
+    with (
+        patch("lib.sample_data_source.fetch_creator_detail_api", side_effect=api_read),
+        patch("lib.sample_data_source.fetch_detail_for_row", side_effect=dom_read),
+        screening_run("detail-fallback") as recorder,
+    ):
+        if dom_failure:
+            with pytest.raises(RuntimeError, match="SECRET_SENTINEL"):
+                load_creator_detail("test", {}, data_source="auto", list_href="https://example.test/", wait=3.5)
+        else:
+            result = load_creator_detail("test", {}, data_source="auto", list_href="https://example.test/", wait=3.5)
+            assert result.source_used == "dom-fallback"
+            assert result.result["detail"]["video_gpm_n"] == 12
+    assert sequence == ["api", "dom"]
+    assert recorder.counts["detail_api_calls"] == recorder.counts["detail_api_failure"] == 1
+    assert recorder.counts["detail_dom_calls"] == 1
+    assert recorder.counts["detail_dom_failure" if dom_failure else "detail_dom_success"] == 1
+    events = [json.loads(record.getMessage().removeprefix("[筛查耗时]")) for record in caplog.records
+              if record.getMessage().startswith("[筛查耗时]")]
+    assert "SECRET" not in json.dumps(events)
+    assert events[-1]["counts"]["reason_api_fallback"] == 1
+    assert events[-1]["status"] == ("error" if dom_failure else "success")
+    assert len(events) == 4
 
 
 if __name__ == "__main__":

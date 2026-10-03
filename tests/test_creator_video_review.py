@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ import pytest
 from scripts.lib import app_config
 from scripts.lib import creator_video_contract as contract
 from scripts.lib import creator_video_review as review
+from scripts.lib.screening_perf import LOG_PREFIX, screening_run, screening_stage
 
 NOW = datetime(2026, 9, 6, tzinfo=UTC)
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "tiktok_shopping_anchors.json"
@@ -503,7 +505,7 @@ def test_global_visual_budget(settings, monkeypatch):
     assert all(row["content_review_status"] == "needs_review" for row in rows)
 
 
-def test_visual_cache_reused_across_windows(settings, monkeypatch):
+def test_visual_cache_reused_across_windows(settings, monkeypatch, caplog):
     counters = {"frames": 0, "analyse": 0}
 
     def synthetic_collect(self, handle, start, end, seed, on_video=None):
@@ -553,11 +555,201 @@ def test_visual_cache_reused_across_windows(settings, monkeypatch):
         [{"creator_name": "alice", "eligible": True}], now=NOW
     )[0]
     assert counters == {"frames": 1, "analyse": 1}
-    second = review.review_creator_rows(
-        [{"creator_name": "alice", "eligible": True}], now=NOW + timedelta(hours=1)
-    )[0]
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("visual cache hit must not fetch, download, extract, or analyse")
+
+    monkeypatch.setattr(review.TikHubClient, "detail", unexpected_call)
+    monkeypatch.setattr(review, "bounded_request", unexpected_call)
+    monkeypatch.setattr(review, "_extract_frames", unexpected_call)
+    monkeypatch.setattr(review, "_analyse_frames", unexpected_call)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    caplog.clear()
+    with screening_run("synthetic") as recorder:
+        with screening_stage("content_review", summary=True):
+            second = review.review_creator_rows(
+                [{"creator_name": "alice", "eligible": True}], now=NOW + timedelta(hours=1)
+            )[0]
     assert counters == {"frames": 1, "analyse": 1}
     assert first["eligible"] is True and second["eligible"] is True
+    assert recorder.counts["visual_cache_hit"] == 1
+    assert recorder.counts["visual_attempts"] == 1
+    for counter in ("media_download_attempts", "ffmpeg_calls", "vision_model_calls"):
+        assert recorder.counts.get(counter, 0) == 0
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    assert [event["stage"] for event in events if event["event"] == "begin"] == [
+        "content_review", "visual_cache",
+    ]
+
+
+def test_standalone_summary_and_existing_run_reuse(settings, monkeypatch, caplog):
+    calls = patch_provider(monkeypatch)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    rows = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}, {"creator_name": "@Alice", "eligible": True}],
+        now=NOW,
+    )
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    assert [(event["event"], event["stage"]) for event in events] == [
+        ("begin", "content_review"), ("end", "content_review"),
+    ]
+    assert {name: count for name, count in events[-1]["counts"].items() if count} == {
+        "content_target_rows": 2, "creator_collections": 1, "visual_attempts": 1, "creator_reuse": 1,
+    }
+    caplog.clear()
+    with screening_run("parent") as recorder:
+        with screening_stage("content_review", summary=True):
+            reused = review.review_creator_rows([rows[0]], now=NOW)[0]
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    assert len(events) == 2
+    assert all(event["run_id"] == "parent" for event in events)
+    assert recorder.counts == {"content_target_rows": 1, "proof_reuse": 1}
+    assert reused == rows[0]
+    assert calls == {"collect": 1, "visual": 1}
+
+
+@pytest.mark.parametrize(
+    "scenario,expected_status,expected_reason",
+    [
+        ("empty", "skipped", "no_targets"),
+        ("sales_failure", "skipped", "no_targets"),
+        ("disabled", "skipped", "disabled"),
+        ("settings_error", "error", "unexpected_error"),
+        ("collection_error", "error", "provider_unavailable"),
+        ("visual_error", "error", "unexpected_error"),
+        ("eligibility_failure", "success", None),
+        ("visual_inconclusive", "success", None),
+    ],
+)
+def test_standalone_summary_status_tracks_operations_not_eligibility(
+    settings, monkeypatch, caplog, scenario, expected_status, expected_reason
+):
+    source_rows = [{"creator_name": "alice", "eligible": True}]
+    calls = patch_provider(
+        monkeypatch,
+        count=2 if scenario == "eligibility_failure" else 4,
+        positive=scenario != "visual_inconclusive",
+    )
+    sentinel = "sensitive-provider-url_token_payload"
+    if scenario == "empty":
+        source_rows = []
+    elif scenario == "sales_failure":
+        source_rows[0]["eligible"] = False
+    elif scenario == "disabled":
+        settings["enabled"] = False
+    elif scenario == "settings_error":
+        def invalid_settings():
+            raise RuntimeError(sentinel)
+
+        monkeypatch.setattr(review, "load_content_review_settings", invalid_settings)
+    elif scenario == "collection_error":
+        def unavailable_collect(*args, **kwargs):
+            raise review.ReviewUnavailable("provider_unavailable")
+
+        monkeypatch.setattr(review.TikHubClient, "collect", unavailable_collect)
+    elif scenario == "visual_error":
+        def unavailable_visual(*args, **kwargs):
+            raise RuntimeError(sentinel)
+
+        monkeypatch.setattr(review, "_review_video", unavailable_visual)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    output = review.review_creator_rows(source_rows, now=NOW)
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    summary_end = events[-1]
+    assert summary_end["stage"] == "content_review"
+    assert summary_end["event"] == "end"
+    assert summary_end["status"] == expected_status
+    if expected_reason is not None:
+        assert summary_end["counts"][f"reason_{expected_reason}"] == 1
+    assert summary_end["counts"]["content_target_rows"] == (
+        0 if scenario in {"empty", "sales_failure"} else 1
+    )
+    assert sentinel not in caplog.text
+    if expected_status == "skipped" or scenario == "settings_error":
+        assert calls == {"collect": 0, "visual": 0}
+    if scenario == "eligibility_failure":
+        assert output[0]["content_review_status"] == "failed"
+    elif scenario in {"visual_error", "visual_inconclusive", "collection_error", "settings_error"}:
+        assert output[0]["content_review_status"] == "needs_review"
+
+
+@pytest.mark.parametrize("failure_stage", ["media_download", "frame_extract", "vision_model"])
+def test_content_substage_errors_close_and_redact(settings, monkeypatch, caplog, failure_stage):
+    sentinel = "secret_handle_url_token_prompt_frames"
+    source_detail = detail(handle=sentinel[:24], anchors=shopping_anchor(PRODUCT))
+    fresh_detail = {
+        **source_detail,
+        "video": {"play_addr": {"url_list": [f"https://cdn.example/{sentinel}"]}},
+    }
+    instance = review.TikHubClient(settings, time.monotonic() + 60)
+    monkeypatch.setattr(instance, "fetch", lambda *args: {"aweme_detail": fresh_detail})
+    call_order = []
+
+    def download(*args, **kwargs):
+        call_order.append("media_download")
+        if failure_stage == "media_download":
+            raise RuntimeError(sentinel)
+        return b"synthetic-media"
+
+    def extract(media, directory, current_settings, deadline):
+        call_order.append("frame_extract")
+        if failure_stage == "frame_extract":
+            raise review.ReviewUnavailable("frame_extraction_failed")
+        frame = directory / "frame_01.jpg"
+        frame.write_bytes(sentinel.encode("ascii"))
+        return [frame], None
+
+    def analyse(*args):
+        call_order.append("vision_model")
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(review, "bounded_request", download)
+    monkeypatch.setattr(review, "_extract_frames", extract)
+    monkeypatch.setattr(review, "_analyse_frames", analyse)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    with screening_run("synthetic") as recorder:
+        with pytest.raises((RuntimeError, review.ReviewUnavailable)):
+            review._review_video(
+                source_detail, [PRODUCT], instance, sentinel[:24], "verified-sec", settings,
+                time.monotonic() + 60,
+            )
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    stage_events = [event for event in events if event["stage"] == failure_stage]
+    assert [event["event"] for event in stage_events] == ["begin", "end"]
+    assert stage_events[-1]["status"] == "error"
+    safe_reason = "frame_extraction_failed" if failure_stage == "frame_extract" else "unexpected_error"
+    assert stage_events[-1]["counts"][f"reason_{safe_reason}"] == 1
+    assert sentinel not in caplog.text
+    assert sentinel[:24] not in caplog.text
+    assert "https://" not in caplog.text
+    expected_order = ["media_download", "frame_extract", "vision_model"]
+    assert call_order == expected_order[:expected_order.index(failure_stage) + 1]
+    assert recorder.counts["video_detail_calls"] == 1
+    assert recorder.counts["media_download_attempts"] == 1
+    assert recorder.counts.get("vision_model_calls", 0) == (failure_stage == "vision_model")
+    assert recorder.counts.get("media_download_bytes", 0) == (0 if failure_stage == "media_download" else len(b"synthetic-media"))
+
+
+def test_ffmpeg_counter_includes_first_frame_fallback(settings, monkeypatch, tmp_path):
+    commands = []
+
+    def ffmpeg(executable, arguments, remaining):
+        commands.append((executable, arguments, remaining))
+        if len(commands) == 2:
+            (tmp_path / "frame_01.jpg").write_bytes(b"synthetic frame")
+        return True
+
+    monkeypatch.setattr(review, "_run_ffmpeg", ffmpeg)
+    monkeypatch.setattr(review, "_resolve_ffmpeg_executable", lambda settings: "test-ffmpeg")
+    with screening_run("synthetic") as recorder:
+        with screening_stage("frame_extract"):
+            frames, interval = review._extract_frames(tmp_path / "source.mp4", tmp_path, settings, time.monotonic() + 60)
+    assert recorder.counts == {"ffmpeg_calls": 2}
+    assert len(commands) == 2
+    assert "fps=1/10,scale=640:640:force_original_aspect_ratio=decrease" in commands[0][1]
+    assert commands[0][2] == commands[1][2]
+    assert frames == [tmp_path / "frame_01.jpg"]
+    assert interval is None
 
 
 def test_frame_entries_timestamps_and_interval(settings, tmp_path):
@@ -574,7 +766,7 @@ def test_frame_entries_timestamps_and_interval(settings, tmp_path):
     assert entries[0]["timestamp_seconds"] == 0.0
 
 
-def test_review_video_skips_non_public_media_urls(settings, monkeypatch, tmp_path):
+def test_review_video_skips_non_public_media_urls(settings, monkeypatch, tmp_path, caplog):
     requested = []
 
     def fake_bounded_request(url, **kwargs):
@@ -616,20 +808,28 @@ def test_review_video_skips_non_public_media_urls(settings, monkeypatch, tmp_pat
             },
         },
     )
-    visual = review._review_video(
-        detail(anchors=shopping_anchor(PRODUCT)),
-        [PRODUCT],
-        review.TikHubClient(settings, time.monotonic() + 30),
-        "alice",
-        "verified-sec",
-        settings,
-        time.monotonic() + 30,
-    )
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    with screening_run("synthetic") as recorder:
+        visual = review._review_video(
+            detail(anchors=shopping_anchor(PRODUCT)),
+            [PRODUCT],
+            review.TikHubClient(settings, time.monotonic() + 30),
+            "alice",
+            "verified-sec",
+            settings,
+            time.monotonic() + 30,
+        )
     assert requested == [
         "https://blocked.example/video.mp4",
         "https://cdn.example/video.mp4",
     ]
     assert contract.has_positive_visual(visual["result"])
+    assert recorder.counts["media_download_attempts"] == 2
+    assert recorder.counts["media_download_bytes"] == 3
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    downloads = [event for event in events if event["stage"] == "media_download" and event["event"] == "end"]
+    assert [event["status"] for event in downloads] == ["error", "success"]
+    assert downloads[0]["counts"]["reason_non_public_media_address"] == 1
 
 
 def test_review_video_ignores_detail_shopping_sku_mismatch(

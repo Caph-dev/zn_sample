@@ -39,6 +39,15 @@ from .creator_video_contract import (
     shopping_products,
     validate_visual,
 )
+from .screening_perf import (
+    StageObservation,
+    current_screening_stage,
+    safe_error_code,
+    screening_count,
+    screening_run,
+    screening_run_active,
+    screening_stage,
+)
 from .tiktok_creator_videos import (
     ReviewUnavailable,
     TikHubClient,
@@ -178,6 +187,7 @@ def _extract_frames(
         "4",
         str(directory / "frame_%02d.jpg"),
     ]
+    screening_count("ffmpeg_calls")
     _run_ffmpeg(executable, sampled, remaining)
     frames = sorted(directory.glob("frame_*.jpg"))
     interval: int | None = FRAME_INTERVAL_SECONDS
@@ -192,6 +202,7 @@ def _extract_frames(
             "4",
             str(directory / "frame_%02d.jpg"),
         ]
+        screening_count("ffmpeg_calls")
         if not _run_ffmpeg(executable, first, remaining):
             raise ReviewUnavailable("frame_extraction_failed")
         interval = None
@@ -412,7 +423,11 @@ def _review_video(
     deadline: float,
 ) -> dict:
     video_id = str(detail["aweme_id"])
-    cached = _load_cached_visual(detail, products, settings)
+    with screening_stage("visual_cache"):
+        cached = _load_cached_visual(detail, products, settings)
+        screening_count(
+            "visual_cache_hit" if cached is not None else "visual_cache_miss"
+        )
     if cached is not None:
         return cached
     if not settings.get("ark_api_key"):
@@ -439,12 +454,15 @@ def _review_video(
     last_error: Exception | None = None
     for url in urls:
         try:
-            media_bytes = bounded_request(
-                url,
-                deadline=min(deadline, time.monotonic() + 45),
-                max_bytes=settings["max_media_bytes"],
-                redirects=3,
-            )
+            with screening_stage("media_download"):
+                screening_count("media_download_attempts")
+                media_bytes = bounded_request(
+                    url,
+                    deadline=min(deadline, time.monotonic() + 45),
+                    max_bytes=settings["max_media_bytes"],
+                    redirects=3,
+                )
+                screening_count("media_download_bytes", len(media_bytes))
             break
         except ReviewUnavailable as error:
             last_error = error
@@ -465,8 +483,12 @@ def _review_video(
         temp_dir = Path(temp)
         media = temp_dir / "source.mp4"
         media.write_bytes(media_bytes)
-        frames, interval = _extract_frames(media, temp_dir, settings, deadline)
-        result = _analyse_frames(frames, products, settings, deadline)
+        with screening_stage("frame_extract"):
+            frames, interval = _extract_frames(media, temp_dir, settings, deadline)
+            screening_count("frames", len(frames))
+        with screening_stage("vision_model"):
+            screening_count("vision_model_calls")
+            result = _analyse_frames(frames, products, settings, deadline)
         return _save_visual_cache(detail, products, settings, frames, interval, result)
 
 
@@ -689,6 +711,7 @@ def _collect_and_review(
     settings: dict,
     deadline: float,
     budget: list[int],
+    observation: StageObservation | None = None,
 ) -> tuple[list[dict], dict]:
     """Page the creator and interleave sparse vision; no loop-scope closures here.
 
@@ -716,6 +739,7 @@ def _collect_and_review(
         if budget[0] <= 0:
             return True
         budget[0] -= 1
+        screening_count("visual_attempts")
         try:
             item["visual"] = _review_video(
                 detail,
@@ -726,18 +750,37 @@ def _collect_and_review(
                 settings,
                 deadline,
             )
-        except Exception:  # noqa: BLE001 - one bad video must not abort the creator
+        except Exception as error:  # noqa: BLE001 - one bad video must not abort the creator
+            if observation is not None:
+                observation.fail(safe_error_code(error))
             return False
         if has_positive_visual(item["visual"]["result"]):
             positive = True
             return True
         return False
 
+    screening_count("creator_collections")
     collected = client.collect(handle, start, end, seed_video_id, on_video=on_video)
     return items, collected
 
 
 def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> list[dict]:
+    """Observe standalone content review, or reuse the caller's run and stage."""
+    standalone = not screening_run_active()
+    with screening_run(reuse=True):
+        observation = current_screening_stage()
+        if observation is not None and observation.stage == "content_review":
+            return _review_creator_rows(rows, now=now, observation=observation)
+        with screening_stage("content_review", summary=standalone) as observation:
+            return _review_creator_rows(rows, now=now, observation=observation)
+
+
+def _review_creator_rows(
+    rows: list[dict],
+    *,
+    now: datetime | None = None,
+    observation: StageObservation | None = None,
+) -> list[dict]:
     """Return copied final rows; reuse creators in-batch, maximum five serial visuals.
 
     Optional row input content_review_seed_video_id must identify a video whose
@@ -760,6 +803,7 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
     reused: dict[str, dict] = {}
     budget = [settings.get("max_visual_videos", 0)]
     output_rows = []
+    target_rows = 0
     for source_row in rows:
         row = dict(source_row)
         sales = _is_true(row.get("sales_eligible", row.get("eligible")))
@@ -780,6 +824,8 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
             "content_review_video_ids": [],
         }
         if sales:
+            target_rows += 1
+            screening_count("content_target_rows")
             if settings_error:
                 content.update(
                     content_review_status="needs_review",
@@ -788,6 +834,7 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
             elif not settings["enabled"]:
                 content["content_review_reason"] = "content_review_disabled"
             elif handle in reused:
+                screening_count("creator_reuse")
                 content = dict(reused[handle])
             else:
                 proof_dir = None
@@ -802,6 +849,7 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
                     except Exception:  # noqa: BLE001, S110 - invalid cache is a miss; never log secrets
                         pass
                     else:
+                        screening_count("proof_reuse")
                         content = {key: row[key] for key in content}
                         reused[handle] = dict(content)
                         row.update(content, eligible=True)
@@ -824,6 +872,7 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
                         settings,
                         deadline,
                         budget,
+                        observation,
                     )
                     proof = {
                         "version": REVIEW_VERSION,
@@ -850,6 +899,8 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
                         ],
                     )
                 except Exception as error:  # noqa: BLE001 - isolate and redact provider failures
+                    if observation is not None:
+                        observation.fail(safe_error_code(error))
                     content.update(
                         content_review_status="needs_review",
                         content_review_reason=str(error)
@@ -862,4 +913,11 @@ def review_creator_rows(rows: list[dict], *, now: datetime | None = None) -> lis
         row.update(content)
         row["eligible"] = sales and content["content_review_status"] == "passed"
         output_rows.append(row)
+    if observation is not None:
+        if not target_rows:
+            observation.skip("no_targets")
+        elif settings_error:
+            observation.fail()
+        elif not settings["enabled"]:
+            observation.skip("disabled")
     return output_rows

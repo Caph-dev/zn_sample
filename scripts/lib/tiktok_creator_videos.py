@@ -27,6 +27,8 @@ from urllib.parse import urlencode, urljoin, urlsplit
 
 import httpx
 
+from .screening_perf import screening_count, screening_stage
+
 TRUSTED_HOSTS = frozenset({"api.tikhub.io", "ark.cn-beijing.volces.com"})
 TRUSTED_TIKHUB_PREFIX = "https://api.tikhub.io/api/v1/tiktok/app/v3/"
 TRUSTED_ARK_URL = "https://ark.cn-beijing.volces.com/api/v3/responses"
@@ -313,12 +315,14 @@ class TikHubClient:
     def detail(self, video_id: str, handle: str, sec_uid: str = "") -> dict:
         if not re.fullmatch(r"\d{15,25}", str(video_id)):
             raise ReviewUnavailable("invalid_seed_video_id")
-        detail = self.fetch("fetch_one_video_v2", {"aweme_id": video_id}).get(
-            "aweme_detail"
-        )
-        if not isinstance(detail, dict) or str(detail.get("aweme_id")) != video_id:
-            raise ReviewUnavailable("video_detail_missing")
-        verify_author(detail, handle, sec_uid)
+        with screening_stage("video_detail_fetch"):
+            screening_count("video_detail_calls")
+            detail = self.fetch("fetch_one_video_v2", {"aweme_id": video_id}).get(
+                "aweme_detail"
+            )
+            if not isinstance(detail, dict) or str(detail.get("aweme_id")) != video_id:
+                raise ReviewUnavailable("video_detail_missing")
+            verify_author(detail, handle, sec_uid)
         return detail
 
     def collect(
@@ -348,19 +352,39 @@ class TikHubClient:
         recent: list[dict] = []
         stop_reason = "complete"
         for _page in range(self.settings["max_pages"]):
-            data = self.fetch(
-                "fetch_user_post_videos",
-                {
-                    "sec_user_id": sec_uid,
-                    "unique_id": handle if not sec_uid else "",
-                    "max_cursor": cursor,
-                    "count": 20,
-                    "sort_type": 0,
-                },
-            )
+            with screening_stage("video_page_fetch"):
+                screening_count("video_page_calls")
+                try:
+                    data = self.fetch(
+                        "fetch_user_post_videos",
+                        {
+                            "sec_user_id": sec_uid,
+                            "unique_id": handle if not sec_uid else "",
+                            "max_cursor": cursor,
+                            "count": 20,
+                            "sort_type": 0,
+                        },
+                    )
+                except Exception:
+                    screening_count("video_page_failure")
+                    raise
+                screening_count("video_page_success")
             videos = data.get("aweme_list")
+            if isinstance(videos, list):
+                screening_count("video_returned", len(videos))
             if not isinstance(videos, list) or len(videos) > 100:
                 raise ReviewUnavailable("invalid_video_list")
+            # Count returned entries, including duplicates and entries not reached
+            # after a callback stops, without expanding malformed provider lists.
+            for returned_video in videos:
+                returned_timestamp = (
+                    returned_video.get("create_time")
+                    if isinstance(returned_video, dict)
+                    else None
+                )
+                if type(returned_timestamp) is int:
+                    in_window = start.timestamp() <= returned_timestamp <= end.timestamp()
+                    screening_count("video_in_window" if in_window else "video_outside_window")
             for detail in videos:
                 if not isinstance(detail, dict):
                     raise ReviewUnavailable("invalid_video_metadata")
@@ -410,6 +434,10 @@ class TikHubClient:
             cursor = next_cursor
         else:
             stop_reason = "pagination_limit"
+        observation_reason = (
+            "page_limit" if stop_reason == "pagination_limit" else stop_reason
+        )
+        screening_count(f"reason_{observation_reason}")
         return {
             "handle": handle,
             "sec_uid": sec_uid,

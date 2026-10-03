@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -329,10 +332,15 @@ class PreviewFailFastTests(unittest.TestCase):
                 fallback_reason=SYSTEMIC_API_ERROR,
             )
 
-        exit_code, envelope, detail_calls = self._run_with_detail_results(
-            row_count=10,
-            detail_result_factory=systemic_result,
-        )
+        with self.assertLogs("lib.screening_perf", level="INFO") as captured:
+            exit_code, envelope, detail_calls = self._run_with_detail_results(
+                row_count=10,
+                detail_result_factory=systemic_result,
+            )
+        total = json.loads(captured.records[-1].getMessage().removeprefix("[筛查耗时]"))
+        self.assertEqual(total["counts"]["detail_collections"], SYSTEMIC_DETAIL_FAILURE_LIMIT)
+        self.assertEqual(total["counts"]["detail_circuit_skipped"], 10 - SYSTEMIC_DETAIL_FAILURE_LIMIT)
+        self.assertEqual(total["counts"]["detail_cache_hit"], 0)
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(detail_calls), SYSTEMIC_DETAIL_FAILURE_LIMIT)
@@ -400,6 +408,144 @@ class PreviewFailFastTests(unittest.TestCase):
             [row.get("detail_error") for row in envelope["rows"]],
             [None, None, None, None],
         )
+
+
+def _perf_events(caplog):
+    prefix = "[筛查耗时]"
+    return [
+        json.loads(record.getMessage()[len(prefix):])
+        for record in caplog.records if record.getMessage().startswith(prefix)
+    ]
+
+
+def _preview_arguments(tmp_path, rule):
+    rules_path = tmp_path / "rules.json"
+    rules_path.write_text(json.dumps(rule), encoding="utf-8")
+    return Namespace(
+        store_id="store-test", rules=rules_path, from_seller_home=False,
+        config=None, page_wait=0, max_pages=1, max_rows=0, detail_delay=0,
+        preview_id="preview-observation-test", out=tmp_path / "preview.json",
+    )
+
+
+@pytest.mark.parametrize("scenario", ["disabled", "no_targets", "enabled"])
+def test_preview_offline_counts_match_calls_and_preserve_envelope(tmp_path, caplog, scenario):
+    from contextlib import nullcontext
+    from lib.screening_perf import StageObservation, screening_run
+
+    caplog.set_level(logging.INFO)
+    rule = json.loads(json.dumps(RULE_PAYLOAD))
+    rule["content"] = {"enabled": scenario != "disabled", "days": 7, "min_related": 4}
+    if scenario == "disabled":
+        rule["video_live"] = {"enabled": False}
+        rule["basic"] = {"fulfillment": {"enabled": True, "min": 85}}
+    args = _preview_arguments(tmp_path, rule)
+    args.detail_delay = 0.25
+    rows = _pending_rows(2)
+    if scenario == "no_targets":
+        for row in rows:
+            row["product_id"] = "unselected-product"
+    calls = []
+
+    def collect_detail(*arguments, **keywords):
+        calls.append("detail")
+        return CreatorDetailResult(result={"ok": True, "detail": {
+            "video_gpm_n": 15, "avg_video_views_n": 800, "video_engagement_n": 3,
+        }}, source_used="api")
+
+    def review_content(inputs):
+        calls.append("content")
+        return [{**row, "content_review_status": "passed", "content_review_complete": True,
+                 "content_review_related_count": 4} for row in inputs]
+
+    tick = 0.0
+
+    def fake_clock():
+        nonlocal tick
+        tick += 0.125
+        return tick
+
+    with (
+        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+        patch.object(auto_approval, "load_pending_rows", side_effect=lambda *args, **kwargs:
+                     SimpleNamespace(rows=[dict(row) for row in rows], source_used="api", fallback_reason="")),
+        patch.object(auto_approval, "load_creator_detail", side_effect=collect_detail) as detail_fetch,
+        patch.object(auto_approval, "review_creator_rows", side_effect=review_content) as content_review,
+        patch.object(auto_approval.time, "sleep", side_effect=lambda *args: calls.append("delay")) as delay,
+        patch.object(auto_approval, "screening_run", side_effect=lambda run_id: screening_run(run_id, clock=fake_clock)),
+    ):
+        assert auto_approval._run_preview(args) == 0
+        observed = json.loads(args.out.read_text(encoding="utf-8"))
+        observed_calls = list(calls)
+        expected_detail_calls = 2 if scenario == "enabled" else 0
+        assert detail_fetch.call_count == delay.call_count == expected_detail_calls
+        assert content_review.call_count == int(scenario == "enabled")
+        events = _perf_events(caplog)
+        totals = events[-1]
+        assert totals["stage"] == "preview_total"
+        assert totals["counts"]["list_rows"] == 2
+        assert totals["counts"]["detail_collections"] == expected_detail_calls
+        assert totals["counts"]["detail_delay_calls"] == expected_detail_calls
+        assert totals["counts"]["detail_cache_hit"] == 0
+        assert totals["counts"]["detail_prefilter_skipped"] == 0
+        assert all(event["run_id"] == args.preview_id for event in events)
+        skipped = {event["stage"] for event in events if event["event"] == "end" and event["status"] == "skipped"}
+        if scenario != "enabled":
+            assert {"detail_enrichment", "content_review"} <= skipped
+        else:
+            assert [event["elapsed_ms"] for event in events if event["stage"] == "detail_delay" and event["event"] == "end"] == [125.0, 125.0]
+        assert caplog.records[-1].getMessage().startswith("预览已写入:")
+
+        # Same synthetic inputs without a recorder must produce the same business result.
+        calls.clear()
+        with (
+            patch.object(auto_approval, "screening_run", return_value=nullcontext()),
+            patch.object(auto_approval, "screening_stage", side_effect=lambda stage, **kwargs:
+                         nullcontext(StageObservation(stage))),
+        ):
+            assert auto_approval._run_preview(args) == 0
+        unobserved = json.loads(args.out.read_text(encoding="utf-8"))
+    assert calls == observed_calls
+    for envelope in (observed, unobserved):
+        for field in ("started_at", "finished_at"):
+            envelope.pop(field)
+        for row in envelope["rows"]:
+            row.pop("observed_at")
+    assert observed == unobserved
+
+
+@pytest.mark.parametrize("failure", ["scan", "empty", "detail", "content"])
+def test_preview_failed_or_empty_phases_always_end(tmp_path, caplog, failure):
+    caplog.set_level(logging.INFO)
+    rule = json.loads(json.dumps(RULE_PAYLOAD))
+    if failure == "content":
+        rule["video_live"] = {"enabled": False}
+        rule["basic"] = {"fulfillment": {"enabled": True, "min": 85}}
+        rule["content"] = {"enabled": True, "days": 7, "min_related": 4}
+    args = _preview_arguments(tmp_path, rule)
+    sentinel = "Authorization=SECRET_SENTINEL https://media.test/?signature=SECRET_SENTINEL"
+    with (
+        patch.object(auto_approval, "_load_hero", return_value=HERO_DATA),
+        patch.object(auto_approval, "load_pending_rows", return_value=SimpleNamespace(
+            rows=[] if failure == "empty" else _pending_rows(1), source_used="api", fallback_reason="",
+        ), side_effect=RuntimeError(sentinel) if failure == "scan" else None),
+        patch.object(auto_approval, "load_creator_detail", side_effect=RuntimeError(sentinel)) as detail,
+        patch.object(auto_approval, "review_creator_rows", side_effect=RuntimeError(sentinel)) as content,
+    ):
+        assert auto_approval._run_preview(args) == (1 if failure in {"scan", "empty"} else 0)
+    events = _perf_events(caplog)
+    assert "SECRET_SENTINEL" not in json.dumps(events)
+    assert sorted(event["stage"] for event in events if event["event"] == "begin") == sorted(
+        event["stage"] for event in events if event["event"] == "end"
+    )
+    failed_stage = {"scan": "list_scan", "empty": "list_scan", "detail": "detail_enrichment", "content": "content_review"}[failure]
+    assert any(event["stage"] == failed_stage and event["event"] == "end" and event["status"] == "error" for event in events)
+    if failure in {"scan", "empty"}:
+        detail.assert_not_called()
+        content.assert_not_called()
+        assert events[-1]["status"] == "error"
+    else:
+        assert json.loads(args.out.read_text(encoding="utf-8"))["stats"]["eligible"] == 0
 
 
 if __name__ == "__main__":

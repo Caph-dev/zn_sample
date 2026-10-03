@@ -19,6 +19,7 @@ from .page_api import (
 )
 from .operation_cancel import OperationCancelled, raise_if_cancelled
 from .parse_metrics import parse_count, parse_money
+from .screening_perf import screening_stage
 
 PROFILE_TYPES = (2, 3, 4, 5)
 
@@ -229,38 +230,45 @@ def fetch_creator_detail_api(
 
     try:
         raise_if_cancelled(cancel_check)
-        resolved_context = context or get_affiliate_page_context(
-            store_id,
-            **(
-                {"cancel_check": cancel_check}
-                if cancel_check is not None
-                else {}
-            ),
-        )
+        resolved_context = context
+        if not resolved_context:
+            with screening_stage("detail_context") as observation:
+                observation.add("detail_context_calls")
+                resolved_context = get_affiliate_page_context(
+                    store_id,
+                    **(
+                        {"cancel_check": cancel_check}
+                        if cancel_check is not None
+                        else {}
+                    ),
+                )
         payloads_by_type: dict[int, dict[str, Any]] = {}
         for profile_type in PROFILE_TYPES:
             raise_if_cancelled(cancel_check)
             request_kwargs = {"context": resolved_context}
             if cancel_check is not None:
                 request_kwargs["cancel_check"] = cancel_check
-            response_payload = request_json(
-                store_id,
-                CREATOR_PROFILE_ENDPOINT,
-                build_creator_profile_request(creator_id, profile_type),
-                **request_kwargs,
-            )
-            if not isinstance(response_payload, dict):
-                raise PageApiSchemaError(
-                    f"profile_type={profile_type} 响应不是对象: "
-                    f"{type(response_payload).__name__}"
-                )
-            business_code = response_payload.get("code")
-            if business_code is not None and business_code != 0:
-                raise PageApiBusinessError(
+            with screening_stage("detail_profile") as observation:
+                observation.add("detail_profile_calls")
+                observation.add(f"profile_type_{profile_type}")
+                response_payload = request_json(
+                    store_id,
                     CREATOR_PROFILE_ENDPOINT,
-                    business_code,
-                    str(response_payload.get("message") or ""),
+                    build_creator_profile_request(creator_id, profile_type),
+                    **request_kwargs,
                 )
+                if not isinstance(response_payload, dict):
+                    raise PageApiSchemaError(
+                        f"profile_type={profile_type} 响应不是对象: "
+                        f"{type(response_payload).__name__}"
+                    )
+                business_code = response_payload.get("code")
+                if business_code is not None and business_code != 0:
+                    raise PageApiBusinessError(
+                        CREATOR_PROFILE_ENDPOINT,
+                        business_code,
+                        str(response_payload.get("message") or ""),
+                    )
             payloads_by_type[profile_type] = response_payload
             raise_if_cancelled(cancel_check)
         detail = parse_creator_profile_payloads(payloads_by_type)

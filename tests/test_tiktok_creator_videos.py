@@ -1,3 +1,5 @@
+import json
+import logging
 import socket
 import time
 from datetime import UTC, datetime, timedelta
@@ -6,6 +8,7 @@ import httpx
 import pytest
 
 from scripts.lib import tiktok_creator_videos as metadata
+from scripts.lib.screening_perf import LOG_PREFIX, screening_run, screening_stage
 
 NOW = datetime(2026, 9, 6, tzinfo=UTC)
 
@@ -119,6 +122,120 @@ def test_on_video_callback_stops_collection(monkeypatch):
     assert result["stop_reason"] == "stopped"
     assert result["complete"] is False
     assert len(result["videos"]) == 1
+
+
+def test_page_observation_excludes_callback_and_counts_returned_window(monkeypatch, caplog):
+    instance, requests = client(
+        monkeypatch,
+        [{"aweme_list": [video(9, age=30), video(), video(2)], "has_more": 0}],
+    )
+    elapsed = [0.0]
+    original_fetch = instance.fetch
+
+    class TimedVideos(list):
+        def __iter__(self):
+            elapsed[0] += 1
+            return super().__iter__()
+
+    def fetch(endpoint, parameters):
+        elapsed[0] += 0.025
+        result = original_fetch(endpoint, parameters)
+        result["aweme_list"] = TimedVideos(result["aweme_list"])
+        return result
+
+    def callback(detail, sec_uid):
+        with screening_stage("vision_model"):
+            elapsed[0] += 10
+        return True
+
+    monkeypatch.setattr(instance, "fetch", fetch)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    with screening_run("synthetic", clock=lambda: elapsed[0]) as recorder:
+        with screening_stage("content_review", summary=True):
+            result = instance.collect("alice", NOW - timedelta(days=7), NOW, on_video=callback)
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    page_end = next(event for event in events if event["stage"] == "video_page_fetch" and event["event"] == "end")
+    assert page_end["elapsed_ms"] == 25
+    assert page_end["counts"] == {
+        "video_page_calls": 1, "video_page_success": 1,
+    }
+    assert recorder.counts["video_returned"] == 3
+    assert recorder.counts["video_in_window"] == 2
+    assert recorder.counts["video_outside_window"] == 1
+    model_end = next(
+        event for event in events
+        if event["stage"] == "vision_model" and event["event"] == "end"
+    )
+    assert model_end["elapsed_ms"] == 10000
+    assert recorder.counts["reason_stopped"] == 1
+    assert result["videos"] == [video()]
+    assert len(requests) == 1
+    assert events[-1]["elapsed_ms"] == 12025
+
+
+@pytest.mark.parametrize("stage", ["video_page_fetch", "video_detail_fetch"])
+def test_metadata_request_error_closes_observation_without_secrets(monkeypatch, caplog, stage):
+    instance, _requests = client(monkeypatch, [])
+    sentinel = "secret-handle_signed-url_token_payload"
+
+    def fail_fetch(endpoint, parameters):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(instance, "fetch", fail_fetch)
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    with screening_run("synthetic") as recorder:
+        with pytest.raises(RuntimeError, match=sentinel):
+            if stage == "video_page_fetch":
+                instance.collect("alice", NOW - timedelta(days=7), NOW)
+            else:
+                instance.detail(video()["aweme_id"], "alice")
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    assert [(event["event"], event["stage"]) for event in events] == [("begin", stage), ("end", stage)]
+    assert events[-1]["status"] == "error"
+    assert events[-1]["counts"]["reason_unexpected_error"] == 1
+    assert sentinel not in caplog.text
+    if stage == "video_page_fetch":
+        assert recorder.counts["video_page_failure"] == 1
+        assert recorder.counts.get("video_page_success", 0) == 0
+    else:
+        assert recorder.counts["video_detail_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    "response,reason",
+    [
+        ({"aweme_detail": None}, "video_detail_missing"),
+        ({"aweme_detail": video(handle="impostor")}, "creator_identity_mismatch"),
+    ],
+)
+def test_detail_validation_failure_marks_stage_error(monkeypatch, caplog, response, reason):
+    instance, _requests = client(monkeypatch, [response])
+    caplog.set_level(logging.INFO, logger="scripts.lib.screening_perf")
+    with screening_run("synthetic"):
+        with pytest.raises(metadata.ReviewUnavailable, match=reason):
+            instance.detail(video()["aweme_id"], "alice")
+    events = [json.loads(record.message[len(LOG_PREFIX):]) for record in caplog.records]
+    assert events[-1]["stage"] == "video_detail_fetch"
+    assert events[-1]["event"] == "end"
+    assert events[-1]["status"] == "error"
+    assert events[-1]["counts"][f"reason_{reason}"] == 1
+
+
+@pytest.mark.parametrize(
+    "overrides,page,reason",
+    [
+        ({"max_pages": 1}, {"aweme_list": [video()], "has_more": 1, "max_cursor": 1}, "page_limit"),
+        ({"max_videos": 1}, {"aweme_list": [video(), video(2)], "has_more": 0}, "video_limit"),
+        ({}, {"aweme_list": [video()], "has_more": 1, "max_cursor": 0}, "pagination_stalled"),
+        ({}, {"aweme_list": [video()], "has_more": 0}, "complete"),
+    ],
+)
+def test_collection_stop_counts_use_finite_reasons(monkeypatch, overrides, page, reason):
+    instance, _requests = client(monkeypatch, [page], **overrides)
+    with screening_run("synthetic") as recorder:
+        instance.collect("alice", NOW - timedelta(days=7), NOW)
+    assert recorder.counts[f"reason_{reason}"] == 1
+    assert recorder.counts["video_page_calls"] == 1
 
 
 def test_duplicate_video_dedup_and_conflict(monkeypatch):

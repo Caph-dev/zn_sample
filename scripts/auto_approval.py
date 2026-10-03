@@ -36,6 +36,7 @@ from lib.auto_approval_rules import (  # noqa: E402
     CONTENT_DISABLED_REASON,
     SCHEMA_VERSION,
     AutoApprovalRuleError,
+    CustomRule,
     rule_hash,
     rule_summary_lines,
     validate_custom_rule,
@@ -46,6 +47,7 @@ from lib.creator_video_review import review_creator_rows  # noqa: E402
 from lib.auto_approval_sku import evaluate_product_sku  # noqa: E402
 from lib.filters import enrich_row  # noqa: E402
 from lib.sample_navigation import navigate_from_seller_home_to_pending  # noqa: E402
+from lib.screening_perf import StageObservation, screening_run, screening_stage  # noqa: E402
 
 # 复用正式筛查脚本的已验证链路（AGENTS.md：引用、不复制大段）
 from screen_sample_requests import (  # noqa: E402
@@ -195,20 +197,39 @@ def _final_content_verdict(
 
 
 def _run_preview(args: argparse.Namespace) -> int:
+    with screening_run(args.preview_id):
+        with screening_stage("preview_total", summary=True) as observation:
+            exit_code = _run_preview_observed(args)
+            if exit_code:
+                observation.fail("exit_error")
+    if exit_code == 0:
+        # Keep the human-readable result as the task panel's final progress line.
+        logger.info(f"预览已写入: {args.out}")
+    return exit_code
+
+
+def _run_preview_observed(args: argparse.Namespace) -> int:
     store_id = args.store_id
     rules_payload = _load_json(args.rules)
-    if args.from_seller_home:
-        try:
-            navigate_from_seller_home_to_pending(
-                store_id,
-                navigation_timeout=90.0,
-                poll_interval=max(0.5, min(2.0, args.page_wait)),
-            )
-        except Exception as error:
-            logger.error(f"自动导航失败: {error}")
-            return 2
+    with screening_stage("navigation") as observation:
+        if args.from_seller_home:
+            logger.info("[筛查进度] 导航至待审核")
+            try:
+                navigate_from_seller_home_to_pending(
+                    store_id,
+                    navigation_timeout=90.0,
+                    poll_interval=max(0.5, min(2.0, args.page_wait)),
+                )
+            except Exception as error:
+                observation.fail()
+                logger.error(f"自动导航失败: {error}")
+                return 2
+        else:
+            observation.skip("disabled")
 
-    hero_data = _load_hero(store_id, args.config)
+    with screening_stage("hero_load"):
+        logger.info("[筛查进度] 读取主推表")
+        hero_data = _load_hero(store_id, args.config)
     hero_keys = set(hero_data.get("hero_keys") or set())
     allowed_product_ids = _hero_allowed_product_ids(hero_data)
     try:
@@ -231,14 +252,19 @@ def _run_preview(args: argparse.Namespace) -> int:
     integrity_notes: list[str] = []
     integrity_failures: list[str] = []
     try:
-        pending_result = load_pending_rows(
-            store_id,
-            data_source=PREVIEW_DATA_SOURCE,
-            max_pages=args.max_pages,
-            max_rows=args.max_rows,
-            page_wait=args.page_wait,
-        )
-        raw_rows = pending_result.rows
+        with screening_stage("list_scan") as observation:
+            logger.info("[筛查进度] 扫描待审核列表")
+            pending_result = load_pending_rows(
+                store_id,
+                data_source=PREVIEW_DATA_SOURCE,
+                max_pages=args.max_pages,
+                max_rows=args.max_rows,
+                page_wait=args.page_wait,
+            )
+            raw_rows = pending_result.rows
+            observation.add("list_rows", len(raw_rows))
+            if not raw_rows:
+                observation.fail("no_rows")
     except Exception as error:
         logger.error(f"扫表失败: {error}")
         return 1
@@ -253,100 +279,35 @@ def _run_preview(args: argparse.Namespace) -> int:
     rows = [enrich_row(raw) for raw in raw_rows]
 
     # 视频/直播组启用才需要拉详情；其余条件不强拉（履约按列表口径可判）。
-    need_detail = rule.video_live.enabled
-    if need_detail:
-        list_href = (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "")
-        detail_targets = [
-            row for row in rows if row.get("product_id") in rule.product_ids
-        ]
-        logger.info(f"视频/直播组启用：拉详情 {len(detail_targets)} 行")
-        systemic_failure_reason = ""
-        consecutive_systemic_failures = 0
-        skipped_detail_rows = 0
-        for index, row in enumerate(detail_targets, 1):
-            if systemic_failure_reason:
-                # 已确认系统级故障：不再逐行请求，也不回退 DOM（会白等）。
-                row["detail_error"] = "detail-api-systemic-failure"
-                skipped_detail_rows += 1
-                continue
-            logger.info(
-                f"  [{index}/{len(detail_targets)}] {row.get('creator_name')}"
-            )
-            try:
-                detail_result = load_creator_detail(
-                    store_id,
-                    row,
-                    data_source=PREVIEW_DATA_SOURCE,
-                    list_href=list_href,
-                    wait=max(3.5, args.page_wait + 1.5),
-                )
-                result = detail_result.result
-            except Exception as error:
-                row["detail_error"] = str(error)
-                integrity_failures.append(
-                    f"详情失败 {row.get('creator_name')}: {error}"
-                )
-                continue
-            if not result.get("ok"):
-                row["detail_error"] = result.get("error")
-                integrity_failures.append(
-                    f"详情失败 {row.get('creator_name')}: {result.get('error')}"
-                )
-                if is_systemic_detail_error(
-                    detail_result.fallback_reason or result.get("error")
-                ):
-                    consecutive_systemic_failures += 1
-                    if consecutive_systemic_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT:
-                        systemic_failure_reason = str(
-                            detail_result.fallback_reason
-                            or result.get("error")
-                            or "detail-api-systemic-failure"
-                        )
-                else:
-                    consecutive_systemic_failures = 0
-                continue
-            consecutive_systemic_failures = 0
-            _overlay_detail_fields(row, result["detail"])
-            if args.detail_delay:
-                time.sleep(args.detail_delay)
-        if systemic_failure_reason:
-            logger.error(
-                f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
-                f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
-            )
-            logger.error(
-                f"[详情数据源] 剩余 {skipped_detail_rows} 行未取详情，按 needs_review 处理；"
-                "请关闭浏览器插件或等平台恢复后重试"
-            )
-            integrity_failures.append(
-                f"详情接口系统级故障（{systemic_failure_reason[:120]}）："
-                f"剩余 {skipped_detail_rows} 行未取详情，按待复核处理"
-            )
-    else:
-        integrity_notes.append(
-            "视频/直播组未启用：未拉取达人详情（履约/GPM 按列表口径）"
+    with screening_stage("detail_enrichment") as observation:
+        logger.info("[筛查进度] 按规则补齐详情（关闭或无目标则跳过）")
+        _enrich_preview_details(
+            args, rule, rows, raw_rows, integrity_notes, integrity_failures, observation,
         )
 
     selected_allowed = set(rule.product_ids)
     evaluated_rows: list[dict[str, Any]] = []
-    for row in rows:
-        row["product_id"] = str(row.get("product_id") or "")
-        evaluation = evaluate_custom_row(
-            row,
-            rule,
-            hero_keys=hero_keys,
-            allowed_product_ids=selected_allowed,
-        )
-        row.update(
-            {
-                "custom_overall": evaluation["overall"],
-                "custom_checks": evaluation["checks"],
-                "safety_blocks": evaluation["safety_blocks"],
-                "blocked": evaluation["blocked"],
-                "custom_eligible": evaluation["custom_eligible"],
-            }
-        )
-        evaluated_rows.append(row)
+    with screening_stage("rule_evaluation") as observation:
+        logger.info("[筛查进度] 计算自定义规则")
+        observation.add("rule_rows", len(rows))
+        for row in rows:
+            row["product_id"] = str(row.get("product_id") or "")
+            evaluation = evaluate_custom_row(
+                row,
+                rule,
+                hero_keys=hero_keys,
+                allowed_product_ids=selected_allowed,
+            )
+            row.update(
+                {
+                    "custom_overall": evaluation["overall"],
+                    "custom_checks": evaluation["checks"],
+                    "safety_blocks": evaluation["safety_blocks"],
+                    "blocked": evaluation["blocked"],
+                    "custom_eligible": evaluation["custom_eligible"],
+                }
+            )
+            evaluated_rows.append(row)
 
     # 内容审核：只对「自定义规则已通过且无拦截」的行运行（与正式链路一致）。
     review_targets = [
@@ -354,41 +315,15 @@ def _run_preview(args: argparse.Namespace) -> int:
         for row in evaluated_rows
         if row.get("custom_eligible") and row.get("custom_overall") == "passed"
     ]
-    if rule.content.enabled:
-        if review_targets:
-            logger.info(
-                f"[内容审核] 自定义通过 {len(review_targets)} 行，开始审核近期带货视频"
-            )
-            try:
-                review_inputs = [dict(row) for row in review_targets]
-                for review_input in review_inputs:
-                    review_input["sales_eligible"] = True
-                reviewed_rows = review_creator_rows(review_inputs)
-                if len(reviewed_rows) != len(review_targets):
-                    raise ValueError("内容审核返回行数不匹配")
-                for original, reviewed in zip(review_targets, reviewed_rows):
-                    for key in (
-                        "content_review_status",
-                        "content_review_reason",
-                        "content_review_handle",
-                        "content_review_window_start",
-                        "content_review_window_end",
-                        "content_review_related_count",
-                        "content_review_complete",
-                        "content_review_evidence_path",
-                        "content_review_version",
-                        "content_review_model",
-                        "content_review_video_ids",
-                    ):
-                        original[key] = reviewed.get(key)
-                    original["sales_eligible"] = True
-            except Exception as error:
-                logger.error("[内容审核] 审核未完成，相关行转待复核: %s", error)
-                for row in review_targets:
-                    row["content_review_status"] = "needs_review"
-                    row["content_review_reason"] = f"内容审核异常: {error}"
-        else:
-            logger.info("[内容审核] 无自定义通过行，跳过内容审核")
+    with screening_stage("content_review") as observation:
+        logger.info("[筛查进度] 审核近期带货视频（关闭或无目标则跳过）")
+        if not rule.content.enabled:
+            observation.add("content_target_rows", 0)
+            observation.skip("disabled")
+        elif not review_targets:
+            observation.add("content_target_rows", 0)
+            observation.skip("no_targets")
+        _review_preview_content(rule, review_targets, observation)
 
     stats = {
         "rows": len(evaluated_rows),
@@ -452,8 +387,146 @@ def _run_preview(args: argparse.Namespace) -> int:
         f"不符合={stats['failed']} 待复核={stats['needs_review']} "
         f"拦截={stats['blocked']} ---"
     )
-    logger.info(f"预览已写入: {args.out}")
     return 0
+
+
+def _enrich_preview_details(
+    args: argparse.Namespace,
+    rule: CustomRule,
+    rows: list[dict[str, Any]],
+    raw_rows: list[dict[str, Any]],
+    integrity_notes: list[str],
+    integrity_failures: list[str],
+    observation: StageObservation,
+) -> None:
+    for count_name in ("detail_cache_hit", "detail_prefilter_skipped", "detail_circuit_skipped"):
+        observation.add(count_name, 0)
+    if rule.video_live.enabled:
+        list_href = (raw_rows[0].get("_list_href") or raw_rows[0].get("href") or "")
+        detail_targets = [
+            row for row in rows if row.get("product_id") in rule.product_ids
+        ]
+        observation.add("detail_target_rows", len(detail_targets))
+        if not detail_targets:
+            observation.skip("no_targets")
+        logger.info(f"视频/直播组启用：拉详情 {len(detail_targets)} 行")
+        systemic_failure_reason = ""
+        consecutive_systemic_failures = 0
+        skipped_detail_rows = 0
+        for index, row in enumerate(detail_targets, 1):
+            if systemic_failure_reason:
+                # 已确认系统级故障：不再逐行请求，也不回退 DOM（会白等）。
+                row["detail_error"] = "detail-api-systemic-failure"
+                skipped_detail_rows += 1
+                observation.add("detail_circuit_skipped")
+                continue
+            logger.info(
+                f"  [{index}/{len(detail_targets)}] {row.get('creator_name')}"
+            )
+            try:
+                observation.add("detail_collections")
+                detail_result = load_creator_detail(
+                    args.store_id,
+                    row,
+                    data_source=PREVIEW_DATA_SOURCE,
+                    list_href=list_href,
+                    wait=max(3.5, args.page_wait + 1.5),
+                )
+                result = detail_result.result
+            except Exception as error:
+                observation.fail()
+                row["detail_error"] = str(error)
+                integrity_failures.append(
+                    f"详情失败 {row.get('creator_name')}: {error}"
+                )
+                continue
+            if not result.get("ok"):
+                observation.fail()
+                row["detail_error"] = result.get("error")
+                integrity_failures.append(
+                    f"详情失败 {row.get('creator_name')}: {result.get('error')}"
+                )
+                if is_systemic_detail_error(
+                    detail_result.fallback_reason or result.get("error")
+                ):
+                    consecutive_systemic_failures += 1
+                    if consecutive_systemic_failures >= SYSTEMIC_DETAIL_FAILURE_LIMIT:
+                        systemic_failure_reason = str(
+                            detail_result.fallback_reason
+                            or result.get("error")
+                            or "detail-api-systemic-failure"
+                        )
+                else:
+                    consecutive_systemic_failures = 0
+                continue
+            consecutive_systemic_failures = 0
+            _overlay_detail_fields(row, result["detail"])
+            if args.detail_delay:
+                with screening_stage("detail_delay") as delay_observation:
+                    delay_observation.add("detail_delay_calls")
+                    time.sleep(args.detail_delay)
+        if systemic_failure_reason:
+            logger.error(
+                f"[详情数据源] 连续 {SYSTEMIC_DETAIL_FAILURE_LIMIT} 行命中同一系统级错误，"
+                f"已停止逐行回退 DOM：{systemic_failure_reason[:160]}"
+            )
+            logger.error(
+                f"[详情数据源] 剩余 {skipped_detail_rows} 行未取详情，按 needs_review 处理；"
+                "请关闭浏览器插件或等平台恢复后重试"
+            )
+            integrity_failures.append(
+                f"详情接口系统级故障（{systemic_failure_reason[:120]}）："
+                f"剩余 {skipped_detail_rows} 行未取详情，按待复核处理"
+            )
+    else:
+        observation.add("detail_target_rows", 0)
+        observation.skip("disabled")
+        integrity_notes.append(
+            "视频/直播组未启用：未拉取达人详情（履约/GPM 按列表口径）"
+        )
+
+
+def _review_preview_content(
+    rule: CustomRule,
+    review_targets: list[dict[str, Any]],
+    observation: StageObservation,
+) -> None:
+    if rule.content.enabled:
+        if review_targets:
+            logger.info(
+                f"[内容审核] 自定义通过 {len(review_targets)} 行，开始审核近期带货视频"
+            )
+            try:
+                review_inputs = [dict(row) for row in review_targets]
+                for review_input in review_inputs:
+                    review_input["sales_eligible"] = True
+                reviewed_rows = review_creator_rows(review_inputs)
+                if len(reviewed_rows) != len(review_targets):
+                    raise ValueError("内容审核返回行数不匹配")
+                for original, reviewed in zip(review_targets, reviewed_rows):
+                    for key in (
+                        "content_review_status",
+                        "content_review_reason",
+                        "content_review_handle",
+                        "content_review_window_start",
+                        "content_review_window_end",
+                        "content_review_related_count",
+                        "content_review_complete",
+                        "content_review_evidence_path",
+                        "content_review_version",
+                        "content_review_model",
+                        "content_review_video_ids",
+                    ):
+                        original[key] = reviewed.get(key)
+                    original["sales_eligible"] = True
+            except Exception as error:
+                observation.fail()
+                logger.error("[内容审核] 审核未完成，相关行转待复核: %s", error)
+                for row in review_targets:
+                    row["content_review_status"] = "needs_review"
+                    row["content_review_reason"] = f"内容审核异常: {error}"
+        else:
+            logger.info("[内容审核] 无自定义通过行，跳过内容审核")
 
 
 def _run_execute(args: argparse.Namespace) -> int:

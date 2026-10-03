@@ -148,6 +148,19 @@ uv run --frozen python setup/release/import_legacy_state.py --source "/absolute/
 - 批准仍走既有 `--execute --yes` 门闩和同一执行限额：平台同意成功后才写飞书，写表目标仍是「达人关系管理(新) / 达人管理总表」；不发介绍/物流私信，不自动开店切店。
 - 平台同意不可撤销；批准未知不自动重试，交「核对补写」延后确认（等平台约 10 分钟刷新）。
 
+### 筛查慢 / 卡住时看哪里
+
+自定义只读预览新增 `[筛查耗时]` 单行 JSON 日志；在任务日志中先找本次 `run_id`（即 preview_id），再看 `event=end` 的 `stage`、`elapsed_ms` 和 `counts`。`[筛查进度]` 给出中文阶段提示，最后仍保留「预览已写入」。不需要启动额外监控服务。
+
+- `preview_total` 是本次预览函数的总时间，包含导航、读主推表、筛查和导出，不含任务排队或子进程启动。`navigation` / `hero_load` 单列前置耗时。
+- `list_scan` 看扫表；`detail_enrichment` 看整段补齐；`detail_context` / `detail_profile` / `detail_dom` 分别看页面上下文、四类详情逻辑请求、DOM 回退。`detail_delay` 是主动等待，不是网络慢。`detail_profile_calls` 不是底层 HTTP 重试次数。
+- `content_review` 看内容总时间；`video_page_fetch` 只看视频列表 fetch，`video_detail_fetch` 看视频详情；`media_download`、`frame_extract`、`vision_model` 分别定位下载、抽帧和模型。分页回调中也可能做视觉审核，**父子阶段时间不能相加当总时间**。
+- 看 `visual_attempts` 与 `vision_model_calls` 的差别：下载失败也会占视觉尝试，但不算模型调用。`visual_cache_hit`、`creator_reuse`、`proof_reuse` 是不同层复用，不能当成真实采集。`detail_cache_hit` / `detail_prefilter_skipped` 目前为 0，`detail_circuit_skipped` 表示详情熔断后没再采集的申请行。
+
+`status=skipped` 的 `reason_disabled` / `reason_no_targets` 表示未启用或无目标；`status=error` 表示阶段采集/处理失败，不是达人销售指标不达标。具体日志契约见 [候选筛选流程](./docs/spec/自动审批候选筛选流程.md#61-阶段耗时日志契约)。新增日志不输出密钥、达人 handle、媒体 URL 或模型原文；原有日志仍应按业务敏感资料保管，不要整份公开。
+
+本次覆盖自定义 preview 全链路及独立内容库运行；**不代表正式 1/2 入口的详情循环已有整轮统计**。本项只增加观测，不改变请求数、阈值、预算或批准证据，也不代表完成实店性能验收。
+
 ### 订单号补写（常驻入口）
 
 自动批准页始终显示「订单号补写」，与当前筛查名单、历史批准批次都分开。**不需要选批次，也不需要先跑只读核对**：规则固定为「人员 = 王良希（技术） + 记录创建时间在近 72 小时内 + 订单号为空」，每次点击都按这个规则重新扫飞书。

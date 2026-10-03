@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -22,6 +26,7 @@ from lib.page_api import (  # noqa: E402
     PageApiSchemaError,
 )
 from lib.operation_cancel import OperationCancelled  # noqa: E402
+from lib.screening_perf import screening_run  # noqa: E402
 
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "creator_profile_types.json"
 
@@ -237,6 +242,51 @@ class CreatorProfileClientTests(unittest.TestCase):
                     shop_region="US",
                 ),
             )
+
+
+@pytest.mark.parametrize("use_context", [True, False])
+def test_observed_context_and_profiles_match_logical_requests(caplog, use_context):
+    caplog.set_level(logging.INFO)
+    context = AffiliatePageContext(href="https://example.test/", shop_id="test", shop_region="US")
+    fixture = load_fixture()
+    requested_types = []
+
+    def request_json(store_id, endpoint, body, **kwargs):
+        requested_types.append(body["profile_types"][0])
+        return copy.deepcopy(fixture[requested_types[-1]])
+
+    with (
+        patch("lib.creator_api.get_affiliate_page_context", return_value=context) as get_context,
+        screening_run("profile-test", clock=Mock(side_effect=[index * 0.1 for index in range(10)])) as recorder,
+    ):
+        result = fetch_creator_detail_api(
+            "test", {"creator_id": "CREATOR_SECRET"}, request_json=request_json,
+            context=context if use_context else None,
+        )
+    assert result["detail"] == parse_creator_profile_payloads(fixture)
+    assert requested_types == [2, 3, 4, 5]
+    assert get_context.call_count == int(not use_context)
+    assert recorder.counts.get("detail_context_calls", 0) == int(not use_context)
+    assert recorder.counts["detail_profile_calls"] == 4
+    assert all(recorder.counts[f"profile_type_{profile_type}"] == 1 for profile_type in PROFILE_TYPES)
+    assert "CREATOR_SECRET" not in caplog.text
+
+
+def test_observed_profile_business_error_ends_without_leaking_message(caplog):
+    caplog.set_level(logging.INFO)
+    request = Mock(return_value={"code": 100000, "message": "Authorization=SECRET_SENTINEL"})
+    with screening_run("profile-error"):
+        result = fetch_creator_detail_api(
+            "test", {"creator_id": "test"}, request_json=request,
+            context=AffiliatePageContext(href="https://example.test/", shop_id="test", shop_region="US"),
+        )
+    assert not result["ok"]
+    assert request.call_count == 1
+    events = [json.loads(record.getMessage().removeprefix("[筛查耗时]")) for record in caplog.records]
+    assert events[-1]["event"] == "end"
+    assert events[-1]["status"] == "error"
+    assert events[-1]["counts"]["reason_profile_business_error"] == 1
+    assert "SECRET_SENTINEL" not in caplog.text
 
 
 if __name__ == "__main__":
