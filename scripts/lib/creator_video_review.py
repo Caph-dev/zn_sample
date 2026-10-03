@@ -39,6 +39,7 @@ from .creator_video_contract import (
     shopping_products,
     validate_visual,
 )
+from .operation_cancel import OperationCancelled
 from .screening_perf import (
     StageObservation,
     current_screening_stage,
@@ -718,13 +719,15 @@ def _collect_and_review(
     Returns (items, collected) where items are the proof video entries. The
     visual budget is a single-element list mutated in place so the cap is
     shared across every creator in the run (maximum five serial visuals).
+    Once four related videos are counted, review all queued candidates in
+    collection order, stopping at the first positive demonstration.
     """
     items: list[dict] = []
     related: list[tuple[dict, dict, list[dict]]] = []
-    positive = False
+    next_candidate_index = 0
 
     def on_video(detail: dict, sec_uid: str) -> bool:
-        nonlocal positive
+        nonlocal next_candidate_index
         item = {"metadata": _metadata_proof(detail), "visual": None}
         items.append(item)
         try:
@@ -736,28 +739,35 @@ def _collect_and_review(
         related.append((detail, item, products))
         if len(related) < 4:
             return False
-        if budget[0] <= 0:
-            return True
-        budget[0] -= 1
-        screening_count("visual_attempts")
-        try:
-            item["visual"] = _review_video(
-                detail,
-                products,
-                client,
-                handle,
-                sec_uid,
-                settings,
-                deadline,
-            )
-        except Exception as error:  # noqa: BLE001 - one bad video must not abort the creator
-            if observation is not None:
-                observation.fail(safe_error_code(error))
-            return False
-        if has_positive_visual(item["visual"]["result"]):
-            positive = True
-            return True
-        return False
+        while next_candidate_index < len(related):
+            if budget[0] <= 0 or time.monotonic() >= deadline:
+                return True
+            candidate_detail, candidate_item, candidate_products = related[
+                next_candidate_index
+            ]
+            # Advance before calling so a failed candidate is never retried.
+            next_candidate_index += 1
+            budget[0] -= 1
+            screening_count("visual_attempts")
+            try:
+                candidate_item["visual"] = _review_video(
+                    candidate_detail,
+                    candidate_products,
+                    client,
+                    handle,
+                    sec_uid,
+                    settings,
+                    deadline,
+                )
+            except OperationCancelled:
+                raise
+            except Exception as error:  # noqa: BLE001 - one bad video must not abort the creator
+                if observation is not None:
+                    observation.fail(safe_error_code(error))
+                continue
+            if has_positive_visual(candidate_item["visual"]["result"]):
+                return True
+        return budget[0] <= 0 or time.monotonic() >= deadline
 
     screening_count("creator_collections")
     collected = client.collect(handle, start, end, seed_video_id, on_video=on_video)
@@ -898,6 +908,8 @@ def _review_creator_rows(
                             str(item["metadata"]["aweme_id"]) for item in items
                         ],
                     )
+                except OperationCancelled:
+                    raise
                 except Exception as error:  # noqa: BLE001 - isolate and redact provider failures
                     if observation is not None:
                         observation.fail(safe_error_code(error))

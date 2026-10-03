@@ -11,6 +11,7 @@ import pytest
 from scripts.lib import app_config
 from scripts.lib import creator_video_contract as contract
 from scripts.lib import creator_video_review as review
+from scripts.lib.operation_cancel import OperationCancelled
 from scripts.lib.screening_perf import LOG_PREFIX, screening_run, screening_stage
 
 NOW = datetime(2026, 9, 6, tzinfo=UTC)
@@ -131,10 +132,11 @@ def patch_provider(
     unknown=None,
     unknown_first=False,
     visual=None,
+    videos=None,
 ):
     """Synthetic orchestration adapter with real TikHub client surface."""
     calls = {"collect": 0, "visual": 0}
-    details = [
+    details = videos if videos is not None else [
         detail(number, anchors=shopping_anchor(PRODUCT)) for number in range(count)
     ]
     if unknown is not None:
@@ -146,16 +148,20 @@ def patch_provider(
     def collect(self, handle, start, end, seed, on_video=None):
         calls["collect"] += 1
         seen = []
+        stopped = False
         for item in details:
+            item = {**item, "author": {**item["author"], "unique_id": handle}}
             seen.append(item)
             if on_video is not None and on_video(item, "verified-sec"):
+                stopped = True
                 break
+        collection_complete = complete and not stopped
         return {
             "handle": handle,
             "sec_uid": "verified-sec",
             "videos": seen,
-            "complete": complete,
-            "stop_reason": "complete" if complete else "stopped",
+            "complete": collection_complete,
+            "stop_reason": "complete" if collection_complete else "stopped",
         }
 
     def default_visual(detail, products, client, handle, sec_uid, settings, deadline):
@@ -169,6 +175,32 @@ def patch_provider(
     monkeypatch.setattr(review.TikHubClient, "collect", collect)
     monkeypatch.setattr(review, "_review_video", visual or default_visual)
     return calls
+
+
+def patch_candidate_visuals(
+    monkeypatch, *, positive_video_ids=(), failing_video_ids=()
+):
+    attempts = []
+
+    def analyse_candidate(
+        candidate_detail, products, client, handle, sec_uid, current_settings, deadline
+    ):
+        video_id = candidate_detail["aweme_id"]
+        attempts.append((handle, video_id))
+        if video_id in failing_video_ids:
+            raise review.ReviewUnavailable("provider_unavailable")
+        directory = Path(current_settings["cache_dir"]) / "tmp" / handle / video_id
+        directory.mkdir(parents=True, exist_ok=True)
+        frame = directory / "frame_01.jpg"
+        frame.write_bytes(video_id.encode("ascii"))
+        return visual_with(
+            frame,
+            product_id=products[0]["product_id"],
+            body_worn=video_id in positive_video_ids,
+        )
+
+    monkeypatch.setattr(review, "_review_video", analyse_candidate)
+    return attempts
 
 
 def test_shopping_products_from_live_fixture():
@@ -390,7 +422,304 @@ def test_count_and_sparse_negative(settings, monkeypatch, count):
     assert output["content_review_status"] == (
         "failed" if count < 4 else "needs_review"
     )
-    assert calls["visual"] == (0 if count < 4 else 1)
+    # Once the count gate opens, all four candidates deserve a visual attempt.
+    assert calls["visual"] == (0 if count < 4 else 4)
+
+
+@pytest.mark.parametrize("positive_position", [1, 2, 3])
+def test_first_three_candidates_can_supply_authenticated_display_proof(
+    settings, monkeypatch, positive_position
+):
+    patch_provider(monkeypatch)
+    video_ids = [detail(number)["aweme_id"] for number in range(4)]
+    attempts = patch_candidate_visuals(
+        monkeypatch, positive_video_ids={video_ids[positive_position - 1]}
+    )
+    with screening_run("synthetic") as recorder:
+        row = review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )[0]
+    assert attempts == [("alice", video_id) for video_id in video_ids[:positive_position]]
+    assert recorder.counts["visual_attempts"] == positive_position
+    assert row["content_review_status"] == "passed"
+    assert row["content_review_related_count"] == 4
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert proof["complete"] is False
+    assert proof["stop_reason"] == "stopped"
+    assert [video["metadata"]["aweme_id"] for video in proof["videos"]] == video_ids
+    for position, video in enumerate(proof["videos"], start=1):
+        if position > positive_position:
+            assert video["visual"] is None
+        else:
+            frame_path = Path(video["visual"]["frames"][0]["path"])
+            assert frame_path.parent.name == video_ids[position - 1]
+            assert contract.has_positive_visual(video["visual"]["result"]) == (
+                position == positive_position
+            )
+    assert review.validate_content_review(row, now=NOW) == (
+        True, "content_review_proof_valid"
+    )
+
+
+def test_fifth_candidate_after_four_negatives_is_not_a_repeat(settings, monkeypatch):
+    patch_provider(monkeypatch, count=8)
+    video_ids = [detail(number)["aweme_id"] for number in range(5)]
+    attempts = patch_candidate_visuals(monkeypatch, positive_video_ids={video_ids[-1]})
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert attempts == [("alice", video_id) for video_id in video_ids]
+    assert row["content_review_video_ids"] == video_ids
+    assert row["content_review_related_count"] == 5
+    assert row["eligible"] is True
+    assert review.validate_content_review(row, now=NOW)[0]
+
+
+def test_candidate_failure_consumes_budget_and_preserves_next_proof(
+    settings, monkeypatch
+):
+    patch_provider(monkeypatch, count=4)
+    first_video_id, second_video_id = [detail(number)["aweme_id"] for number in range(2)]
+    attempts = patch_candidate_visuals(
+        monkeypatch,
+        positive_video_ids={second_video_id},
+        failing_video_ids={first_video_id},
+    )
+    with screening_run("synthetic") as recorder:
+        row = review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )[0]
+    assert attempts == [("alice", first_video_id), ("alice", second_video_id)]
+    assert recorder.counts["visual_attempts"] == 2
+    assert recorder.counts["reason_provider_unavailable"] == 1
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert proof["videos"][0]["visual"] is None
+    assert contract.has_positive_visual(proof["videos"][1]["visual"]["result"])
+    assert review.validate_content_review(row, now=NOW)[0]
+
+
+def test_failed_candidate_is_not_retried_on_later_callback(settings, monkeypatch):
+    patch_provider(monkeypatch, count=8)
+    video_ids = [detail(number)["aweme_id"] for number in range(5)]
+    attempts = patch_candidate_visuals(monkeypatch, failing_video_ids={video_ids[0]})
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert attempts == [("alice", video_id) for video_id in video_ids]
+    assert row["content_review_related_count"] == 5
+    assert row["content_review_status"] == "needs_review"
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert proof["complete"] is False
+
+
+def test_two_creators_share_remaining_budget_without_reset(settings, monkeypatch):
+    patch_provider(monkeypatch, count=4)
+    attempts = patch_candidate_visuals(monkeypatch)
+    with screening_run("synthetic") as recorder:
+        rows = review.review_creator_rows(
+            [
+                {"creator_name": "alice", "eligible": True},
+                {"creator_name": "bob", "eligible": True},
+                {"creator_name": "@Alice", "eligible": True},
+            ],
+            now=NOW,
+        )
+    video_ids = [detail(number)["aweme_id"] for number in range(4)]
+    expected_attempts = [("alice", video_id) for video_id in video_ids]
+    assert attempts == expected_attempts + [("bob", video_ids[0])]
+    assert recorder.counts["visual_attempts"] == 5
+    assert recorder.counts["creator_collections"] == 2
+    assert recorder.counts["creator_reuse"] == 1
+    assert all(row["content_review_status"] == "needs_review" for row in rows)
+    assert all(row["content_review_related_count"] == 4 for row in rows)
+    assert (
+        rows[0]["content_review_evidence_path"]
+        == rows[2]["content_review_evidence_path"]
+    )
+
+
+@pytest.mark.parametrize("remaining_budget", [0, 1])
+def test_visual_budget_exhaustion_stops_at_four_metadata_items(
+    settings, monkeypatch, remaining_budget
+):
+    settings["max_visual_videos"] = remaining_budget
+    calls = patch_provider(monkeypatch, count=8, positive=False)
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert calls["visual"] == remaining_budget
+    assert row["content_review_status"] == "needs_review"
+    assert row["content_review_related_count"] == 4
+    assert len(row["content_review_video_ids"]) == 4
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert proof["complete"] is False
+    assert proof["stop_reason"] == "stopped"
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_zero_budget_below_four_keeps_counting_without_visuals(
+    settings, monkeypatch, complete
+):
+    settings["max_visual_videos"] = 0
+    calls = patch_provider(monkeypatch, count=3, complete=complete)
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert calls["visual"] == 0
+    assert row["content_review_related_count"] == 3
+    assert row["content_review_status"] == ("failed" if complete else "needs_review")
+
+
+@pytest.mark.parametrize("expire_before_visual", [False, True])
+def test_deadline_stops_new_candidate_calls_and_preserves_partial_proof(
+    settings, monkeypatch, expire_before_visual
+):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(review.time, "monotonic", lambda: clock["now"])
+    attempts = []
+
+    def fetch_page(self, endpoint, parameters):
+        if expire_before_visual:
+            clock["now"] = settings["run_timeout_seconds"]
+        return {
+            "aweme_list": [
+                detail(number, anchors=shopping_anchor(PRODUCT))
+                for number in range(8)
+            ],
+            "has_more": 1,
+            "max_cursor": 1,
+        }
+
+    def expire_during_visual(candidate_detail, *args):
+        attempts.append(candidate_detail["aweme_id"])
+        clock["now"] = settings["run_timeout_seconds"]
+        raise review.ReviewUnavailable("run_deadline")
+
+    monkeypatch.setattr(review.TikHubClient, "fetch", fetch_page)
+    monkeypatch.setattr(review, "_review_video", expire_during_visual)
+    with screening_run("synthetic") as recorder:
+        row = review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )[0]
+    assert attempts == ([] if expire_before_visual else [detail(0)["aweme_id"]])
+    assert recorder.counts.get("visual_attempts", 0) == len(attempts)
+    assert recorder.counts["video_page_calls"] == 1
+    assert row["content_review_related_count"] == 4
+    assert row["content_review_status"] == "needs_review"
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert proof["complete"] is False
+
+
+def test_unrelated_and_unknown_metadata_do_not_enter_candidate_queue(
+    settings, monkeypatch
+):
+    related_videos = [
+        detail(
+            number,
+            anchors=shopping_anchor({**PRODUCT, "product_id": f"product-{number}"}),
+        )
+        for number in range(4)
+    ]
+    videos = [
+        detail(90, anchors=unparsed_shopping_anchor()),
+        related_videos[0],
+        detail(91),
+        related_videos[1],
+        detail(92, anchors=shopping_anchor(PRODUCT, root="Muslim Fashion")),
+        *related_videos[2:],
+    ]
+    patch_provider(monkeypatch, videos=videos)
+    positive_video_id = related_videos[2]["aweme_id"]
+    attempts = patch_candidate_visuals(monkeypatch, positive_video_ids={positive_video_id})
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert attempts == [("alice", video["aweme_id"]) for video in related_videos[:3]]
+    assert row["content_review_related_count"] == 4
+    proof = json.loads(Path(row["content_review_evidence_path"]).read_text())["proof"]
+    assert [video["metadata"]["aweme_id"] for video in proof["videos"]] == [
+        video["aweme_id"] for video in videos
+    ]
+    for video in proof["videos"]:
+        if video["visual"]:
+            products = contract.related_products(
+                contract.shopping_products(video["metadata"]["anchors"])
+            )
+            observed_product_id = video["visual"]["result"]["observations"][0]["product_id"]
+            assert observed_product_id == products[0]["product_id"]
+    assert review.validate_content_review(row, now=NOW)[0]
+
+
+def test_first_page_display_evidence_does_not_fetch_second_page(settings, monkeypatch):
+    page_requests = []
+    video_ids = [detail(number)["aweme_id"] for number in range(4)]
+
+    def fetch_page(self, endpoint, parameters):
+        page_requests.append((endpoint, dict(parameters)))
+        assert len(page_requests) == 1, "sufficient first-page proof must stop pagination"
+        return {
+            "aweme_list": [
+                detail(number, anchors=shopping_anchor(PRODUCT))
+                for number in range(4)
+            ],
+            "has_more": 1,
+            "max_cursor": 1,
+        }
+
+    monkeypatch.setattr(review.TikHubClient, "fetch", fetch_page)
+    attempts = patch_candidate_visuals(monkeypatch, positive_video_ids={video_ids[0]})
+    with screening_run("synthetic") as recorder:
+        row = review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )[0]
+    assert len(page_requests) == 1
+    assert page_requests[0][0] == "fetch_user_post_videos"
+    assert page_requests[0][1]["max_cursor"] == 0
+    assert attempts == [("alice", video_ids[0])]
+    assert recorder.counts["video_page_calls"] == 1
+    assert recorder.counts["visual_attempts"] == 1
+    assert row["content_review_video_ids"] == video_ids
+    assert review.validate_content_review(row, now=NOW)[0]
+
+
+def test_first_three_with_possible_display_do_not_open_visual_gate(
+    settings, monkeypatch
+):
+    calls = patch_provider(monkeypatch, count=3)
+    attempts = patch_candidate_visuals(
+        monkeypatch, positive_video_ids={detail(0)["aweme_id"]}
+    )
+    row = review.review_creator_rows(
+        [{"creator_name": "alice", "eligible": True}], now=NOW
+    )[0]
+    assert calls["collect"] == 1
+    assert attempts == []
+    assert row["content_review_status"] == "failed"
+    assert row["content_review_related_count"] == 3
+    assert not row["eligible"]
+    assert not review.validate_content_review(row, now=NOW)[0]
+
+
+@pytest.mark.parametrize("cancel_at", ["collect", "visual"])
+def test_content_cancellation_propagates_without_trying_next_candidate(
+    settings, monkeypatch, cancel_at
+):
+    patch_provider(monkeypatch)
+    calls = []
+
+    def cancel(*args, **kwargs):
+        calls.append(cancel_at)
+        raise OperationCancelled("read-only operation cancelled")
+
+    if cancel_at == "collect":
+        monkeypatch.setattr(review.TikHubClient, "collect", cancel)
+    else:
+        monkeypatch.setattr(review, "_review_video", cancel)
+    with pytest.raises(OperationCancelled):
+        review.review_creator_rows(
+            [{"creator_name": "alice", "eligible": True}], now=NOW
+        )
+    assert calls == [cancel_at]
 
 
 def test_partial_collection_passes_on_lower_bound(settings, monkeypatch):
@@ -483,7 +812,7 @@ def test_single_video_failure_does_not_abort_creator(settings, monkeypatch):
         frame.write_bytes(b"synthetic frame bytes")
         return visual_with(frame, body_worn=True)
 
-    patch_provider(monkeypatch, count=5, visual=flaky_visual)
+    patch_provider(monkeypatch, count=4, visual=flaky_visual)
     row = review.review_creator_rows(
         [{"creator_name": "alice", "eligible": True}], now=NOW
     )[0]
@@ -512,15 +841,19 @@ def test_visual_cache_reused_across_windows(settings, monkeypatch, caplog):
         items = [
             detail(number, anchors=shopping_anchor(PRODUCT)) for number in range(4)
         ]
+        seen = []
+        stopped = False
         for item in items:
+            seen.append(item)
             if on_video is not None and on_video(item, "verified-sec"):
+                stopped = True
                 break
         return {
             "handle": handle,
             "sec_uid": "verified-sec",
-            "videos": items,
-            "complete": True,
-            "stop_reason": "complete",
+            "videos": seen,
+            "complete": not stopped,
+            "stop_reason": "stopped" if stopped else "complete",
         }
 
     def synthetic_detail(self, video_id, handle, sec_uid=""):
@@ -660,7 +993,8 @@ def test_standalone_summary_status_tracks_operations_not_eligibility(
     assert summary_end["event"] == "end"
     assert summary_end["status"] == expected_status
     if expected_reason is not None:
-        assert summary_end["counts"][f"reason_{expected_reason}"] == 1
+        expected_failures = 4 if scenario == "visual_error" else 1
+        assert summary_end["counts"][f"reason_{expected_reason}"] == expected_failures
     assert summary_end["counts"]["content_target_rows"] == (
         0 if scenario in {"empty", "sales_failure"} else 1
     )
@@ -1007,7 +1341,7 @@ def test_forged_proof_hash_is_not_enough(settings, monkeypatch):
     )[0]
     path = Path(row["content_review_evidence_path"])
     envelope = json.loads(path.read_text())
-    envelope["proof"]["complete"] = False
+    envelope["proof"]["complete"] = not envelope["proof"]["complete"]
     raw = review._canonical(envelope)
     forged = path.with_name(hashlib.sha256(raw).hexdigest() + ".json")
     forged.write_bytes(raw)
