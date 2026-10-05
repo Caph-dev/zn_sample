@@ -3,6 +3,8 @@
 本文件给 **Agent / 技术维护**：纪律、数据 ID、实现契约。  
 日常双击 / 出问题只写 [README.md](./README.md)。新电脑配机只写 [快速开始.md](./快速开始.md)。规则原文见 `样品申请筛查sop/1-样品申请筛查sop.md`；到货跟进见 `样品申请筛查sop/2-查看到货+达人跟进.md`（忽略飞书 wiki 里的 B006-A 与旧的「第五天 / 每隔两天」）。
 
+按任务找现行规范、源码与测试见 [仓库任务导航](./docs/navigation.md)。历史归档不作现行操作依据，本地计划不覆盖现行契约；计划引用须带目录名，不用裸编号。
+
 紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。勿混用 `zn_daren` 的 `--execute` 取消逻辑。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
 
 不要改系统或启动器 `PATH`。Windows 上 `ziniao-cli.cmd` 只解析成 `node` + `run.js` 的**绝对 POSIX 路径**（`C:/...`），子进程固定 UTF-8。日志用 `logging`，入口 `configure_logging`，库代码 `getLogger`。
