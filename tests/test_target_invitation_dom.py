@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 import unittest
 from contextlib import ExitStack
@@ -57,6 +59,275 @@ class OfflineTestCase(unittest.TestCase):
             invitations, "zclaw_exec", side_effect=AssertionError("No live ZClaw calls allowed"),
         ))
         self.context.enter_context(patch("lib.zclaw.zclaw_invoke", side_effect=AssertionError("No CLI allowed")))
+
+
+ASYNC_DOM_HARNESS_JS = r"""
+const productionScripts = JSON.parse(process.argv[1]);
+const renderMode = process.argv[2];
+const settings = JSON.parse(process.argv[3]);
+const events = {trigger:0, option:0};
+let pageSize = settings.initialPageSize || '50/页', optionMounted = false;
+let clockTicks = 0;
+Date.now = () => ++clockTicks * 1000;
+const scheduleRender = callback => renderMode === 'microtask'
+  ? queueMicrotask(callback) : setTimeout(callback, 0);
+const element = (text, click = () => {}) => ({
+  innerText:text, click, classList:{contains:() => false},
+  getAttribute:() => null, hasAttribute:() => false,
+  getBoundingClientRect:() => ({width:100, height:20})
+});
+const trigger = element('', () => {events.trigger++; scheduleRender(() => {
+  optionMounted = true;
+  if (settings.changedHref) location.href = settings.changedHref;
+});});
+const option = element('100/页', () => {events.option++; scheduleRender(() => {pageSize = '100/页';});});
+globalThis.location = {href:%TARGET_HREF%};
+globalThis.document = {
+  querySelector:selector => {
+    if (selector === '.core-pagination-option .core-select-view-value') return element(pageSize);
+    if (selector.startsWith('.core-pagination-option')) return trigger;
+    return null;
+  },
+  querySelectorAll:selector => {
+    if (selector.includes('role=option')) return optionMounted
+      ? Array(settings.optionCount === undefined ? 1 : settings.optionCount).fill(option) : [];
+    return [];
+  }
+};
+(async () => {
+  const responses = [];
+  const clickCounts = [];
+  for (const productionScript of productionScripts) {
+    responses.push(JSON.parse(eval(productionScript)));
+    clickCounts.push({...events});
+    // A transport return yields to both microtasks and zero-delay render timers.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  process.stdout.write(JSON.stringify({responses, events, pageSize, clickCounts}));
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+
+CANCELLATION_DOM_HARNESS_JS = r"""
+const scripts = JSON.parse(process.argv[1]);
+const renderMode = process.argv[2];
+const settings = JSON.parse(process.argv[3]);
+const events = {arrow:0, cancel:0, confirm:0, keep:0, unrelated:0};
+const scheduleRender = callback => renderMode === 'microtask'
+  ? queueMicrotask(callback) : setTimeout(callback, 0);
+const element = (text, click = () => {}) => ({
+  innerText:text, click, getBoundingClientRect:() => ({width:100, height:20})
+});
+const record = {id:'old', name:'Old plan'};
+const modalProperties = {onOk:() => {}, okText:settings.confirmText || 'Cancel',
+  cancelText:settings.keepText || 'Keep', title:'End this invitation?'};
+let menuMounted = false, dialogMounted = false;
+const unrelated = element(modalProperties.okText, () => events.unrelated++);
+unrelated.__reactFiberTest = {memoizedProps:modalProperties};
+const confirmation = element(modalProperties.okText, () => events.confirm++);
+confirmation.__reactFiberTest = {memoizedProps:modalProperties};
+const keep = element(modalProperties.cancelText, () => events.keep++);
+keep.__reactFiberTest = {memoizedProps:modalProperties};
+const menuItem = element('Cancel invitation', () => {
+  events.cancel++;
+  scheduleRender(() => {menuMounted = false; dialogMounted = Boolean(settings.confirmation);});
+});
+menuItem.__reactFiberTest = {memoizedProps:{record:{id:settings.menuOwner || 'old'}}};
+const arrow = element('', () => {events.arrow++; scheduleRender(() => {menuMounted = true;});});
+const cells = [element('Old plan\nLast modified: 2025/11/27'), element('7'), element('3')];
+cells[2].querySelectorAll = () => [element('Edit'), arrow];
+const tableRow = {__reactFiberTest:{memoizedProps:{record}},
+  scrollIntoView:() => {}, querySelectorAll:() => cells};
+globalThis.window = globalThis;
+globalThis.location = {href:%TARGET_HREF%};
+globalThis.document = {querySelectorAll:selector => {
+  if (selector === 'table tbody tr') return [tableRow];
+  if (selector === '[role=menuitem]') return menuMounted ? [menuItem] : [];
+  if (selector === 'button') return [unrelated, arrow, ...(dialogMounted ? [confirmation, keep] : [])];
+  return [];
+}};
+(async () => {
+  const responses = [];
+  for (const script of scripts) {
+    responses.push(JSON.parse(eval(script)));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  process.stdout.write(JSON.stringify({responses, events, stateCleared:!window.__znSampleCleanupAttempt}));
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+
+
+def run_async_dom_scripts(scripts: list[str], render_mode: str, **settings) -> dict:
+    node_path = shutil.which("node")
+    if node_path is None:
+        raise RuntimeError("Node is required for the offline production-JS regression; do not skip it")
+    harness = ASYNC_DOM_HARNESS_JS.replace("%TARGET_HREF%", json.dumps(TARGET_HREF))
+    completed = subprocess.run(
+        [node_path, "-e", harness, json.dumps(scripts), render_mode, json.dumps(settings)],
+        shell=False, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+class AsyncRenderingTests(OfflineTestCase):
+    def test_cancellation_scripts_allow_async_menu_and_optional_confirmation(self) -> None:
+        node_path = shutil.which("node")
+        self.assertIsNotNone(node_path, "Node is required for the production-JS regression")
+        replacements = {"%INVITATION_ID%": json.dumps("old"), "%EXPECTED_MODIFIED%": json.dumps("2025/11/27"),
+                        "%EXPECTED_HREF%": json.dumps(TARGET_HREF)}
+        templates = [invitations.OPEN_CANCELLATION_MENU_JS_TMPL, invitations.INSPECT_CANCELLATION_MENU_JS_TMPL,
+                     invitations.CLICK_CANCELLATION_MENU_JS_TMPL, invitations.INSPECT_CANCELLATION_CONFIRMATION_JS_TMPL]
+        for render_mode in ("microtask", "timer"):
+            for confirmation_present, confirm_text, keep_text in (
+                (False, "Cancel", "Keep"), (True, "Cancel", "Keep"), (True, "Withdraw", "Cancel"),
+            ):
+                with self.subTest(render_mode=render_mode, confirmation_present=confirmation_present,
+                                  confirm_text=confirm_text):
+                    selected_templates = [*templates]
+                    if confirmation_present:
+                        selected_templates.append(invitations.CLICK_CANCELLATION_CONFIRMATION_JS_TMPL)
+                    selected_templates.append(invitations.CLEAR_CANCELLATION_ATTEMPT_JS)
+                    scripts = []
+                    for template in selected_templates:
+                        for placeholder, value in replacements.items():
+                            template = template.replace(placeholder, value)
+                        scripts.append(template)
+                    harness = CANCELLATION_DOM_HARNESS_JS.replace("%TARGET_HREF%", json.dumps(TARGET_HREF))
+                    completed = subprocess.run(
+                        [node_path, "-e", harness, json.dumps(scripts), render_mode,
+                         json.dumps({"confirmation": confirmation_present,
+                                     "confirmText": confirm_text, "keepText": keep_text})],
+                        shell=False, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True,
+                    )
+                    result = json.loads(completed.stdout)
+                    self.assertTrue(all(response["ok"] for response in result["responses"]), result)
+                    self.assertEqual(result["responses"][3]["ready"], confirmation_present)
+                    self.assertEqual(result["events"], {"arrow": 1, "cancel": 1,
+                        "confirm": int(confirmation_present), "keep": 0, "unrelated": 0})
+                    self.assertTrue(result["stateCleared"])
+
+    def test_async_page_size_option_allows_render_turns(self) -> None:
+        self.execute.side_effect = [
+            {"ok": True, "opened": True, "current": "50/页", "href": TARGET_HREF},
+            {"ok": True, "ready": True}, {"ok": True, "set": True},
+            {"ok": True, "ready": True, "current": "100/页"},
+        ]
+        invitations.ensure_page_size("store-two")
+        scripts = [arguments.args[1] for arguments in self.execute.call_args_list]
+        for render_mode in ("microtask", "timer"):
+            with self.subTest(render_mode=render_mode):
+                result = run_async_dom_scripts(scripts, render_mode)
+                self.assertTrue(result["responses"][-1]["ready"], result)
+                self.assertTrue(all(response["ok"] for response in result["responses"]), result)
+                self.assertEqual(result["clickCounts"], [
+                    {"trigger": 1, "option": 0}, {"trigger": 1, "option": 0},
+                    {"trigger": 1, "option": 1}, {"trigger": 1, "option": 1},
+                ])
+                self.assertEqual(result["events"]["trigger"], 1)
+                self.assertEqual(result["events"]["option"], 1)
+                self.assertEqual(result["pageSize"], "100/页")
+
+    def test_production_option_probes_reject_ambiguity_and_context_change_without_clicks(self) -> None:
+        scripts = [invitations.SET_PAGE_SIZE_JS, *[
+            template.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF))
+            for template in (invitations.INSPECT_PAGE_SIZE_OPTION_JS_TMPL,
+                             invitations.CLICK_PAGE_SIZE_OPTION_JS_TMPL)
+        ]]
+        for settings, reason in (
+            ({"optionCount": 2}, "ambiguous-pagesize-option"),
+            ({"changedHref": TARGET_HREF.replace("shop-two", "other-shop")}, "pagesize-context-changed"),
+        ):
+            with self.subTest(settings=settings):
+                result = run_async_dom_scripts(scripts, "timer", **settings)
+                self.assertEqual(result["events"], {"trigger": 1, "option": 0})
+                self.assertEqual([response["reason"] for response in result["responses"][1:]], [reason, reason])
+
+    def test_production_already_100_never_opens_dropdown(self) -> None:
+        result = run_async_dom_scripts([invitations.SET_PAGE_SIZE_JS], "microtask", initialPageSize="100/页")
+        self.assertTrue(result["responses"][0]["already"])
+        self.assertEqual(result["events"], {"trigger": 0, "option": 0})
+
+
+class PageSizePollingTests(OfflineTestCase):
+    def test_only_read_probes_repeat_and_all_transport_calls_have_deadlines_without_retries(self) -> None:
+        self.execute.side_effect = [
+            {"ok": True, "opened": True, "current": "50/页", "href": TARGET_HREF},
+            {"ok": True, "ready": False}, {"ok": True, "ready": True},
+            {"ok": True, "set": True},
+            {"ok": True, "ready": False}, {"ok": True, "ready": True, "current": "100/页"},
+        ]
+        result = invitations.ensure_page_size("store-two")
+        self.assertEqual(result, {"ok": True, "set": True, "previous": "50/页", "current": "100/页"})
+        scripts = [arguments.args[1] for arguments in self.execute.call_args_list]
+        self.assertEqual(scripts.count(invitations.SET_PAGE_SIZE_JS), 1)
+        self.assertEqual(scripts[1], scripts[2])
+        self.assertEqual(scripts[4], scripts[5])
+        self.assertNotIn(".click()", scripts[1])
+        self.assertNotIn(".click()", scripts[4])
+        self.assertEqual(self.sleep.call_count, 2)
+        for arguments in self.execute.call_args_list:
+            self.assertEqual(arguments.kwargs["retries"], 0)
+            self.assertIs(arguments.kwargs["retry_timeout_expired"], False)
+            self.assertGreater(arguments.kwargs["deadline"], 0)
+        self.assertEqual(len({arguments.kwargs["deadline"] for arguments in self.execute.call_args_list[:4]}), 1)
+
+    def test_lost_trigger_or_option_response_is_never_replayed(self) -> None:
+        for failure_stage in ("trigger", "option"):
+            with self.subTest(failure_stage=failure_stage):
+                self.execute.reset_mock()
+                responses = [] if failure_stage == "trigger" else [
+                    {"ok": True, "opened": True, "href": TARGET_HREF}, {"ok": True, "ready": True},
+                ]
+                self.execute.side_effect = [*responses, TimeoutError("response lost")]
+                with self.assertRaisesRegex(TimeoutError, "response lost"):
+                    invitations.ensure_page_size("store-two")
+                self.assertEqual(self.execute.call_count, len(responses) + 1)
+                self.assertEqual(sum(arguments.args[1] == invitations.SET_PAGE_SIZE_JS
+                                     for arguments in self.execute.call_args_list), 1)
+
+    def test_blocking_probe_cannot_extend_deadline_or_click_option(self) -> None:
+        current_time = [100.0]
+        self.context.enter_context(patch.object(invitations.time, "monotonic", side_effect=lambda: current_time[0]))
+
+        def execute_probe(store_id, script, **arguments):
+            if script == invitations.SET_PAGE_SIZE_JS:
+                return {"ok": True, "opened": True, "href": TARGET_HREF}
+            current_time[0] = arguments["deadline"] + 0.1
+            return {"ok": True, "ready": True}
+
+        self.execute.side_effect = execute_probe
+        with self.assertRaisesRegex(RuntimeError, "deadline expired"):
+            invitations.ensure_page_size("store-two")
+        self.assertEqual(self.execute.call_count, 2)
+        self.sleep.assert_not_called()
+
+    def test_option_timeout_has_bounded_read_polls_and_no_second_trigger(self) -> None:
+        current_time = [100.0]
+        self.context.enter_context(patch.object(invitations.time, "monotonic", side_effect=lambda: current_time[0]))
+        self.sleep.side_effect = lambda duration: current_time.__setitem__(0, current_time[0] + duration)
+        self.execute.side_effect = lambda store_id, script, **arguments: (
+            {"ok": True, "opened": True, "href": TARGET_HREF} if script == invitations.SET_PAGE_SIZE_JS
+            else {"ok": True, "ready": False}
+        )
+        with self.assertRaisesRegex(RuntimeError, "deadline expired"):
+            invitations.ensure_page_size("store-two")
+        self.assertLessEqual(self.execute.call_count, 12)
+        self.assertLessEqual(current_time[0], 100.0 + invitations.PAGE_SIZE_OPTION_WAIT_SECONDS)
+        self.assertEqual(sum(".click()" in arguments.args[1] for arguments in self.execute.call_args_list), 1)
+
+    def test_unverified_label_after_option_click_never_reports_success(self) -> None:
+        current_time = [100.0]
+        self.context.enter_context(patch.object(invitations.time, "monotonic", side_effect=lambda: current_time[0]))
+        self.sleep.side_effect = lambda duration: current_time.__setitem__(0, current_time[0] + duration)
+        responses = iter([
+            {"ok": True, "opened": True, "href": TARGET_HREF},
+            {"ok": True, "ready": True}, {"ok": True, "set": True},
+        ])
+        self.execute.side_effect = lambda *arguments, **keywords: next(
+            responses, {"ok": True, "ready": False, "current": "50/页"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "deadline expired"):
+            invitations.ensure_page_size("store-two")
+        self.assertEqual(sum(".click()" in arguments.args[1] for arguments in self.execute.call_args_list), 2)
 
 
 class DateSemanticsTests(OfflineTestCase):
@@ -367,14 +638,19 @@ class RecoveryTests(OfflineTestCase):
         self.execute.side_effect = [
             {"ok": True, "clicked": True}, {"ok": True, "already": True},
             {"ok": True, "error": True, "can_retry": True}, {"ok": True}, {"ok": True, "error": False},
-            {"ok": True, "set": True}, {"ok": True},
+            {"ok": True, "opened": True, "href": TARGET_HREF}, {"ok": True, "ready": True},
+            {"ok": True, "set": True}, {"ok": True, "ready": True, "current": "100/页"}, {"ok": True},
         ]
         result = invitations.restore_ongoing_list("store-two")
         self.assertTrue(result["nav"]["ok"])
         self.assertEqual([arguments.args[1] for arguments in self.execute.call_args_list], [
             invitations.ENSURE_ONGOING_TAB_JS, invitations.ENSURE_ONGOING_TAB_JS,
             invitations.INSPECT_LIST_ERROR_JS, invitations.CLICK_LIST_RETRY_JS, invitations.INSPECT_LIST_ERROR_JS,
-            invitations.SET_PAGE_SIZE_JS, invitations.GOTO_LAST_PAGE_JS,
+            invitations.SET_PAGE_SIZE_JS,
+            invitations.INSPECT_PAGE_SIZE_OPTION_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
+            invitations.CLICK_PAGE_SIZE_OPTION_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
+            invitations.INSPECT_PAGE_SIZE_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
+            invitations.GOTO_LAST_PAGE_JS,
         ])
         self.assertIn("const want = 100;", invitations.SET_PAGE_SIZE_JS)
 
@@ -385,10 +661,12 @@ class RecoveryTests(OfflineTestCase):
 
     def test_page_size_failure_is_not_ignored(self) -> None:
         self.execute.side_effect = [{"ok": True, "already": True}, {"ok": True, "error": False},
-                                    {"ok": False}, {"ok": True, "error": False}, {"ok": False}, make_page()]
+                                    {"ok": False}, make_page()]
         with self.assertRaisesRegex(RuntimeError, "100 rows"):
             invitations.restore_ongoing_list("store-two")
         self.assertNotIn(invitations.GOTO_LAST_PAGE_JS, [arguments.args[1] for arguments in self.execute.call_args_list])
+        self.assertEqual(sum(arguments.args[1] == invitations.SET_PAGE_SIZE_JS
+                             for arguments in self.execute.call_args_list), 1)
 
     def test_last_page_navigation_has_four_bounded_attempts(self) -> None:
         self.execute.side_effect = [{"ok": True, "already": True}, {"ok": True, "error": False},
@@ -399,7 +677,7 @@ class RecoveryTests(OfflineTestCase):
 
     def test_verified_empty_state_can_recover_without_a_page_size_widget(self) -> None:
         self.execute.side_effect = [{"ok": True, "already": True}, {"ok": True, "error": False},
-                                    {"ok": False}, {"ok": True, "error": False}, {"ok": False},
+                                    {"ok": False},
                                     make_page(rows=[], has_empty_state=True, page="", page_size="")]
         result = invitations.restore_ongoing_list("store-two")
         self.assertEqual(result["nav"], {"ok": True, "empty": True})
@@ -496,10 +774,14 @@ class FixedTargetTests(OfflineTestCase):
 class CancellationEvidenceTests(OfflineTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.original_readback = invitations._wait_invitation_gone
         self.extract = self.context.enter_context(patch.object(invitations, "extract_page", return_value=make_page()))
         self.restore = self.context.enter_context(patch.object(invitations, "restore_ongoing_list", return_value=RESTORED))
-        self.readback = self.context.enter_context(patch.object(invitations, "_wait_invitation_gone", return_value=True))
+        self.wait = self.context.enter_context(patch.object(invitations, "_wait_for_ui_ready"))
+        self.wait.side_effect = [{"ok": True, "ready": True}, {"ok": True, "ready": False}]
+        self.execute.side_effect = [
+            {"ok": True, "opened": True}, {"ok": True, "invitation_id": "old", "clickedCancel": True},
+            {"ok": True},
+        ]
 
     def cancel(self, **fields):
         return invitations.cancel_invitation_by_id(
@@ -512,7 +794,7 @@ class CancellationEvidenceTests(OfflineTestCase):
         self.assertFalse(result["write_attempted"])
         self.execute.assert_not_called()
         self.restore.assert_not_called()
-        self.readback.assert_not_called()
+        self.wait.assert_not_called()
 
     def test_changed_date_duplicate_id_or_nonongoing_page_never_dispatches_write(self) -> None:
         for page in (make_page(rows=[make_row(modified="2026/10/01")]),
@@ -535,97 +817,84 @@ class CancellationEvidenceTests(OfflineTestCase):
                 self.assertEqual(result["reason"], reason)
         self.execute.assert_not_called()
         self.restore.assert_not_called()
-        self.readback.assert_not_called()
+        self.wait.assert_not_called()
 
-    def test_confirmed_and_same_page_gone_is_submitted_not_platform_success(self) -> None:
-        raw = {"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": True, "write_attempted": True}
-        self.execute.side_effect = None
-        self.execute.return_value = raw
+    def test_no_confirmation_is_a_valid_submission_and_list_is_restored(self) -> None:
         result = self.cancel(execute=True)
         self.assertEqual(result["status"], "submitted")
-        self.assertEqual(result["raw"], raw)
+        self.assertTrue(result["write_attempted"])
+        self.assertEqual(result["reason"], "operation-submitted")
+        self.assertFalse(result["confirmed"])
+        self.assertIsNone(result["gone"])
+        self.extract.assert_called_once_with("store-two")
+        self.restore.assert_called_once_with("store-two")
+        self.assertFalse(self.wait.call_args.kwargs["required"])
+        self.assertEqual(self.execute.call_count, 3)
+        for arguments in self.execute.call_args_list:
+            self.assertEqual(arguments.kwargs, {"retries": 0, "retry_timeout_expired": False})
+
+    def test_optional_confirmation_is_clicked_once_when_present(self) -> None:
+        self.wait.side_effect = [{"ok": True, "ready": True}, {"ok": True, "ready": True}]
+        self.execute.side_effect = [
+            {"ok": True, "opened": True}, {"ok": True, "invitation_id": "old", "clickedCancel": True},
+            {"ok": True, "confirmed": True, "confirmText": "Cancel"}, {"ok": True},
+        ]
+        result = self.cancel(execute=True)
+        self.assertEqual(result["status"], "submitted")
         self.assertTrue(result["confirmed"])
-        self.assertTrue(result["gone"])
-        self.execute.assert_called_once()
-        self.assertEqual(self.execute.call_args.kwargs, {"retries": 0, "retry_timeout_expired": False})
+        self.assertEqual(self.execute.call_count, 4)
         self.restore.assert_called_once()
-        self.sleep.assert_called_once_with(1.2)
 
-    def test_broad_source_ok_missing_confirmation_or_persistent_row_is_uncertain(self) -> None:
-        for raw, gone in (({"ok": True}, True),
-                          ({"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": False}, True),
-                          ({"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": True}, False),
-                          ({"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": True}, None)):
-            with self.subTest(raw=raw, gone=gone):
-                self.execute.side_effect = None
-                self.execute.return_value = raw
-                self.readback.return_value = gone
-                self.assertEqual(self.cancel(execute=True)["status"], "uncertain")
+    def test_prewrite_read_failure_never_reaches_a_click_or_unknown_write(self) -> None:
+        self.extract.side_effect = RuntimeError("Bridge read failed")
+        result = self.cancel(execute=True)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "prewrite-read-failed")
+        self.assertFalse(result["write_attempted"])
+        self.execute.assert_not_called()
+        self.restore.assert_not_called()
+        self.wait.assert_not_called()
 
-    def test_final_js_guard_rejection_is_definitely_not_written(self) -> None:
-        self.execute.side_effect = None
-        self.execute.return_value = {"ok": False, "invitation_id": "old", "write_attempted": False,
-                                     "reason": "last-modified-changed"}
+    def test_lost_cancellation_or_confirmation_response_is_never_replayed(self) -> None:
+        for stage in ("cancel", "confirm"):
+            with self.subTest(stage=stage):
+                self.execute.reset_mock()
+                self.restore.reset_mock()
+                self.wait.side_effect = [{"ok": True, "ready": True}, {"ok": True, "ready": True}]
+                responses = [{"ok": True, "opened": True}]
+                if stage == "confirm":
+                    responses.append({"ok": True, "invitation_id": "old", "clickedCancel": True})
+                self.execute.side_effect = [*responses, TimeoutError("lost click receipt"), {"ok": True}]
+                result = self.cancel(execute=True)
+                self.assertEqual(result["status"], "uncertain")
+                self.assertTrue(result["write_attempted"])
+                self.assertEqual(self.execute.call_count, len(responses) + 2)
+                self.restore.assert_called_once()
+
+    def test_menu_timeout_never_clicks_cancel(self) -> None:
+        self.wait.side_effect = RuntimeError("UI readiness deadline expired")
+        self.execute.side_effect = [{"ok": True, "opened": True}, {"ok": True}]
         result = self.cancel(execute=True)
         self.assertEqual(result["status"], "failed")
         self.assertFalse(result["write_attempted"])
-        self.assertEqual(result["reason"], "last-modified-changed")
-        self.readback.assert_not_called()
+        self.assertEqual(self.execute.call_count, 2)
 
-    def test_write_disconnect_never_retries_and_preserves_uncertain_result(self) -> None:
-        self.execute.side_effect = RuntimeError("Bridge disconnected after click")
-        result = self.cancel(execute=True)
-        self.assertEqual(result["status"], "uncertain")
-        self.assertTrue(result["write_attempted"])
-        self.execute.assert_called_once()
-        self.restore.assert_called_once()
-        self.readback.assert_not_called()
-
-    def test_recovery_failure_downgrades_submitted_to_uncertain(self) -> None:
-        self.execute.side_effect = None
-        self.execute.return_value = {"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": True}
-        self.restore.side_effect = RuntimeError("List recovery failed")
+    def test_recovery_failure_preserves_unknown_write(self) -> None:
+        self.restore.side_effect = RuntimeError("list recovery failed")
         result = self.cancel(execute=True)
         self.assertEqual(result["status"], "uncertain")
         self.assertEqual(result["reason"], "postwrite-recovery-failed")
-        self.assertTrue(result["confirmed"])
-        self.assertTrue(result["gone"])
-        self.execute.assert_called_once()
+        self.assertTrue(result["write_attempted"])
 
-    def test_readback_does_not_infer_gone_after_a_tab_or_page_change(self) -> None:
-        for page in (make_page(2, rows=[make_row("other")]),
-                     make_page(rows=[make_row("other")], ongoing=False),
-                     make_page(rows=[make_row("other")], href=TARGET_HREF.replace("shop-two", "other-shop")),
-                     make_page(rows=[make_row("", row_key="other")])):
-            with self.subTest(page=page):
-                self.extract.return_value = page
-                self.assertIsNone(self.original_readback("store-two", "old", make_page()))
-
-    def test_actual_readback_distinguishes_same_page_absence_and_persistent_row(self) -> None:
-        self.extract.return_value = make_page(rows=[make_row("other")])
-        self.assertTrue(self.original_readback("store-two", "old", make_page()))
-        self.extract.return_value = make_page()
-        self.assertFalse(self.original_readback("store-two", "old", make_page()))
-
-    def test_readback_does_not_infer_absence_from_unknown_total_or_partial_rows(self) -> None:
-        for total in ("", "2"):
-            with self.subTest(total=total):
-                self.extract.return_value = make_page(rows=[make_row("other")], total=total)
-                self.assertIsNone(self.original_readback("store-two", "old", make_page()))
-
-    def test_id_template_markers_are_rendered_once_as_data_not_code(self) -> None:
+    def test_hostile_id_is_substituted_once_as_data(self) -> None:
         invitation_id = 'fixed-%EXPECTED_HREF%-%DO_CANCEL%-"'
         self.extract.return_value = make_page(rows=[make_row(invitation_id)])
-        self.execute.side_effect = None
-        self.execute.return_value = {"ok": False, "invitation_id": invitation_id, "write_attempted": False,
-                                     "reason": "no-arrow"}
+        self.execute.side_effect = [{"ok": False, "reason": "no-arrow"}, {"ok": True}]
         result = invitations.cancel_invitation_by_id(
             "store-two", invitation_id=invitation_id, expected_last_modified="2025/11/27", cutoff=CUTOFF, execute=True,
         )
         self.assertFalse(result["write_attempted"])
-        script = self.execute.call_args.args[1]
-        self.assertIn("const targetId = " + json.dumps(invitation_id) + ";", script)
-        self.assertIn("const doCancel = true;", script)
+        self.assertIn("const targetId = " + json.dumps(invitation_id) + ";", self.execute.call_args_list[0].args[1])
 
 
 if __name__ == "__main__":

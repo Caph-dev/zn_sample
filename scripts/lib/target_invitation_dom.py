@@ -8,7 +8,8 @@ Missing pagination evidence fails closed instead of inventing a selector.
 
 The caller owns store/shop binding, immutable candidate validation and the
 write-ahead ``attempting`` checkpoint. Locate first, persist that checkpoint,
-then cancel the same fixed ID. No candidate discovery occurs during execution.
+then cancel the same fixed ID. Confirmation is optional, as in the source tool.
+No candidate discovery occurs during execution.
 """
 from __future__ import annotations
 
@@ -27,8 +28,11 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 100
 MAX_PAGES = 50
-CANCEL_DELAY_SECONDS = 1.2
 PAGE_WAIT_SECONDS = 1.2
+PAGE_SIZE_OPTION_WAIT_SECONDS = 2.5
+UI_POLL_INTERVAL_SECONDS = 0.25
+CANCELLATION_MENU_WAIT_SECONDS = 3.0
+CANCELLATION_CONFIRMATION_WAIT_SECONDS = 4.0
 
 
 class InvitationScanResult(TypedDict):
@@ -199,29 +203,147 @@ SET_PAGE_SIZE_JS = r"""
   const valueElement = document.querySelector('.core-pagination-option .core-select-view-value');
   const current = (valueElement && valueElement.innerText || '').trim();
   if (current === label || current === String(want) || current === (want + ' / 页')) {
-    return JSON.stringify({ok:true, already:true, current});
+    return JSON.stringify({ok:true, already:true, current, href:location.href});
   }
   const trigger = document.querySelector('.core-pagination-option .core-select-view')
     || document.querySelector('.core-pagination-option .core-select')
     || document.querySelector('.core-pagination-option');
   if (!trigger) return JSON.stringify({ok:false, reason:'no-pagesize-control', current});
   trigger.click();
-  const deadline = Date.now() + 2500;
-  let option = null;
-  while (Date.now() < deadline) {
-    option = [...document.querySelectorAll('li[role=option], .core-select-option, div[role=option], .arco-select-option, li')]
-      .find(element => {
-        const text = (element.innerText || '').trim();
-        return text === label || text === String(want) || text === (want + ' / 页');
-      });
-    if (option) break;
+  return JSON.stringify({ok:true, opened:true, current, href:location.href});
+})()
+"""
+
+PAGE_SIZE_OPTION_HELPERS_JS = r"""
+  const expectedHref = %EXPECTED_HREF%;
+  if (location.href !== expectedHref) return JSON.stringify({ok:false, reason:'pagesize-context-changed'});
+  const options = [...document.querySelectorAll('li[role=option], .core-select-option, div[role=option], .arco-select-option, li')]
+    .filter(element => {
+      const text = (element.innerText || '').trim();
+      const rectangle = element.getBoundingClientRect();
+      return (text === '100/页' || text === '100' || text === '100 / 页')
+        && rectangle.width > 0 && rectangle.height > 0;
+    });
+  if (options.length > 1) return JSON.stringify({ok:false, reason:'ambiguous-pagesize-option'});
+"""
+
+INSPECT_PAGE_SIZE_OPTION_JS_TMPL = "(() => {\n" + PAGE_SIZE_OPTION_HELPERS_JS + r"""
+  return JSON.stringify({ok:true, ready:options.length === 1});
+})()
+"""
+
+CLICK_PAGE_SIZE_OPTION_JS_TMPL = "(() => {\n" + PAGE_SIZE_OPTION_HELPERS_JS + r"""
+  if (options.length !== 1) return JSON.stringify({ok:false, reason:'option-not-found'});
+  options[0].click();
+  return JSON.stringify({ok:true, set:true});
+})()
+"""
+
+INSPECT_PAGE_SIZE_JS_TMPL = r"""
+(() => {
+  if (location.href !== %EXPECTED_HREF%) return JSON.stringify({ok:false, reason:'pagesize-context-changed'});
+  const valueElement = document.querySelector('.core-pagination-option .core-select-view-value');
+  const current = (valueElement && valueElement.innerText || '').trim();
+  return JSON.stringify({ok:true, ready:current === '100/页' || current === '100' || current === '100 / 页', current});
+})()
+"""
+
+OPEN_CANCELLATION_MENU_JS_TMPL = "(() => {\n" + INVITATION_DOM_HELPERS_JS + r"""
+  const targetId = %INVITATION_ID%;
+  const expectedModified = %EXPECTED_MODIFIED%;
+  if (location.href !== %EXPECTED_HREF%) return JSON.stringify({ok:false, reason:'list-context-changed'});
+  const matches = [...document.querySelectorAll('table tbody tr')].filter(tableRow => {
+    const record = getRecord(tableRow);
+    return record && String(record.id) === targetId;
+  });
+  if (matches.length !== 1) return JSON.stringify({ok:false, reason:'row-not-found'});
+  const tableRow = matches[0];
+  if (extractRow(tableRow, 0).last_modified !== expectedModified) {
+    return JSON.stringify({ok:false, reason:'last-modified-changed'});
   }
-  if (!option) {
-    document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true}));
-    return JSON.stringify({ok:false, reason:'option-not-found', current});
+  const operationCell = [...tableRow.querySelectorAll('td')].pop();
+  const buttons = operationCell ? [...operationCell.querySelectorAll('button')] : [];
+  const arrow = buttons.find(button => !(button.innerText || '').trim()
+    || /[∨▼]/.test(button.innerText || '')) || buttons[1];
+  if (!arrow) return JSON.stringify({ok:false, reason:'no-arrow'});
+  tableRow.scrollIntoView({block:'center', inline:'nearest'});
+  window.__znSampleCleanupAttempt = {
+    invitationId:targetId, buttons:new Set(document.querySelectorAll('button'))
+  };
+  arrow.click();
+  return JSON.stringify({ok:true, opened:true});
+})()
+"""
+
+CANCELLATION_MENU_HELPERS_JS = INVITATION_DOM_HELPERS_JS + r"""
+  const targetId = %INVITATION_ID%;
+  const attempt = window.__znSampleCleanupAttempt;
+  if (!attempt || attempt.invitationId !== targetId || location.href !== %EXPECTED_HREF%) {
+    return JSON.stringify({ok:false, reason:'list-context-changed', write_attempted:false});
   }
-  option.click();
-  return JSON.stringify({ok:true, set:true, previous:current});
+  const menuItems = [...document.querySelectorAll('[role=menuitem]')].filter(element => {
+    const rectangle = element.getBoundingClientRect();
+    const record = getRecord(element);
+    return rectangle.width > 0 && rectangle.height > 0
+      && /^(取消邀请|Cancel invitation)$/i.test((element.innerText || '').trim())
+      && record && String(record.id) === targetId;
+  });
+  if (menuItems.length > 1) return JSON.stringify({ok:false, reason:'ambiguous-cancellation-menu', write_attempted:false});
+"""
+
+INSPECT_CANCELLATION_MENU_JS_TMPL = "(() => {\n" + CANCELLATION_MENU_HELPERS_JS + r"""
+  return JSON.stringify({ok:true, ready:menuItems.length === 1});
+})()
+"""
+
+CLICK_CANCELLATION_MENU_JS_TMPL = "(() => {\n" + CANCELLATION_MENU_HELPERS_JS + r"""
+  if (menuItems.length !== 1) return JSON.stringify({ok:false, reason:'menu-item-not-found', write_attempted:false});
+  menuItems[0].click();
+  return JSON.stringify({ok:true, invitation_id:targetId, clickedCancel:true});
+})()
+"""
+
+CANCELLATION_CONFIRMATION_HELPERS_JS = r"""
+  const attempt = window.__znSampleCleanupAttempt;
+  if (!attempt || attempt.invitationId !== %INVITATION_ID%) {
+    return JSON.stringify({ok:false, reason:'cancellation-attempt-missing'});
+  }
+  const confirmations = [...document.querySelectorAll('button')].filter(button => {
+    const rectangle = button.getBoundingClientRect();
+    if (attempt.buttons.has(button) || rectangle.width <= 0 || rectangle.height <= 0) return false;
+    const text = (button.innerText || '').trim();
+    const fiberKey = Object.keys(button).find(property => property.startsWith('__reactFiber')
+      || property.startsWith('__reactInternalInstance'));
+    let fiber = fiberKey ? button[fiberKey] : null;
+    for (let depth = 0; depth < 40 && fiber; depth++, fiber = fiber.return) {
+      const properties = fiber.memoizedProps;
+      if (properties && typeof properties.onOk === 'function' && properties.okText != null
+        && properties.cancelText != null && properties.title != null) {
+        return text === String(properties.okText) && text !== String(properties.cancelText);
+      }
+    }
+    return false;
+  });
+  if (confirmations.length > 1) return JSON.stringify({ok:false, reason:'ambiguous-cancellation-confirmation'});
+"""
+
+INSPECT_CANCELLATION_CONFIRMATION_JS_TMPL = "(() => {\n" + CANCELLATION_CONFIRMATION_HELPERS_JS + r"""
+  return JSON.stringify({ok:true, ready:confirmations.length === 1});
+})()
+"""
+
+CLICK_CANCELLATION_CONFIRMATION_JS_TMPL = "(() => {\n" + CANCELLATION_CONFIRMATION_HELPERS_JS + r"""
+  if (confirmations.length !== 1) return JSON.stringify({ok:false, reason:'confirmation-not-found'});
+  const confirmText = (confirmations[0].innerText || '').trim();
+  confirmations[0].click();
+  return JSON.stringify({ok:true, confirmed:true, confirmText});
+})()
+"""
+
+CLEAR_CANCELLATION_ATTEMPT_JS = r"""
+(() => {
+  delete window.__znSampleCleanupAttempt;
+  return JSON.stringify({ok:true});
 })()
 """
 
@@ -280,75 +402,6 @@ PREPARE_LIST_JS = r"""
   return JSON.stringify({ok:true, rowCount:document.querySelectorAll('table tbody tr').length});
 })()
 """
-
-CANCEL_INVITE_JS_TMPL = "(() => {\n" + INVITATION_DOM_HELPERS_JS + r"""
-  const targetId = %INVITATION_ID%;
-  const expectedModified = %EXPECTED_MODIFIED%;
-  const expectedHref = %EXPECTED_HREF%;
-  const expectedPage = %EXPECTED_PAGE%;
-  const doCancel = %DO_CANCEL%;
-  const reject = reason => JSON.stringify({ok:false, reason, invitation_id:targetId, write_attempted:false});
-  if (!document.body || !targetId) return reject('missing-document-or-id');
-  const context = inspectListContext();
-  if (!context.ongoing || context.list_error || context.ready_state !== 'complete'
-    || context.href !== expectedHref || context.page !== expectedPage) return reject('list-context-changed');
-  const matches = [...document.querySelectorAll('table tbody tr')].filter(tableRow => {
-    const record = getRecord(tableRow);
-    return record && String(record.id) === targetId;
-  });
-  if (matches.length !== 1) return reject(matches.length ? 'duplicate-invitation-id' : 'row-not-found');
-  const tableRow = matches[0];
-  const row = extractRow(tableRow, 0);
-  if (!row || row.last_modified !== expectedModified) return reject('last-modified-changed');
-  if (!doCancel) return JSON.stringify({ok:true, dry:true, invitation_id:targetId, write_attempted:false});
-  try { tableRow.scrollIntoView({block:'center', inline:'nearest'}); } catch (error) {}
-  const cells = [...tableRow.querySelectorAll('td')];
-  const operationCell = cells[cells.length - 1];
-  if (!operationCell) return reject('no-operation-cell');
-  const buttons = [...operationCell.querySelectorAll('button')];
-  let arrow = buttons.find(button => !(button.innerText || '').trim()
-    || (button.innerText || '').includes('∨') || (button.innerText || '').includes('▼'));
-  if (!arrow && buttons.length >= 2) arrow = buttons[1];
-  if (!arrow && buttons.length === 1) arrow = buttons[0];
-  if (!arrow) return reject('no-arrow');
-  arrow.click();
-  const menuDeadline = Date.now() + 3000;
-  let menuItem = null;
-  while (Date.now() < menuDeadline) {
-    menuItem = [...document.querySelectorAll('li,div,span,button,a')].find(element => {
-      const text = (element.innerText || '').trim();
-      const rectangle = element.getBoundingClientRect();
-      return (text === '取消邀请' || text === 'Cancel invitation' || text === 'Cancel Invitation')
-        && rectangle.width > 0 && rectangle.height > 0 && rectangle.width < 400;
-    });
-    if (menuItem) break;
-  }
-  if (!menuItem) return reject('menu-item-not-found');
-  menuItem.click();
-  const confirmationDeadline = Date.now() + 4000;
-  let confirmed = false, confirmText = '';
-  while (Date.now() < confirmationDeadline) {
-    const confirmationButtons = [...document.querySelectorAll('button')].filter(button => {
-      const text = (button.innerText || '').trim();
-      const rectangle = button.getBoundingClientRect();
-      return rectangle.width > 0 && rectangle.height > 0
-        && (text === '确定' || text === '确认' || text === 'OK' || text === 'Confirm' || text === 'Yes'
-          || text === '取消邀请' || text === 'Confirm cancel' || /^确定/.test(text));
-    });
-    // An unchanged menu item is not independent confirmation evidence.
-    const confirmation = confirmationButtons.find(button => /^(确定|确认|OK|Confirm|Yes)/i.test((button.innerText || '').trim()));
-    if (confirmation) {
-      confirmText = (confirmation.innerText || '').trim();
-      confirmation.click();
-      confirmed = true;
-      break;
-    }
-  }
-  return JSON.stringify({ok:true, dry:false, invitation_id:targetId, write_attempted:true,
-    clickedCancel:true, confirmed, confirmText, matchCount:matches.length});
-})()
-"""
-
 
 def parse_ui_date(text: str) -> date | None:
     """Source date semantics: unambiguous year-first or English month names."""
@@ -453,12 +506,57 @@ def ensure_ongoing_tab(store_id: str, *, page_wait: float = PAGE_WAIT_SECONDS) -
 
 
 def ensure_page_size(store_id: str) -> dict[str, Any]:
-    result = zclaw_exec(store_id, SET_PAGE_SIZE_JS)
+    deadline = time.monotonic() + PAGE_SIZE_OPTION_WAIT_SECONDS
+    result = zclaw_exec(
+        store_id, SET_PAGE_SIZE_JS, timeout=3, deadline=deadline,
+        retries=0, retry_timeout_expired=False,
+    )
     if not isinstance(result, dict) or result.get("ok") is not True:
         raise RuntimeError(f"Cannot restore 100 rows per page: {result!r}")
-    if result.get("set"):
-        time.sleep(PAGE_WAIT_SECONDS)
-    return result
+    if result.get("already") is True:
+        return result
+    expected_href = str(result.get("href") or "")
+    if result.get("opened") is not True or _shop_context(expected_href) is None:
+        raise RuntimeError("Cannot restore 100 rows per page: invalid trigger response")
+    replacements = {"%EXPECTED_HREF%": json.dumps(expected_href, ensure_ascii=False)}
+
+    def render_script(template: str) -> str:
+        return re.sub(r"%EXPECTED_HREF%", lambda match: replacements[match.group()], template)
+
+    _wait_for_ui_ready(store_id, render_script(INSPECT_PAGE_SIZE_OPTION_JS_TMPL), deadline=deadline)
+    if deadline - time.monotonic() < 0.5:
+        raise RuntimeError("Cannot restore 100 rows per page: option deadline expired")
+    selected = zclaw_exec(
+        store_id, render_script(CLICK_PAGE_SIZE_OPTION_JS_TMPL), timeout=3, deadline=deadline,
+        retries=0, retry_timeout_expired=False,
+    )
+    if not isinstance(selected, dict) or selected.get("ok") is not True or selected.get("set") is not True:
+        raise RuntimeError(f"Cannot restore 100 rows per page: option click unverified: {selected!r}")
+    verified = _wait_for_ui_ready(
+        store_id, render_script(INSPECT_PAGE_SIZE_JS_TMPL), deadline=time.monotonic() + PAGE_WAIT_SECONDS,
+    )
+    return {"ok": True, "set": True, "previous": result.get("current"), "current": verified["current"]}
+
+
+def _wait_for_ui_ready(
+    store_id: str, script: str, *, deadline: float, required: bool = True,
+) -> dict[str, Any]:
+    """Only read probes repeat; neither blocking probes nor sleeps extend the budget."""
+    # The existing transport needs at least half a second and rounds to whole seconds.
+    while deadline - time.monotonic() >= 0.5:
+        state = zclaw_exec(
+            store_id, script, timeout=3, deadline=deadline, retries=0, retry_timeout_expired=False,
+        )
+        if not isinstance(state, dict) or state.get("ok") is not True:
+            raise RuntimeError(f"UI readiness rejected: {state!r}")
+        if time.monotonic() >= deadline:
+            break
+        if state.get("ready") is True:
+            return state
+        time.sleep(min(UI_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+    if required:
+        raise RuntimeError("UI readiness deadline expired")
+    return {"ok": True, "ready": False}
 
 
 def recover_list_if_error(store_id: str) -> dict[str, Any]:
@@ -486,15 +584,12 @@ def restore_ongoing_list(store_id: str) -> dict[str, Any]:
     try:
         paging = ensure_page_size(store_id)
     except RuntimeError:
-        recover_list_if_error(store_id)
-        try:
-            paging = ensure_page_size(store_id)
-        except RuntimeError:
-            empty_state = extract_page(store_id)
-            if not empty_state["rows"] and not _page_problem(empty_state, None):
-                return {"tab": tab, "recovered": recovered, "paging": {"ok": True, "empty": True},
-                        "nav": {"ok": True, "empty": True}}
-            raise
+        # Do not replay a trigger or option click after an unverified response.
+        empty_state = extract_page(store_id)
+        if not empty_state["rows"] and not _page_problem(empty_state, None):
+            return {"tab": tab, "recovered": recovered, "paging": {"ok": True, "empty": True},
+                    "nav": {"ok": True, "empty": True}}
+        raise
     navigation: Any = None
     for attempt in range(4):
         navigation = zclaw_exec(store_id, GOTO_LAST_PAGE_JS)
@@ -759,31 +854,14 @@ def locate_target_invitation(
     return result
 
 
-def _wait_invitation_gone(store_id: str, invitation_id: str, previous: dict[str, Any]) -> bool | None:
-    """Absence only on the same ongoing page, never after tab/page replacement."""
-    context = _shop_context(str(previous.get("href") or ""))
-    for poll_number in range(10):
-        state = extract_page(store_id)
-        if _page_problem(state, context) or _page_number(state) != _page_number(previous):
-            return None
-        if any(not str(row.get("invitation_id") or "") for row in state["rows"]):
-            return None
-        if not any(str(row["invitation_id"]) == invitation_id for row in state["rows"]):
-            return True
-        if poll_number < 9:
-            time.sleep(0.5)
-    return False
-
-
 def cancel_invitation_by_id(
     store_id: str, *, invitation_id: str, expected_last_modified: str, cutoff: date, execute: bool = False,
 ) -> InvitationCancellationResult:
-    """One write at most, after caller checkpoint; broad source ok is not success.
+    """Submit one cancellation, with optional confirmation as in the source tool.
 
-    ``submitted`` means click + confirmation + same-page disappearance evidence,
-    not platform-final cancellation. Missing evidence/transport loss/recovery
-    failure is ``uncertain`` and must never be automatically retried by callers.
-    The default performs only read checks, without opening a cancellation menu.
+    A click receipt means operation-submitted, not platform-final cancellation.
+    Transport loss after calling cancellation remains uncertain and is never
+    retried. The caller retains the existing snapshot and write-ahead barriers.
     """
     _validate_fixed_target(invitation_id, expected_last_modified, cutoff)
     if type(execute) is not bool:
@@ -810,44 +888,76 @@ def cancel_invitation_by_id(
     if not execute:
         result.update(status="dry-run", action="dry-run", reason="execute-disabled")
         return result
-    replacements = {placeholder: json.dumps(value, ensure_ascii=False) for placeholder, value in {
-        "%INVITATION_ID%": invitation_id, "%EXPECTED_MODIFIED%": expected_last_modified.strip(),
-        "%EXPECTED_HREF%": str(data["href"]), "%EXPECTED_PAGE%": str(data["page"]),
-    }.items()}
-    replacements["%DO_CANCEL%"] = "true"
-    # One-pass substitution prevents a placeholder inside an ID from becoming
-    # executable template syntax during a later replacement.
-    script = re.sub(r"%(?:INVITATION_ID|EXPECTED_MODIFIED|EXPECTED_HREF|EXPECTED_PAGE|DO_CANCEL)%",
-                    lambda match: replacements[match.group()], CANCEL_INVITE_JS_TMPL)
-    result.update(write_attempted=True, status="uncertain", action="cancel:unknown")
+    replacements = {
+        "%INVITATION_ID%": json.dumps(invitation_id, ensure_ascii=False),
+        "%EXPECTED_MODIFIED%": json.dumps(expected_last_modified.strip(), ensure_ascii=False),
+        "%EXPECTED_HREF%": json.dumps(str(data["href"]), ensure_ascii=False),
+    }
+
+    def render_script(template: str) -> str:
+        return re.sub(r"%(?:INVITATION_ID|EXPECTED_MODIFIED|EXPECTED_HREF)%",
+                      lambda match: replacements[match.group()], template)
+
+    def execute_once(template: str) -> dict[str, Any]:
+        response = zclaw_exec(store_id, render_script(template), retries=0, retry_timeout_expired=False)
+        if not isinstance(response, dict):
+            raise RuntimeError("Invalid cancellation response")
+        return response
+
+    menu_opened = False
     try:
-        # Explicitly disable transport retries for this side-effectful call.
-        raw = zclaw_exec(store_id, script, retries=0, retry_timeout_expired=False)
-        result["raw"] = raw
-        result["action"] = "cancel:" + json.dumps(raw, ensure_ascii=False, sort_keys=True)
-        if not isinstance(raw, dict) or raw.get("invitation_id") != invitation_id:
+        # A lost arrow-click response may still leave the menu open.
+        menu_opened = True
+        opened = execute_once(OPEN_CANCELLATION_MENU_JS_TMPL)
+        menu_opened = opened.get("opened") is True
+        if opened.get("ok") is not True:
+            result.update(reason=str(opened.get("reason") or "menu-open-failed"), raw=opened)
+            return result
+        _wait_for_ui_ready(
+            store_id, render_script(INSPECT_CANCELLATION_MENU_JS_TMPL),
+            deadline=time.monotonic() + CANCELLATION_MENU_WAIT_SECONDS,
+        )
+        result.update(write_attempted=True, status="uncertain", action="cancel:unknown")
+        cancellation = execute_once(CLICK_CANCELLATION_MENU_JS_TMPL)
+        result["raw"] = cancellation
+        if cancellation.get("write_attempted") is False:
+            result.update(status="failed", write_attempted=False, action="not-attempted",
+                          reason=str(cancellation.get("reason") or "menu-item-not-found"))
+            return result
+        if cancellation.get("ok") is not True or cancellation.get("invitation_id") != invitation_id \
+                or cancellation.get("clickedCancel") is not True:
             result["reason"] = "invalid-write-response"
-        elif raw.get("write_attempted") is False and raw.get("ok") is False:
-            result.update(write_attempted=False, status="failed", reason=str(raw.get("reason") or "prewrite-rejected"))
-        else:
-            result["confirmed"] = raw.get("confirmed") if type(raw.get("confirmed")) is bool else None
-            result["gone"] = _wait_invitation_gone(store_id, invitation_id, data)
-            if (raw.get("ok") is True and raw.get("clickedCancel") is True
-                    and result["confirmed"] is True and result["gone"] is True):
-                result.update(status="submitted", reason="operation-submitted")
-            else:
-                result["reason"] = "cancellation-unverified"
+            return result
+
+        confirmation_ready = _wait_for_ui_ready(
+            store_id, render_script(INSPECT_CANCELLATION_CONFIRMATION_JS_TMPL),
+            deadline=time.monotonic() + CANCELLATION_CONFIRMATION_WAIT_SECONDS, required=False,
+        )
+        confirmation = {"confirmed": False}
+        if confirmation_ready["ready"]:
+            confirmation = execute_once(CLICK_CANCELLATION_CONFIRMATION_JS_TMPL)
+            if confirmation.get("ok") is not True or confirmation.get("confirmed") is not True:
+                result.update(reason="confirmation-unverified", raw={**cancellation, **confirmation})
+                return result
+        result.update(status="submitted", reason="operation-submitted",
+                      confirmed=confirmation["confirmed"], raw={**cancellation, **confirmation})
+        result["action"] = "cancel:" + json.dumps(result["raw"], ensure_ascii=False, sort_keys=True)
     except Exception as error:
-        result.update(status="uncertain", reason="write-or-readback-error")
+        result["reason"] = "write-or-readback-error" if result["write_attempted"] else "menu-open-failed"
         result["raw"] = {"response": result["raw"], "error": str(error)}
+        logger.warning("Invitation cancellation stopped: %s", error)
     finally:
         try:
-            restored = restore_ongoing_list(store_id)
-            if not isinstance(restored.get("nav"), dict) or restored["nav"].get("ok") is not True:
-                raise RuntimeError("Last-page recovery failed")
+            zclaw_exec(store_id, CLEAR_CANCELLATION_ATTEMPT_JS, retries=0, retry_timeout_expired=False)
         except Exception as error:
-            if result["write_attempted"]:
-                result.update(status="uncertain", reason="postwrite-recovery-failed")
-            logger.warning("Post-cancellation recovery failed: %s", error)
-        time.sleep(CANCEL_DELAY_SECONDS)
+            logger.warning("Cannot clear cancellation UI state: %s", error)
+        if menu_opened or result["write_attempted"]:
+            try:
+                restored = restore_ongoing_list(store_id)
+                if restored.get("nav", {}).get("ok") is not True:
+                    raise RuntimeError("Last-page recovery failed")
+            except Exception as error:
+                if result["write_attempted"]:
+                    result.update(status="uncertain", reason="postwrite-recovery-failed")
+                logger.warning("Post-cancellation recovery failed: %s", error)
     return result

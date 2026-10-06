@@ -183,6 +183,71 @@ def test_changed_or_unverified_target_is_not_clicked(tmp_path):
     callbacks["cancel_fn"].assert_not_called()
 
 
+@pytest.mark.parametrize("months", [2, 4])
+def test_real_cancellation_entry_submits_both_presets_without_mandatory_confirmation(tmp_path, monkeypatch, months):
+    import csv
+    import json
+    import re
+    from lib import target_invitation_dom as invitations
+    from tests.test_target_invitation_dom import make_page, make_row
+
+    snapshot = make_snapshot(months=months, rows=[{"invitation_id": identifier, "last_modified": "2020/01/01"}
+                                   for identifier in ("first", "second")])
+    paths = cleanup.artifact_paths(tmp_path, snapshot["batch_id"])
+    callbacks = execution_callbacks()
+    callbacks.pop("cancel_fn")
+    extract = Mock(return_value=make_page(rows=[make_row(identifier, "2020/01/01")
+                                               for identifier in ("first", "second")]))
+    monkeypatch.setattr(invitations, "extract_page", extract)
+    monkeypatch.setattr(invitations, "restore_ongoing_list", Mock(return_value={"nav": {"ok": True}}))
+    monkeypatch.setattr(invitations, "_wait_for_ui_ready", Mock(side_effect=[
+        {"ok": True, "ready": True}, {"ok": True, "ready": False},
+        {"ok": True, "ready": True}, {"ok": True, "ready": False},
+    ]))
+    platform_boundary = Mock(side_effect=AssertionError("No live CLI allowed"))
+    monkeypatch.setattr("lib.zclaw.zclaw_invoke", platform_boundary)
+
+    submitted_ids = []
+
+    def execute_synthetic_script(store_id, script, **parameters):
+        assert parameters == {"retries": 0, "retry_timeout_expired": False}
+        if script == invitations.CLEAR_CANCELLATION_ATTEMPT_JS:
+            return {"ok": True}
+        if "opened:true" in script:
+            return {"ok": True, "opened": True}
+        assert "clickedCancel:true" in script
+        invitation_id = json.loads(re.search(r"const targetId = ([^\n]+);", script)[1])
+        persisted = cleanup.read_execution_results(paths["results_json"], snapshot, cleanup.payload_digest(snapshot))
+        current = next(item for item in persisted if item["invitation_id"] == invitation_id)
+        assert current["status"] == "attempting"
+        assert callbacks["before_attempt"].call_args.args == (invitation_id,)
+        assert paths["backup_json"].is_file() and paths["backup_csv"].is_file()
+        submitted_ids.append(invitation_id)
+        return {"ok": True, "invitation_id": invitation_id, "clickedCancel": True}
+
+    monkeypatch.setattr(invitations, "zclaw_exec", execute_synthetic_script)
+    report = execute_fixture(snapshot, tmp_path, callbacks)
+    assert report["status"] == "completed"
+    assert [item["status"] for item in report["items"]] == ["submitted", "submitted"]
+    assert all(item["summary"] == "operation-submitted" for item in report["items"])
+    assert submitted_ids == ["first", "second"]
+    assert extract.call_count == 2
+    platform_boundary.assert_not_called()
+    persisted = cleanup.read_execution_results(paths["results_json"], snapshot, cleanup.payload_digest(snapshot))
+    assert persisted == report["items"]
+    with paths["results_csv"].open(encoding="utf-8-sig", newline="") as result_file:
+        result_rows = list(csv.DictReader(result_file))
+    assert [row["status"] for row in result_rows] == ["submitted", "submitted"]
+    assert all(row["summary"] == "operation-submitted" for row in result_rows)
+    original_files = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    with pytest.raises(FileExistsError):
+        execute_fixture(snapshot, tmp_path, callbacks)
+    assert extract.call_count == 2
+    assert submitted_ids == ["first", "second"]
+    platform_boundary.assert_not_called()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == original_files
+
+
 def test_connection_loss_after_click_is_never_retried(tmp_path):
     snapshot = make_snapshot(rows=[{"invitation_id": identifier, "last_modified": "2020/01/01"}
                                    for identifier in ("first", "second")])
