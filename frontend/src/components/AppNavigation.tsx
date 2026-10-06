@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   {href: '/prepare', label: '运行准备'},
   {href: '/auto-approval', label: '自动批准'},
   {href: '/followups', label: '达人跟进'},
+  {href: '/plan-cleanup', label: '计划清理'},
   {href: '/shipments', label: '物流'},
   {href: '/jobs', label: '任务'},
   {href: '/reports', label: '报表'},

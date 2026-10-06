@@ -275,6 +275,62 @@ class JobEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class TargetCleanupBatch(Base):
+    """Server-owned preview evidence and its one-shot execution claim."""
+    __tablename__ = "target_cleanup_batches"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    months: Mapped[int] = mapped_column(Integer)
+    store_id: Mapped[str] = mapped_column(String, index=True)
+    store_name: Mapped[str] = mapped_column(String, default="")
+    shop_id: Mapped[str] = mapped_column(String)
+    shop_region: Mapped[str] = mapped_column(String, default="US")
+    frozen_json: Mapped[str] = mapped_column(Text, default="")
+    preview_status: Mapped[str] = mapped_column(String, default="queued")
+    execute_status: Mapped[str] = mapped_column(String, default="unclaimed")
+    preview_job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"))
+    execute_job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), unique=True)
+    preview_idempotency_key: Mapped[str | None] = mapped_column(String, unique=True)
+    execute_idempotency_key: Mapped[str | None] = mapped_column(String, unique=True)
+    preview_request_fingerprint: Mapped[str] = mapped_column(String)
+    execute_request_fingerprint: Mapped[str] = mapped_column(String, default="")
+    snapshot_path: Mapped[str] = mapped_column(String)
+    snapshot_sha256: Mapped[str] = mapped_column(String, default="")
+    artifacts_json: Mapped[str] = mapped_column(Text)
+    execute_envelope_json: Mapped[str] = mapped_column(Text, default="")
+    scan_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    stop_reason: Mapped[str] = mapped_column(String, default="")
+    pages_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    scan_count: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    nonzero_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String, default="")
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    preview_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    preview_finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    execute_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    execute_finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class TargetCleanupItem(Base):
+    """Immutable candidate row evidence, plus monotonic per-row outcomes."""
+    __tablename__ = "target_cleanup_items"
+    __table_args__ = (UniqueConstraint("batch_id", "invitation_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("target_cleanup_batches.id"))
+    store_id: Mapped[str] = mapped_column(String, index=True)
+    invitation_id: Mapped[str] = mapped_column(String, index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    row_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="pending")
+    action: Mapped[str] = mapped_column(String, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    attempted_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    returned_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
     key: Mapped[str] = mapped_column(String, primary_key=True)

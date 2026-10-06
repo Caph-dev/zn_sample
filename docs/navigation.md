@@ -51,6 +51,12 @@
 - 实现：[日历与窗口](../assistant/domain/followup_stage.py)、[话术模板](../assistant/domain/message_templates.py)、[待办服务](../assistant/services/followup_service.py)、[内容感谢](../assistant/services/content_thanks_service.py)、[发送脚本](../scripts/send_followup_message.py)、[聊天导航与消息时间解析](../scripts/lib/im_dom.py)。
 - 验证：[日历](../tests/assistant/test_followup_stage.py)、[话术](../tests/assistant/test_message_templates.py)、[生成待办](../tests/assistant/test_followup_generate.py)、[单条发送](../tests/test_send_followup_message.py)、[聊天 DOM](../tests/test_im_dom.py)。
 
+### 计划清理（定向合作进行中）
+
+- 先读：[README.md](../README.md)「计划清理」与 [AGENTS.md](../AGENTS.md)「独立定向邀请取消链」。这是 2/4 自然月的固定快照取消业务，不是样品批准、飞书或私信；真实执行须另行确认名单，不与旧项目脚本并跑。
+- 实现：[独立脚本](../scripts/cleanup_target_plans.py)、[规则/快照/检查点](../scripts/lib/target_plan_cleanup.py)、[DOM 与完整性](../scripts/lib/target_invitation_dom.py)、[已知导航](../scripts/lib/target_invitation_navigation.py)、[持久化与领取](../assistant/services/target_cleanup_service.py)、[白名单表单 API](../assistant/api/target_cleanup.py)、[固定 handler](../assistant/jobs/handlers/target_cleanup.py)、[迁移](../assistant/database/migrations/versions/0007_target_cleanup.py)、[React 页面](../frontend/src/console/pages/TargetCleanupPage.tsx)。页面复用共用九项导航、确认弹窗与任务监控，不自行探活或 POST 第二次。
+- 验证：[规则与执行](../tests/test_target_plan_cleanup.py)、[DOM](../tests/test_target_invitation_dom.py)、[导航](../tests/test_target_invitation_navigation.py)、[领域服务与恢复](../tests/assistant/test_target_cleanup_service.py)、[API](../tests/assistant/test_target_cleanup_api.py)、[任务保护](../tests/assistant/test_target_cleanup_jobs.py)、[bootstrap](../tests/assistant/test_target_cleanup_pages.py)、[合成 UI/网络恢复](../frontend/tests/targetCleanup.test.mjs)。发布资源与隔离 smoke 还看 `tests/release/test_bundle_resources.py` / `test_bundle_smoke.py`；离线证明不等于原生或实店验收。
+
 ### 物流同步、写回、介绍私信与订单号补写
 
 - 先读：[README.md](../README.md) 的对应操作与 [AGENTS.md](../AGENTS.md) 的停止点；操作台只读物流、受 16:00 门保护的物流写回、订单号补写不是同一任务。

@@ -9,6 +9,7 @@ export type PageKey =
   | 'shipment_detail'
   | 'followups'
   | 'followup_detail'
+  | 'plan_cleanup'
   | 'jobs'
   | 'job_detail'
   | 'reports'
@@ -210,4 +211,98 @@ export interface FollowupsData {
     languages: FollowupFilterOption[];
     platform_statuses: FollowupFilterOption[];
   };
+}
+
+export type CleanupMonths = 2 | 4;
+export type CleanupItemStatus =
+  | 'pending' | 'attempting' | 'submitted' | 'skipped' | 'failed' | 'uncertain' | 'not_processed';
+
+export interface CleanupFrozenRule {
+  batch_id: string;
+  store_id: string;
+  shop_id: string;
+  months: CleanupMonths;
+  run_date: string;
+  started_at: string;
+  timezone_name: string;
+  offset_minutes: number;
+  cutoff: string;
+}
+
+export interface CleanupBatchSummary {
+  batch_id: string;
+  months: CleanupMonths;
+  store_id: string;
+  store_name: string;
+  shop_id: string;
+  shop_region: string;
+  frozen: CleanupFrozenRule | null;
+  preview_status: string;
+  execute_status: string;
+  preview_job_id: string;
+  execute_job_id: string | null;
+  scan_complete: boolean;
+  stop_reason: string;
+  pages_scanned: number;
+  scan_count: number;
+  candidate_count: number;
+  nonzero_count: number;
+  snapshot_sha256: string;
+  error_code: string;
+  error_summary: string;
+  created_at: string;
+  preview_started_at: string;
+  preview_finished_at: string;
+  expires_at: string;
+  confirmed_at: string;
+  execute_started_at: string;
+  execute_finished_at: string;
+}
+
+export interface CleanupItem {
+  invitation_id: string;
+  name: string;
+  last_modified: string;
+  modified_date: string;
+  accepted_count: number | null;
+  promoted_count: number | null;
+  invited_count: number | null;
+  eligible: boolean;
+  reason: string;
+  status: CleanupItemStatus;
+  action: string;
+  summary: string;
+  attempted_at: string;
+  returned_at: string;
+}
+
+export interface CleanupBatch extends CleanupBatchSummary {
+  items: CleanupItem[];
+  counts: Record<CleanupItemStatus, number>;
+  offset: number;
+  limit: number;
+  total: number;
+  can_execute: boolean;
+  execute_block_reason: string;
+  identity_requires_recheck: boolean;
+  jobs: Record<'preview' | 'execute', {job_id: string | null; status: string}>;
+  downloads: Partial<Record<'scan_csv' | 'candidates_csv' | 'results_csv' | 'backup_csv', string>>;
+  results_csv_ready: boolean;
+}
+
+export interface CleanupRecentBatches {
+  batches: CleanupBatchSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface TargetCleanupData {
+  database_ready: boolean;
+  default_months: CleanupMonths;
+  prepare_href: string;
+  batch_id: string;
+  batch: CleanupBatch | null;
+  recent_batches: CleanupRecentBatches;
+  read_error: string;
 }

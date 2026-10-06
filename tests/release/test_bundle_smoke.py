@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -16,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from setup.release import resources
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -323,3 +327,355 @@ def test_actual_http_helper_handles_health_export_and_refuses_redirect(monkeypat
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+def run_isolated_cleanup_resource_smoke():
+    """Host-interpreter offline code/resource smoke, NOT private-runtime acceptance.
+
+    Executed from its source in a disposable -I -B process. Only registered app
+    files and existing host dependencies are available; all business I/O is
+    blocked, while the real routes, migrations, queue, handler and core run.
+    """
+    import importlib
+    import json
+    import mimetypes
+    import os
+    import re
+    import subprocess
+    import sys
+    import uuid
+    from contextlib import ExitStack
+    from datetime import timedelta
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from urllib.parse import parse_qs, urlsplit
+
+    sandbox_root = Path(sys.argv[1]).resolve()
+    source_root = Path(sys.argv[2]).resolve()
+    application_root = sandbox_root / "resources" / "app"
+    user_root = sandbox_root / "synthetic user data"
+    runtime_roots = (Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
+    # Homebrew's stdlib sysconfig reads this exact platform metadata file.
+    allowed_system_reads = {Path("/System/Library/CoreServices/SystemVersion.plist")} if sys.platform == "darwin" else set()
+    blocked_events = []
+
+    def reject_boundary(code):
+        blocked_events.append(code)
+        raise AssertionError(code)
+
+    def require_isolated_path(value, *, write=False):
+        if value is None or isinstance(value, int):
+            return
+        resolved_path = Path(os.fsdecode(value)).resolve()
+        if resolved_path.is_relative_to(application_root):
+            if write:
+                reject_boundary("installation-write-blocked")
+            return
+        if resolved_path.is_relative_to(sandbox_root):
+            return
+        if not write and any(resolved_path.is_relative_to(root) for root in runtime_roots):
+            return
+        if not write and resolved_path in allowed_system_reads:
+            return
+        reject_boundary("unregistered-read-or-write-blocked")
+
+    def audit_offline_boundaries(event, arguments):
+        if event in {"socket.connect", "socket.bind", "socket.getaddrinfo", "socket.gethostbyname"}:
+            reject_boundary("network-blocked")
+        if event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec", "os.fork"}:
+            reject_boundary("real-child-blocked")
+        if event == "open":
+            mode, flags = arguments[1:3]
+            write = (isinstance(mode, str) and any(marker in mode for marker in "wax+")) or (
+                isinstance(flags, int) and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC))
+            )
+            require_isolated_path(arguments[0], write=write)
+        elif event in {"os.listdir", "os.scandir", "import"}:
+            require_isolated_path(arguments[1] if event == "import" else arguments[0])
+        elif event in {"os.mkdir", "os.remove", "os.rmdir", "os.chmod", "sqlite3.connect"}:
+            require_isolated_path(arguments[0], write=True)
+        elif event in {"os.rename", "os.link", "os.symlink"}:
+            for value in arguments[:2]:
+                require_isolated_path(value, write=True)
+
+    sys.addaudithook(audit_offline_boundaries)
+    # Exercise the tripwire itself without opening a source file or a socket.
+    for event, arguments, expected in (
+        ("open", (str(source_root / "AGENTS.md"), "r", 0), "unregistered-read-or-write-blocked"),
+        ("socket.connect", (None, ("127.0.0.1", 9481)), "network-blocked"),
+        ("subprocess.Popen", (sys.executable, [sys.executable], None, None), "real-child-blocked"),
+        ("open", (str(application_root / "config.toml"), "w", os.O_WRONLY), "installation-write-blocked"),
+    ):
+        try:
+            sys.audit(event, *arguments)
+        except AssertionError as error:
+            assert str(error) == expected
+        else:
+            raise AssertionError("Offline tripwire did not block")
+    assert len(blocked_events) == 4
+    blocked_events.clear()
+
+    sys.path[:0] = [str(application_root), str(application_root / "scripts")]
+    assert not (application_root.parent / "zn_daren").exists()
+    assert not any(Path(value).resolve() in {source_root, source_root.parent / "zn_daren"}
+                   for value in sys.path if value)
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from fastapi.testclient import TestClient
+    from sqlalchemy import inspect as inspect_database, select, text
+    from sqlalchemy.orm import sessionmaker
+
+    from assistant import bootstrap, paths
+    from assistant.app import create_app
+    from assistant.database.engine import create_database_engine
+    from assistant.database.models import Job, TargetCleanupBatch, TargetCleanupItem
+    from assistant.jobs import registry
+    from assistant.jobs.handlers import target_cleanup as handler
+    from assistant.jobs.worker import worker_loop_once
+    from assistant.services import target_cleanup_service as service
+    from lib import target_invitation_dom, target_invitation_navigation, target_plan_cleanup, zclaw, zclaw_cli
+
+    cleanup_script = importlib.import_module("cleanup_target_plans")
+    assert paths.application_resource_dir() == application_root
+    assert paths.is_packaged_distribution() is False  # No fabricated private-runtime manifest.
+    configuration = Config(str(application_root / "assistant/database/alembic.ini"))
+    bootstrap.configure_alembic_paths(configuration)
+    head_revision = ScriptDirectory.from_config(configuration).get_revision("head")
+    assert head_revision.revision == "0007_target_cleanup"
+    assert Path(head_revision.module.__file__).resolve() == (
+        application_root / "assistant/database/migrations/versions/0007_target_cleanup.py"
+    )
+
+    nonce = uuid.uuid4().hex
+    synthetic_identity = {
+        "store_id": "fixture-store-" + nonce, "store_name": "Synthetic offline store",
+        "shop_id": "fixture-shop-" + nonce, "shop_region": "US",
+    }
+    identity = Mock(return_value=synthetic_identity)
+    forbidden = Mock(side_effect=AssertionError("Unmocked business boundary"))
+    synthetic_cancellations = []
+    child_modes = []
+
+    def navigate_synthetic_store(store_id):
+        assert store_id == synthetic_identity["store_id"]
+        return {"destination": {"shop_id": synthetic_identity["shop_id"]}}
+
+    def scan_synthetic_invitations(store_id, *, cutoff):
+        assert store_id == synthetic_identity["store_id"]
+        identifier_prefix = "fixture-invitation-" + nonce + "-" + cutoff.isoformat()
+        rows = [{
+            "invitation_id": identifier_prefix + suffix, "name": "Synthetic " + suffix,
+            "last_modified": modified_date.isoformat(),
+            "accepted_count": 2, "promoted_count": 1, "invited_count": 5,
+        } for suffix, modified_date in (("-old", cutoff - timedelta(days=1)), ("-boundary", cutoff))]
+        return {"rows": rows, "scan_complete": True, "stop_reason": "first-page", "pages_scanned": 1}
+
+    def locate_synthetic_invitation(store_id, **parameters):
+        assert store_id == synthetic_identity["store_id"]
+        assert parameters["invitation_id"].startswith("fixture-invitation-" + nonce)
+        return {"revalidated": True}
+
+    def cancel_synthetic_invitation(store_id, **parameters):
+        assert parameters.pop("execute") is True
+        locate_synthetic_invitation(store_id, **parameters)
+        invitation_id = parameters["invitation_id"]
+        with session_factory() as session:
+            item = session.scalar(select(TargetCleanupItem).where(TargetCleanupItem.invitation_id == invitation_id))
+            assert item.status == "attempting" and item.attempted_at is not None
+            artifacts = service.artifact_paths(item.batch_id)
+            assert artifacts["backup_json"].is_file() and artifacts["backup_csv"].is_file()
+            checkpoint = json.loads(artifacts["results_json"].read_text(encoding="utf-8"))
+            assert checkpoint["items"][0]["status"] == "attempting"
+        synthetic_cancellations.append(invitation_id)
+        return {"status": "submitted", "action": "fixture-only", "reason": "No platform cancellation performed"}
+
+    def run_fake_cleanup_child(arguments, **options):
+        mode, batch_id, job_id = arguments[3], arguments[5], arguments[7]
+        expected = [sys.executable, str(application_root / "scripts/cleanup_target_plans.py"),
+                    "--mode", mode, "--batch-id", batch_id, "--job-id", job_id]
+        if mode == "execute":
+            expected.extend(["--execute", "--yes"])
+        assert arguments == expected and mode in {"preview", "execute"}
+        assert options["cwd"] == str(application_root)
+        assert options["stdin"] == subprocess.DEVNULL and options["stderr"] == subprocess.STDOUT
+        assert options["shell"] is False and options["check"] is False
+        assert options["env"]["PYTHONUTF8"] == "1" and options["env"]["PYTHONIOENCODING"] == "utf-8"
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            assert job.status == "running" and job.store_id == synthetic_identity["store_id"]
+            assert not registry.can_request_cancellation(job.job_type, job.status)
+        options["stdout"].write("Offline in-process fake child; no platform operations.\n")
+        child_modes.append(mode)
+        return SimpleNamespace(returncode=cleanup_script.run_batch(
+            session_factory, batch_id=batch_id, job_id=job_id, mode=mode,
+            execute=mode == "execute", yes=mode == "execute",
+        ))
+
+    with ExitStack() as guards:
+        # CSV FileResponse uses built-in MIME types, not host /etc or registry configuration.
+        guards.enter_context(patch.object(mimetypes, "knownfiles", []))
+        guards.enter_context(patch.object(mimetypes.MimeTypes, "read_windows_registry", lambda self: None))
+        mimetypes.init()
+        guards.enter_context(patch.object(paths, "user_data_dir", lambda: user_root))
+        guards.enter_context(patch.object(service, "resolve_running_identity", identity))
+        for module, names in (
+            (zclaw, ("zclaw_exec", "zclaw_invoke", "run_ziniao_cli", "list_running_stores",
+                     "list_all_stores", "open_store", "close_store", "visit_page", "resolve_store_id")),
+            (zclaw_cli, ("run_ziniao_cli", "resolve_ziniao_cli_command")),
+            (target_invitation_dom, ("zclaw_exec",)),
+            (target_invitation_navigation, ("zclaw_exec", "ensure_ongoing_tab")),
+        ):
+            for name in names:
+                guards.enter_context(patch.object(module, name, forbidden))
+        guards.enter_context(patch.object(target_invitation_navigation, "navigate_from_seller_home_to_ongoing",
+                                         navigate_synthetic_store))
+        guards.enter_context(patch.object(target_invitation_dom, "scan_older_invitations", scan_synthetic_invitations))
+        guards.enter_context(patch.object(target_invitation_dom, "locate_target_invitation", locate_synthetic_invitation))
+        guards.enter_context(patch.object(target_invitation_dom, "cancel_invitation_by_id", cancel_synthetic_invitation))
+        guards.enter_context(patch.object(subprocess, "run", run_fake_cleanup_child))
+
+        paths.ensure_user_dirs()
+        sqlite_path = user_root / "assistant.sqlite3"
+        assert not sqlite_path.exists()
+        bootstrap.upgrade_database(sqlite_path=sqlite_path)
+        engine = create_database_engine(sqlite_path)
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        try:
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007_target_cleanup"
+            assert {"target_cleanup_batches", "target_cleanup_items"} <= set(inspect_database(engine).get_table_names())
+            application = create_app(port=8765)
+            application.state.session_factory = session_factory
+            origin = {"Origin": "http://127.0.0.1:8765"}
+            previews_url = "/api/target-cleanup/previews"
+            batches = []
+
+            def assert_bootstrap(response, batch_id=""):
+                assert response.status_code == 200
+                match = re.search(r'<script id="console-bootstrap" type="application/json">(.*?)</script>',
+                                  response.text, re.DOTALL)
+                payload = json.loads(match.group(1))
+                assert payload["page"] == "plan_cleanup"
+                assert payload["data"]["batch_id"] == batch_id and payload["data"]["read_error"] == ""
+
+            with TestClient(application, base_url="http://127.0.0.1:8765") as client:
+                assert_bootstrap(client.get("/plan-cleanup"))
+                identity.assert_not_called()
+                fields = {"months": "4", "idempotency_key": "fixture-preview-" + nonce}
+                assert client.post(previews_url, data=fields).status_code == 403
+                assert client.post(previews_url, headers={"Origin": "http://remote.invalid"}, data=fields).status_code == 403
+                assert client.post(previews_url, headers={**origin, "Host": "remote.invalid"}, data=fields).status_code == 400
+                assert client.post(previews_url, headers=origin, data={**fields, "store_id": "override"}).status_code == 400
+                assert client.post(previews_url, headers=origin, json=fields).status_code == 415
+                identity.assert_not_called()
+
+                for months in (2, 4):
+                    response = client.post(previews_url, headers=origin, data={
+                        "months": str(months), "idempotency_key": f"fixture-preview-{nonce}-{months}",
+                    })
+                    assert response.status_code == 200
+                    created = response.json()
+                    assert worker_loop_once(session_factory) == created["job_id"]
+                    payload = client.get(f"/api/target-cleanup/batches/{created['batch_id']}").json()
+                    assert payload["months"] == months and payload["scan_complete"] and payload["can_execute"]
+                    assert payload["scan_count"] == 2 and payload["candidate_count"] == payload["nonzero_count"] == 1
+                    assert payload["jobs"]["preview"]["status"] == "succeeded"
+                    assert len(payload["items"]) == 1 and payload["items"][0]["invitation_id"].endswith("-old")
+                    assert_bootstrap(client.get(created["batch_url"]), created["batch_id"])
+                    batches.append(created)
+                assert synthetic_cancellations == []
+
+                selected = batches[-1]
+                execute_url = f"/api/target-cleanup/batches/{selected['batch_id']}/execute"
+                execution_fields = {"confirmation": "y", "idempotency_key": "fixture-execute-" + nonce}
+                assert client.post(execute_url, data=execution_fields).status_code == 403
+                assert client.post(execute_url, headers=origin, data={**execution_fields, "confirmation": "yes"}).status_code == 400
+                assert client.post(execute_url, headers=origin, data={**execution_fields, "limit": "1"}).status_code == 400
+                assert synthetic_cancellations == [] and child_modes == ["preview", "preview"]
+                response = client.post(execute_url, headers=origin, data=execution_fields)
+                assert response.status_code == 200
+                execution = response.json()
+                assert worker_loop_once(session_factory) == execution["job_id"]
+                duplicate = client.post(execute_url, headers=origin, data=execution_fields)
+                assert duplicate.json() == {**execution, "deduplicated": True}
+                assert worker_loop_once(session_factory) is None
+                assert child_modes == ["preview", "preview", "execute"] and len(synthetic_cancellations) == 1
+
+                payload = client.get(f"/api/target-cleanup/batches/{selected['batch_id']}").json()
+                assert payload["execute_status"] == "completed" and payload["counts"]["submitted"] == 1
+                assert payload["jobs"]["execute"]["status"] == "succeeded" and not payload["can_execute"]
+                assert_bootstrap(client.get(selected["batch_url"]), selected["batch_id"])
+                for download_name in ("scan_csv", "candidates_csv", "results_csv", "backup_csv"):
+                    download_url = payload["downloads"][download_name]
+                    filename = parse_qs(urlsplit(download_url).query)["filename"][0]
+                    assert filename.startswith("target_cleanup/")
+                    response = client.get(download_url)
+                    assert response.status_code == 200
+                    assert response.content == (user_root / "exports" / filename).read_bytes()
+                assert client.get("/api/exports/download", params={
+                    "filename": "target_cleanup/" + selected["batch_id"] + "_snapshot.json",
+                }).status_code == 404
+                assert client.get("/api/exports/download", params={"filename": "../../config.toml"}).status_code == 404
+                assert client.get("/api/target-cleanup/batches").json()["total"] == 2
+                with session_factory() as session:
+                    batch = session.get(TargetCleanupBatch, selected["batch_id"])
+                    assert batch.execute_job_id == execution["job_id"]
+                    summary = json.loads(session.get(Job, execution["job_id"]).result_summary)
+                    assert "not platform-final" in summary["message"]
+        finally:
+            engine.dispose()
+        forbidden.assert_not_called()
+
+    loaded_module_paths = {}
+    for name, module in tuple(sys.modules.items()):
+        if name == "cleanup_target_plans" or name.split(".")[0] in {"assistant", "lib", "scripts"}:
+            module_file = getattr(module, "__file__", None)
+            if module_file:
+                module_path = Path(module_file).resolve()
+                assert module_path.is_relative_to(application_root), name
+                loaded_module_paths[name] = module_path.relative_to(application_root).as_posix()
+            for package_path in getattr(module, "__path__", ()):
+                assert Path(package_path).resolve().is_relative_to(application_root), name
+    assert not any(name == "zn_daren" or name.startswith("zn_daren.") for name in sys.modules)
+    assert not blocked_events, blocked_events
+    print(json.dumps({
+        "scope": "offline-host-interpreter-code-resource-smoke",
+        "revision": head_revision.revision, "preview_months": [2, 4],
+        "synthetic_cancellations": len(synthetic_cancellations), "child_modes": child_modes,
+        "modules": loaded_module_paths,
+    }, sort_keys=True))
+
+
+def test_registered_cleanup_resources_load_and_run_offline_without_source_checkout(tmp_path):
+    """Registered-resource integration only; no native/private-runtime proof."""
+    bundle_root = tmp_path / "resources"
+    selected_resources = resources.copy_application_resources(PROJECT_ROOT, bundle_root)
+    application_root = bundle_root / "app"
+    original_payload = {path: hashlib.sha256((application_root / path).read_bytes()).hexdigest()
+                        for path in selected_resources}
+    outside_cwd = tmp_path / "outside cwd"
+    outside_cwd.mkdir()
+    environment = smoke.isolated_environment(tmp_path, 8765, os.environ)
+    program = inspect.getsource(run_isolated_cleanup_resource_smoke) + "\nrun_isolated_cleanup_resource_smoke()\n"
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, str(tmp_path), str(PROJECT_ROOT)],
+        cwd=outside_cwd, env=environment, capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert result.returncode == 0, (result.stderr + result.stdout)[-1500:]
+    report = json.loads(result.stdout)
+    assert report["scope"] == "offline-host-interpreter-code-resource-smoke"
+    assert report["revision"] == "0007_target_cleanup" and report["preview_months"] == [2, 4]
+    assert report["child_modes"] == ["preview", "preview", "execute"] and report["synthetic_cancellations"] == 1
+    assert {
+        "assistant.api.target_cleanup", "assistant.services.target_cleanup_service",
+        "assistant.jobs.handlers.target_cleanup", "cleanup_target_plans",
+        "lib.target_invitation_dom", "lib.target_invitation_navigation", "lib.target_plan_cleanup",
+    } <= report["modules"].keys()
+    assert {path: hashlib.sha256((application_root / path).read_bytes()).hexdigest()
+            for path in selected_resources} == original_payload
+    assert {path.relative_to(application_root).as_posix() for path in application_root.rglob("*") if path.is_file()} == (
+        set(selected_resources) | {"config.toml.example", ".env.example"}
+    )
+    assert any((tmp_path / "synthetic user data/exports/target_cleanup").glob("*_results.csv"))

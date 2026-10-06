@@ -23,6 +23,8 @@ ZINIAO_JOB_TYPES = frozenset(
         "auto_approval_execute",
         "auto_approval_reconcile",
         "auto_approval_order_backfill",
+        "target_cleanup_preview",
+        "target_cleanup_execute",
     }
 )
 REGISTERED_JOB_TYPES = frozenset(
@@ -43,6 +45,8 @@ REGISTERED_JOB_TYPES = frozenset(
         "auto_approval_execute",
         "auto_approval_reconcile",
         "auto_approval_order_backfill",
+        "target_cleanup_preview",
+        "target_cleanup_execute",
     }
 )
 # 运行中不可取消的任务：写操作不可撤销，且占用紫鸟通道。
@@ -54,6 +58,7 @@ WRITE_JOB_TYPES = frozenset(
         "auto_approval_execute",
         "auto_approval_reconcile",
         "auto_approval_order_backfill",
+        "target_cleanup_execute",
     }
 )
 # 运行中可以在安全检查点停下的任务。写任务里只有「停止点落在整行边界」的
@@ -144,4 +149,7 @@ def get_handler(job_type: str) -> JobHandler | None:
     }:
         from assistant.jobs.handlers.auto_approval import run_auto_approval_job
         return run_auto_approval_job
+    if job_type in {"target_cleanup_preview", "target_cleanup_execute"}:
+        from assistant.jobs.handlers.target_cleanup import run_target_cleanup_job
+        return run_target_cleanup_job
     return None

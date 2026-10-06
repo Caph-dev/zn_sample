@@ -54,7 +54,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             try:
                 inspector = inspect(engine)
                 expected_model_tables = set(Base.metadata.tables)
-                self.assertEqual(len(expected_model_tables), 13)
+                self.assertEqual(len(expected_model_tables), 15)
                 self.assertEqual(
                     set(inspector.get_table_names()),
                     expected_model_tables | {"alembic_version"},
@@ -63,7 +63,7 @@ class MigrationIntegrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0006_followup_previewed_at",
+                        "0007_target_cleanup",
                     )
 
                 for table_name, model_table in Base.metadata.tables.items():
@@ -98,6 +98,13 @@ class MigrationIntegrationTests(unittest.TestCase):
                         (("sample_case_id",), "sample_cases", ("id",))
                     },
                     "job_events": {(('job_id',), 'jobs', ('id',))},
+                    "target_cleanup_batches": {
+                        (("preview_job_id",), "jobs", ("id",)),
+                        (("execute_job_id",), "jobs", ("id",)),
+                    },
+                    "target_cleanup_items": {
+                        (("batch_id",), "target_cleanup_batches", ("id",)),
+                    },
                 }
                 for table_name, expected_keys in expected_foreign_keys.items():
                     actual_keys = {
@@ -120,6 +127,11 @@ class MigrationIntegrationTests(unittest.TestCase):
                         ("sample_case_id", "stage", "scheduled_for")
                     },
                     "job_events": {("job_id", "sequence")},
+                    "target_cleanup_batches": {
+                        ("execute_job_id",), ("preview_idempotency_key",),
+                        ("execute_idempotency_key",),
+                    },
+                    "target_cleanup_items": {("batch_id", "invitation_id")},
                 }
                 for table_name, expected_constraints in expected_unique_constraints.items():
                     actual_constraints = {
@@ -127,6 +139,17 @@ class MigrationIntegrationTests(unittest.TestCase):
                         for constraint in inspector.get_unique_constraints(table_name)
                     }
                     self.assertEqual(actual_constraints, expected_constraints, table_name)
+
+                for table_name in ("target_cleanup_batches", "target_cleanup_items"):
+                    actual_indexes = {
+                        (index["name"], tuple(index["column_names"]), bool(index["unique"]))
+                        for index in inspector.get_indexes(table_name)
+                    }
+                    expected_indexes = {
+                        (index.name, tuple(column.name for column in index.columns), bool(index.unique))
+                        for index in Base.metadata.tables[table_name].indexes
+                    }
+                    self.assertEqual(actual_indexes, expected_indexes, table_name)
 
                 downgrade_configuration = Config(str(ALEMBIC_CONFIGURATION_PATH))
                 bootstrap.configure_alembic_paths(downgrade_configuration)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import signal
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -128,6 +129,46 @@ class MainFlowTests(unittest.TestCase):
             self.assertEqual(launch_assistant.main(), 2)
         terminate.assert_not_called()
         bootstrap_main.assert_not_called()
+
+    def test_registered_cleanup_execution_in_database_blocks_source_restart(self) -> None:
+        from sqlalchemy.orm import sessionmaker
+
+        from assistant.database.engine import create_database_engine
+        from assistant.database.models import Job
+        from assistant.jobs.handlers.target_cleanup import run_target_cleanup_job
+        from assistant.jobs.registry import get_handler
+
+        self.assertIs(get_handler("target_cleanup_execute"), run_target_cleanup_job)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            sqlite_path = Path(temporary_directory) / "assistant.sqlite3"
+            engine = create_database_engine(sqlite_path)
+            Job.__table__.create(engine)
+            session_factory = sessionmaker(bind=engine)
+            try:
+                with session_factory() as session:
+                    session.add(Job(id="protected-cleanup", job_type="target_cleanup_execute", status="running",
+                                    result_summary="preserve-known-result", error_code="preserve-checkpoint"))
+                    session.commit()
+                with (
+                    patch.object(launch_assistant, "database_path", return_value=sqlite_path),
+                    patch.object(launch_assistant, "ensure_user_dirs"),
+                    patch.object(launch_assistant, "_read_runtime_state", return_value={"pid": 123, "port": 8765}),
+                    patch.object(launch_assistant, "_existing_instance", return_value=(123, 8765)),
+                    patch.object(launch_assistant, "_terminate_process") as terminate,
+                    patch.object(launch_assistant, "_mark_interrupted_running_jobs") as mark,
+                    patch.object(launch_assistant.bootstrap, "main") as bootstrap_main,
+                    patch("sys.argv", ["launch_assistant.py"]),
+                ):
+                    self.assertEqual(launch_assistant.main(), 2)
+                terminate.assert_not_called()
+                mark.assert_not_called()
+                bootstrap_main.assert_not_called()
+                with session_factory() as session:
+                    job = session.get(Job, "protected-cleanup")
+                    self.assertEqual((job.status, job.result_summary, job.error_code),
+                                     ("running", "preserve-known-result", "preserve-checkpoint"))
+            finally:
+                engine.dispose()
 
     @patch("launch_assistant.bootstrap.main")
     @patch("launch_assistant.ensure_user_dirs")

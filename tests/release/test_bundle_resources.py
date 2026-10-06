@@ -15,6 +15,16 @@ import pytest
 from setup.release import build_bundle, resources, runtime_artifacts
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TARGET_CLEANUP_RESOURCES = (
+    "assistant/api/target_cleanup.py",
+    "assistant/services/target_cleanup_service.py",
+    "assistant/jobs/handlers/target_cleanup.py",
+    "assistant/database/migrations/versions/0007_target_cleanup.py",
+    "scripts/cleanup_target_plans.py",
+    "scripts/lib/target_invitation_dom.py",
+    "scripts/lib/target_invitation_navigation.py",
+    "scripts/lib/target_plan_cleanup.py",
+)
 
 
 def test_checkout_has_the_complete_registered_resource_contract():
@@ -23,6 +33,19 @@ def test_checkout_has_the_complete_registered_resource_contract():
     assert "assistant/web/static/console/console.html" in selected
     assert "assistant/web/static/auto-approval/index.html" in selected
     assert all(not path.endswith((".pyc", ".pyo")) and "__pycache__" not in path for path in selected)
+
+
+def test_target_cleanup_resources_are_explicitly_registered():
+    assert {
+        "api/target_cleanup", "services/target_cleanup_service", "jobs/handlers/target_cleanup",
+        "database/migrations/versions/0007_target_cleanup",
+    } <= set(resources.ASSISTANT_MODULES)
+    assert "cleanup_target_plans" in resources.SCRIPT_ENTRIES
+    assert {
+        "target_invitation_dom", "target_invitation_navigation", "target_plan_cleanup",
+    } <= set(resources.SCRIPT_LIBRARIES)
+    assert set(TARGET_CLEANUP_RESOURCES) <= set(resources.FIXED_RESOURCES)
+    assert set(TARGET_CLEANUP_RESOURCES) <= set(resources.collect_application_resources(PROJECT_ROOT))
 
 
 def write_resource(root: Path, relative_path: str, content: str = "resource\n") -> Path:
@@ -76,6 +99,10 @@ def test_complete_application_payload_and_empty_python_packages(source_root: Pat
     "config/external-cli.json", "authorization.json", ".git/config", "tests/test_secret.py",
     "plans/secret.md", "node_modules/private/index.js", "scripts/capture_logistics_fixture.py",
     "scripts/recover_auto_approval_state.py", "assistant/__pycache__/app.pyc",
+    "zn_daren/scripts/cleanup_target_invitations.py", "zn_daren/scripts/lib/zclaw_dom.py",
+    "scripts/cleanup_target_invitations.py", "scripts/lib/target_navigation.py",
+    "scripts/lib/zclaw_dom.py", "tests/fixtures/target_cleanup/snapshot.json",
+    "assistant/fixtures/target_cleanup/snapshot.json", "exports/target_cleanup/history_snapshot.json",
 ])
 def test_sensitive_and_development_files_are_not_copied(source_root: Path, tmp_path: Path, excluded_path: str):
     secret_marker = "synthetic-secret-must-not-be-distributed"
@@ -96,6 +123,7 @@ def test_sensitive_and_development_files_are_not_copied(source_root: Path, tmp_p
     "assistant/web/static/console/assets/index.js", "assistant/web/static/console/assets/index.css",
     "assistant/web/static/auto-approval/assets/index.js", "assistant/web/static/auto-approval/assets/index.css",
     "setup/release/runtime_artifacts.py", "setup/install_deps.py", resources.BUSINESS_ATTACHMENT,
+    *TARGET_CLEANUP_RESOURCES,
 ])
 def test_missing_required_resources_fail_before_copy(source_root: Path, tmp_path: Path, required_path: str):
     (source_root / required_path).unlink()

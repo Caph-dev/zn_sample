@@ -13,6 +13,7 @@ import {PreparePage} from './pages/PreparePage';
 import {ReportsPage} from './pages/ReportsPage';
 import {ShipmentDetailPage} from './pages/ShipmentDetailPage';
 import {ShipmentsPage} from './pages/ShipmentsPage';
+import {TargetCleanupPage} from './pages/TargetCleanupPage';
 import type {
   ConsoleBootstrap,
   DiagnosticsData,
@@ -26,6 +27,7 @@ import type {
   ReportsData,
   ShipmentDetailData,
   ShipmentsData,
+  TargetCleanupData,
 } from './types';
 
 const PAGE_META: Record<PageKey, {activePath: string; title: string}> = {
@@ -35,6 +37,7 @@ const PAGE_META: Record<PageKey, {activePath: string; title: string}> = {
   shipment_detail: {activePath: '/shipments', title: '物流详情'},
   followups: {activePath: '/followups', title: '达人跟进'},
   followup_detail: {activePath: '/followups', title: '跟进预览'},
+  plan_cleanup: {activePath: '/plan-cleanup', title: '计划清理'},
   jobs: {activePath: '/jobs', title: '任务'},
   job_detail: {activePath: '/jobs', title: '任务详情'},
   reports: {activePath: '/reports', title: '报表'},
@@ -55,6 +58,8 @@ function renderPage(bootstrap: ConsoleBootstrap) {
       return <FollowupsPage data={bootstrap.data as FollowupsData} />;
     case 'followup_detail':
       return <FollowupDetailPage data={bootstrap.data as FollowupDetailData} />;
+    case 'plan_cleanup':
+      return <TargetCleanupPage data={bootstrap.data as TargetCleanupData} />;
     case 'jobs':
       return <JobsPage data={bootstrap.data as {rows: JobRow[]}} />;
     case 'job_detail':

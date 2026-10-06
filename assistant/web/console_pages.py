@@ -60,6 +60,8 @@ JOB_TYPE_LABELS = {
     "auto_approval_execute": "自动审批 · 执行批准",
     "auto_approval_reconcile": "自动审批 · 补写核对",
     "auto_approval_order_backfill": "自动审批 · 补写订单号",
+    "target_cleanup_preview": "计划清理 · 只读预览",
+    "target_cleanup_execute": "计划清理 · 提交取消操作",
 }
 
 JOB_STATUS_LABELS = {
@@ -719,6 +721,32 @@ def reports_data() -> dict:
     return {
         "report_kinds": [{"value": value, "label": label} for value, label in REPORT_KINDS],
     }
+
+
+def target_cleanup_data(session_factory, batch_id: str = "") -> dict:
+    """Bounded domain data, never readiness/running-store discovery."""
+    from assistant.services import target_cleanup_service as service
+
+    data = {
+        "database_ready": session_factory is not None,
+        "default_months": 4,
+        "prepare_href": "/prepare",
+        "batch_id": batch_id,
+        "batch": None,
+        "recent_batches": {"batches": [], "total": 0, "offset": 0, "limit": 20},
+        "read_error": "",
+    }
+    if session_factory is None:
+        data["read_error"] = "任务数据库尚未就绪；请先查看运行准备。"
+        return data
+    try:
+        data["recent_batches"] = service.list_batches(session_factory, offset=0, limit=20)
+        if batch_id:
+            service.recover_batch(session_factory, batch_id)
+            data["batch"] = service.batch_payload(session_factory, batch_id, offset=0, limit=100)
+    except service.TargetCleanupServiceError as error:
+        data["read_error"] = f"批次读取失败（{error.code}）；保留批次 ID，请只读刷新或查看任务记录。"
+    return data
 
 
 def followup_filter_labels() -> dict:

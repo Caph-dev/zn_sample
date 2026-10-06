@@ -890,6 +890,26 @@ class JobApiTests(JobTestCase):
         )
         self.assertFalse(is_cancellation_requested(job_id))
 
+    def test_cleanup_pending_cancel_prevents_claim_but_running_cancel_is_denied(self) -> None:
+        for job_type in ("target_cleanup_preview", "target_cleanup_execute"):
+            with self.subTest(job_type=job_type):
+                pending_id = self.add_job(job_type=job_type)
+                self.assertTrue(self.client.get(f"/api/jobs/{pending_id}").json()["can_cancel"])
+                self.assertEqual(self.post(f"/api/jobs/{pending_id}/cancel").status_code, 200)
+                self.assertEqual(self.get_job(pending_id).status, "cancelled")
+                self.assertIsNone(worker_loop_once(self.session_factory))
+
+                running_id = self.add_job(job_type=job_type, status="running")
+                self.assertFalse(self.client.get(f"/api/jobs/{running_id}").json()["can_cancel"])
+                response = self.post(f"/api/jobs/{running_id}/cancel")
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["detail"], "job-not-cancellable-while-running")
+                self.assertFalse(is_cancellation_requested(running_id))
+                self.assertEqual(self.get_job(running_id).status, "running")
+                with self.session_factory() as session:
+                    session.get(Job, running_id).status = "succeeded"
+                    session.commit()
+
     def test_running_tracking_job_can_be_cancelled_at_row_checkpoints(self) -> None:
         """物流任务运行中可取消：写哨兵文件，子进程处理完当前行后停。"""
         job_id = self.add_job(job_type="operator_tracking", status="running")

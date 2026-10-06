@@ -39,6 +39,7 @@ PROTECTED_JOB_TYPES = frozenset(
         "auto_approval_execute",
         "auto_approval_reconcile",
         "auto_approval_order_backfill",
+        "target_cleanup_execute",
     }
 )
 STOP_WAIT_SECONDS = 5.0

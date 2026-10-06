@@ -24,6 +24,8 @@
     auto_approval_execute: "自动审批 · 执行批准",
     auto_approval_reconcile: "自动审批 · 补写核对",
     auto_approval_order_backfill: "自动审批 · 补写订单号",
+    target_cleanup_preview: "计划清理 · 只读预览",
+    target_cleanup_execute: "计划清理 · 提交取消操作",
   };
 
   const operatorJobTypes = new Set([
@@ -226,6 +228,23 @@
       return [];
     }
 
+    if (job.job_type === "target_cleanup_preview" || job.job_type === "target_cleanup_execute") {
+      if (!result.counts || typeof result.counts !== "object") {
+        return [["结果", "任务汇总缺少逐项计数，请查看领域批次与报告。"]];
+      }
+      const counts = result.counts;
+      if (job.job_type === "target_cleanup_preview") {
+        const candidates = Object.values(counts).reduce((total, count) => total + Number(count || 0), 0);
+        return [["只读候选", `${formatNumber(candidates)} 条`], ["说明", "预览不执行平台取消"]];
+      }
+      return [
+        ["取消操作已提交", `${formatNumber(counts.submitted)} 条（不是平台最终取消确认）`],
+        ["跳过 / 失败", `${formatNumber(counts.skipped)} / ${formatNumber(counts.failed)} 条`],
+        ["不确定 / 未处理", `${formatNumber(counts.uncertain)} / ${formatNumber(counts.not_processed)} 条`],
+        ["执行阶段", result.execute_status || "请查看领域批次"],
+      ];
+    }
+
     if (job.job_type === "daily_refresh") {
       const shipment = result.shipment || {};
       const followup = result.followup || {};
@@ -320,6 +339,33 @@
       job.status === "succeeded" ? "运行结果" : getStatusLabel(job.status),
     );
     target.append(heading);
+
+    if (job.job_type === "target_cleanup_preview" || job.job_type === "target_cleanup_execute") {
+      const result = parseResultSummary(job);
+      const resultList = createElement("dl", "result-list");
+      for (const [label, value] of getResultEntries(job, result)) {
+        appendMetadataRow(resultList, label, value);
+      }
+      target.append(resultList);
+      if (job.status !== "succeeded") {
+        target.append(createElement("p", "task-error",
+          job.error_summary || "任务未完整结束；已知结果仍保留，请核对批次，不要自动重试。"));
+      }
+      target.append(createElement("p", "text-secondary",
+        "取消操作已提交不等于平台最终确认；候选、逐项结果和最新 CSV 以领域批次为准。"));
+      const actionList = createElement("p", "task-actions");
+      const detailLink = createElement("a", "button-link", "查看任务详情");
+      detailLink.href = `/jobs/${encodeURIComponent(job.id)}`;
+      const batchLink = createElement("a", "button-link button-link--secondary", "查看批次与报告");
+      const identifier = result?.batch_id || [job.progress_message, job.error_summary].filter(Boolean).join(" ")
+        .match(/\/plan-cleanup\?batch_id=([0-9a-f-]{36})/)?.[1];
+      batchLink.href = identifier ? `/plan-cleanup?batch_id=${encodeURIComponent(identifier)}` : "/plan-cleanup";
+      actionList.append(detailLink, batchLink);
+      target.append(actionList);
+      if (job.error_code) target.append(createElement("small", "text-secondary", `参考信息：${job.error_code}`));
+      if (job.log_path) target.append(createElement("small", "text-secondary", `任务日志：${job.log_path}`));
+      return;
+    }
 
     if (job.status === "cancelled") {
       // 检查点取消不是失败：已经处理的那些行是真的处理完了，要如实显示。
@@ -747,6 +793,7 @@
         throw new Error(errorMessage);
       }
       const payload = await response.json();
+      document.dispatchEvent(new CustomEvent("assistant:job-created", {detail: {payload, form}}));
       const monitor = startMonitor(payload.job_id, {
         useGlobalPanel: true,
       });
@@ -840,6 +887,9 @@
   // 表单走事件委托：React 页面在 DOMContentLoaded 之后才挂载，
   // 逐节点绑定会漏掉这些表单。
   document.addEventListener("submit", (event) => {
+    if (event.defaultPrevented) {
+      return;
+    }
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) {
       return;

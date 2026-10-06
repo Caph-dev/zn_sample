@@ -17,6 +17,7 @@ from assistant.api.followups import router as followups_api_router
 from assistant.api.shipments import router as shipments_api_router
 from assistant.api.stores import running_store_summary
 from assistant.api.auto_approval import router as auto_approval_api_router
+from assistant.api.target_cleanup import router as target_cleanup_api_router
 from assistant.database.models import FollowupTask, Job, SampleCase, Shipment, Store
 from assistant.domain.followup_labels import (
     FOLLOWUP_LANGUAGE_LABELS,
@@ -39,6 +40,7 @@ router.include_router(exports_api_router)
 router.include_router(followups_api_router)
 router.include_router(shipments_api_router)
 router.include_router(auto_approval_api_router)
+router.include_router(target_cleanup_api_router)
 TEMPLATE_DIRECTORY = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATE_DIRECTORY)
 
@@ -201,6 +203,15 @@ def diagnostics(request: Request) -> HTMLResponse:
         store_summary=store_summary,
     )
     return _console_response(request, page="diagnostics", page_title="本机诊断", data=data)
+
+
+@router.get("/plan-cleanup", response_class=HTMLResponse)
+def target_cleanup_page(request: Request, batch_id: str = "") -> HTMLResponse:
+    """Local batch recovery only: opening this page never inspects a store."""
+    data = console_pages.target_cleanup_data(
+        getattr(request.app.state, "session_factory", None), batch_id,
+    )
+    return _console_response(request, page="plan_cleanup", page_title="计划清理", data=data)
 
 
 @router.get("/jobs", response_class=HTMLResponse)

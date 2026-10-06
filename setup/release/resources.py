@@ -18,6 +18,7 @@ ASSISTANT_MODULES = (
     "__init__", "app", "bootstrap", "lifecycle", "paths", "settings",
     "api/__init__", "api/auto_approval", "api/dashboard", "api/exports",
     "api/followups", "api/health", "api/jobs", "api/shipments", "api/stores",
+    "api/target_cleanup",
     "database/__init__", "database/engine", "database/models", "database/types",
     "database/migrations/env",
     "database/migrations/versions/0001_initial",
@@ -26,6 +27,7 @@ ASSISTANT_MODULES = (
     "database/migrations/versions/0004_followup_status_model",
     "database/migrations/versions/0005_auto_approval",
     "database/migrations/versions/0006_followup_previewed_at",
+    "database/migrations/versions/0007_target_cleanup",
     "domain/__init__", "domain/content_thanks", "domain/followup_labels",
     "domain/followup_stage", "domain/message_templates", "domain/platform_status",
     "domain/policies", "domain/shipment_status", "domain/sku_images", "domain/timeutil",
@@ -35,17 +37,19 @@ ASSISTANT_MODULES = (
     "jobs/handlers/daily_refresh", "jobs/handlers/environment_check",
     "jobs/handlers/followup_generate", "jobs/handlers/followup_send",
     "jobs/handlers/operator", "jobs/handlers/report_export", "jobs/handlers/shipment_sync",
+    "jobs/handlers/target_cleanup",
     "security/__init__", "security/csrf", "security/secret_redaction",
     "services/auto_approval_reconciliation", "services/auto_approval_recovery",
     "services/auto_approval_service", "services/content_thanks_service",
     "services/creator_enrich_service", "services/export_service",
     "services/followup_service", "services/local_state_import",
     "services/order_backfill", "services/page_lock", "services/release_lifecycle",
-    "services/shipment_service", "services/store_service",
+    "services/shipment_service", "services/store_service", "services/target_cleanup_service",
     "web/__init__", "web/console_pages", "web/routes",
 )
 SCRIPT_ENTRIES = (
-    "auto_approval", "check_creator_content_review", "launch_assistant", "launch_sample",
+    "auto_approval", "check_creator_content_review", "cleanup_target_plans",
+    "launch_assistant", "launch_sample",
     "open_sample_store", "release_launcher", "screen_sample_requests",
     "send_followup_message", "send_sample_intro", "sync_shipped_tracking",
 )
@@ -58,7 +62,8 @@ SCRIPT_LIBRARIES = (
     "operation_cancel", "operator_launch", "order_api", "order_backfill", "order_dom",
     "page_api", "parse_metrics", "run_summary", "sample_api", "sample_data_source",
     "sample_dom", "sample_navigation", "sample_write_api", "shipped_dom",
-    "store_launcher", "sync_errors", "tiktok_creator_videos", "time_budget",
+    "store_launcher", "sync_errors", "target_invitation_dom",
+    "target_invitation_navigation", "target_plan_cleanup", "tiktok_creator_videos", "time_budget",
     "tracking_parse", "zclaw", "zclaw_cli",
 )
 BUSINESS_ATTACHMENT = "\u6837\u54c1\u7533\u8bf7\u7b5b\u67e5sop/\u56fe\u7247\u548c\u9644\u4ef6/2-\u67e5\u770b\u5230\u8d27+\u8fbe\u4eba\u8ddf\u8fdb-b05.png"

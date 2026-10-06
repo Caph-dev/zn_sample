@@ -5,7 +5,7 @@
 
 按任务找现行规范、源码与测试见 [仓库任务导航](./docs/navigation.md)。历史归档不作现行操作依据，本地计划不覆盖现行契约；计划引用须带目录名，不用裸编号。
 
-紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。勿混用 `zn_daren` 的 `--execute` 取消逻辑。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
+紫鸟启停 / GUI vs WEBDRIVER / `ziniao-cli`：**先读** [`../zn_daren/AGENTS.md`](../zn_daren/AGENTS.md)。本仓默认 **GUI + 已 open 的店**。样品链勿混用 `zn_daren` 的 `--execute` 取消逻辑；定向邀请取消只走本仓独立「计划清理」链，不运行兄弟仓代码。禁止 `ziniao-cli page extract --mode running`（可能 `runtime.reopen`）。
 
 不要改系统或启动器 `PATH`。Windows 上 `ziniao-cli.cmd` 只解析成 `node` + `run.js` 的**绝对 POSIX 路径**（`C:/...`），子进程固定 UTF-8。日志用 `logging`，入口 `configure_logging`，库代码 `getLogger`。
 
@@ -21,8 +21,9 @@
    **仅** `--execute --yes` 可对筛查通过行点「同意」（永不拒绝）或发第 7 / 10 步私信。
    写飞书另加 `--write-feishu`。测试默认不写飞书。  
    `--execute-limit` 默认 1，不得新参数绕过。批准前写 `*_pre_execute.*`。平台同意与已发私信不可脚本撤销。
-   唯一隔离例外：「自动批准」页的自定义规则链走自有任务链（见下文「自动审批子页面」），
+   样品批准的隔离例外：「自动批准」页的自定义规则链走自有任务链（见下文「自动审批子页面」），
    仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
+   独立取消例外：「计划清理」只处理服务器生成的 2/4 自然月定向邀请快照，网页确认 `y` 后仍须 `--execute --yes`。确认的是该快照全部候选，不提供任意范围/限额；这不改变样品批准和私信的默认限额 1。取消不可脚本撤销，测试不执行真实取消。
    达人跟进详情页的「发送这条跟进私信 / 发送感谢私信」是同一个门闩的网页入口：固定单条 `task_id`、每次最多 1 条、任务运行中不可取消，底层仍走 `send_followup_message.py --execute --yes` 与原子认领。
    同页「预演跟进私信 / 预演感谢私信」不是写操作（只打开会话核对身份，不发送），但同样占用店铺页面：
    与 0/1/2/3 及发送任务共用同一互斥（`assistant/services/page_lock.py`），有页面任务在跑时返回 409 `store-busy`，不得并发点击。
@@ -61,7 +62,7 @@
 
 | 能力 | 实现 | 不可误解为 |
 |---|---|---|
-| 本地网页操作台 | 只读日常更新；网页只保留 0（运行准备）、只出名单（只读筛查）、物流写回、跟进动作（含跟进详情页单条发送）与自动批准页的「订单号补写」，复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
+| 本地网页操作台 | 只读日常更新；网页保留 0（运行准备）、只出名单（只读筛查）、物流写回、跟进动作（含跟进详情页单条发送）、自动批准页的「订单号补写」与独立「计划清理」，复用 `operator_launch` 或固定 handler；正式筛查-批准只走脚本 | 不接受任意命令/参数；网页写任务仍须明确输入 `y`，物流写回在 16:00 前另须 `FORCE`；最终仍只走既有 `--execute --yes` 门闩 |
 | 进待审核 | 开店 + `--from-seller-home` | 不代办登录，不擅自切店 |
 | 初筛+复筛+内容审查 | `--with-detail --require-detail`；第 4 步销售数据通过后执行第 5 步内容审查 | 不能把仅列表结果或没有内容通过证据的结果当正式通过名单 |
 | 批准 | `--execute --yes`；默认已捕获的窄 API | 不能猜 endpoint、扩大接口、绕过门闩；`shadow` 禁止配合 `--execute`；API 路径尚未用第二条真实申请重复验收 |
@@ -77,16 +78,32 @@
 
 ## 操作台页面（Astryx React 壳）
 
-导航固定八项：总览 / 运行准备 / 自动批准 / 达人跟进 / 物流 / 任务 / 报表 / 诊断（含各自详情页）。正文由 React + Astryx 渲染，源码 `frontend/src/console/`，构建 `npm run build:console`（或 `npm run build:web` 同时构建自动批准），产物 `assistant/web/static/console/` 被 gitignore。
+导航固定九项：总览 / 运行准备 / 自动批准 / 达人跟进 / 计划清理 / 物流 / 任务 / 报表 / 诊断（含各自详情页）。共用导航同时覆盖独立自动批准页。正文由 React + Astryx 渲染，源码 `frontend/src/console/`，构建 `npm run build:console`（或 `npm run build:web` 同时构建自动批准），产物 `assistant/web/static/console/` 被 gitignore。
 
 - 服务端只渲染 `assistant/web/templates/console.html` 并注入 bootstrap JSON：页面数据在 `assistant/web/console_pages.py`，契约同步 `frontend/src/console/types.ts`。不要新增 Jinja 页面模板或手写页面 CSS。
 - **入口按页归属**（`operator_groups(page)`）：`/prepare` 打开店铺；`/auto-approval` 顶部只出名单（只读筛查）；`/followups` 物流同步 + 物流写回（16:00 门）+ 补齐资料 + 生成待办 + 预演感谢私信。**正式 SOP 的「筛查-批准-写飞书-私信」已从网页移除，只走脚本 1/2**；`/api/jobs/operator/pipeline` 端点保留兼容，不在任何页面暴露。
 - `assistant/web/static/app.js` 仍负责任务面板、确认弹窗与表单提交：表单是 document 级事件委托（`data-job-form` / `data-job-cancel`），React 后挂载也能绑定；任务详情页挂载后派发 `assistant:monitor-job` 启动监控；准备状态由总览 / 运行准备页轮询，自动批准页只显示状态条 + 去准备页链接（不重复探活）。
+- 「计划清理」只读恢复批次，不探活、不自动扫描。表单成功由 `app.js` 派发 `assistant:job-created`（`payload` + `form`）；页面只读取回执/更新 URL，不再自行 POST 或实现第二个确认弹窗。捕获阶段阻止的提交必须由 document 委托尊重 `defaultPrevented`。
 - 任务面板与确认弹窗抽到 `_task_panel.html`，`console.html` 与 `auto_approval.html` 共用；两个壳都加载 `app.js` 与 `console-shell.css`。
 - 静态资源按产物 mtime 加 `?v=`（`_static_version()`），避免浏览器缓存旧 JS/CSS。
 - **主题 CSS 必须在组件产物之后加载**（`geist-theme.css` 放 `console/assets/index.css` / `auto-approval/assets/index.css` 之后）。产物里默认主题在 `@layer astryx-base`，主题文件在 `@layer astryx-theme`；layer 顺序按首次出现决定，主题先加载会被默认值压住（表现为 Meta 蓝 `#0064E0` + 系统字体，而不是 Geist 蓝 `#0070f3` + Geist 字体）。主题主色是蓝，勿改回黑。
 - `assistant/web/static/console-shell.css` 只保留 app.js 动态生成 DOM 与任务面板 / 确认弹窗所需类，禁止裸元素选择器，避免污染 Astryx 组件。
 - 页面级测试改断言 bootstrap JSON（`tests/assistant/console_payload.py`），不再匹配已不渲染的 HTML。
+
+---
+
+## 计划清理（独立定向邀请取消链）
+
+`/plan-cleanup` 复用 console 壳。实现：`assistant/api/target_cleanup.py`、`assistant/services/target_cleanup_service.py`、固定 handler `assistant/jobs/handlers/target_cleanup.py`、入口 `scripts/cleanup_target_plans.py` 与 `lib/target_plan_cleanup.py` / `target_invitation_dom.py` / `target_invitation_navigation.py`。此链不批准样品、不写飞书、不发私信；源仓保留为旧工具，禁止与工作台并跑，现有锁不承诺跨项目互斥。
+
+- **固定业务**：只接受整数 2 或 4；按上次修改日 `< 本机运行日往前 N 个自然月`，排除截止日，月底/闰年夹到有效日期。忽略已接受/已推广人数，页面及确认均展示非零人数候选数量。确认后处理固定快照全部候选，不新增自由勾选、任意日期、店铺覆盖或执行限额。
+- **身份与导航**：GUI + ZClaw，必须恰好一家 running，并绑定紫鸟 storeId 与平台 shop_id/region；无默认店回落、不自动开/关/重开/切店。沿用已知定向合作路径和分页契约（末页向前、100/页、最多 50 页、间隔 1.2 秒）；每次取消后按「进行中 → 错误恢复 → 100/页 → 末页」恢复，结束留在定向合作，不擅自回样品页。
+- **完整性与时效**：首端、日期边界或真实空态须有证据；上限、翻页失败/停滞、末页未确认、乱码/未知日期均 incomplete，不为有名单而放行。冻结运行日、UTC、时区/偏移与 cutoff；完成后 30 分钟有效，执行开始仍须同一本机日历日，长扫描不消耗这 30 分钟。GET 只读本地证据，不探店；页面 `can_execute` 不是省略执行时复核的许可。
+- **服务器所有权**：两表 `TargetCleanupBatch` / `TargetCleanupItem` 与迁移 `0007_target_cleanup`；候选 JSON 严格 schema + 数据库 SHA-256 + 逐行依据，CSV 从不作为执行输入。POST 只接受固定 FormData 字段，拒绝未知/重复/文件字段与 query 参数；确认只认 `.strip().lower() == 'y'`，不认 yes。脚本必须绑定服务器 running Job 和一次性批次，执行双开关缺一先退出 2。
+- **领取与保护**：批次、Job、请求指纹在 `admission_guard` + `BEGIN IMMEDIATE` 中提交；同键同请求返回原任务，同键异月份/批次拒绝。`target_cleanup_preview/execute` 均占店铺页面，忙碌检查先于探店；execute 登记写类型及源码重启保护。两者 running 均不可停止，pending 仍按 `can_request_cancellation()` 取消；等待人确认时不持有页面任务。
+- **写前/未知保护**：备份及初始 JSON/CSV 检查点失败不点；每行先复核固定 ID 与原修改日，再持久化 attempting，才调用一次取消。定位恢复与写调用分开，点击后断联/缺确认/仍可见/恢复失败标 uncertain，立即停止剩余行。历史同店同 ID 的 submitted/uncertain/attempting 阻断新执行；崩溃尝试转人工，不因换预览、换键或重启而重试。只展示“取消操作已提交”，不是“平台已确认取消”。
+- **工件恢复**：全部写用户目录 `exports/target_cleanup/`，文件名含 batch_id；候选/快照不变，结果逐行原子更新。中断后 DB 保留结论，派生结果 CSV 在提交恢复后重建；重建失败不提供旧结果链接，原 JSON 检查点保留。仅在未消费、无 Job/尝试/备份/结果证据且旧信封绑定可验证时恢复孤儿执行信封，其他情况保持人工核对，不能删工件绕过去重。
+- **验收边界**：现行维护主线是 zn_sample，发布资源显式登记新模块；不运行兄弟仓 import/脚本或复制配置/历史。实现验收只做离线合成测试；真实只读预览、整份快照取消与 Windows 原生验收均须另行安排/授权，不因测试通过执行平台写入或重启正在工作的操作台。
 
 ---
 

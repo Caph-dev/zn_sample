@@ -26,6 +26,9 @@ from assistant.jobs.registry import REGISTERED_JOB_TYPES, WRITE_JOB_TYPES  # noq
 from assistant.jobs.worker import _claim_next_job  # noqa: E402
 from assistant.services import release_lifecycle as release  # noqa: E402
 from scripts import release_launcher as launcher  # noqa: E402
+from tests.assistant.test_target_cleanup_api import (  # noqa: E402
+    cleanup_environment, finish_synthetic_preview, write_synthetic_results,
+)
 
 WAIT_SECONDS = 5
 INSTANCE_ID = "a" * 32
@@ -483,6 +486,104 @@ def test_failed_subprocess_spawn_removes_marker(isolated_home, monkeypatch):
     assert not registry.has_active_children()
     assert list(registry.directory.glob("*.json")) == []
     assert subprocess.Popen is FailedProcess
+
+
+def test_registered_cleanup_execution_protects_source_restart_and_release_child_lifetime(cleanup_environment, monkeypatch):
+    import launch_assistant
+    from assistant.jobs import worker as job_worker
+    from assistant.jobs.handlers.target_cleanup import run_target_cleanup_job
+    from assistant.jobs.registry import get_handler
+    from assistant.services import target_cleanup_service as cleanup_service
+
+    environment = cleanup_environment
+    session_factory = environment.session_factory
+    preview = cleanup_service.create_preview(session_factory, 4, "preview")
+    finish_synthetic_preview(environment, preview)
+    execution = cleanup_service.create_execution(session_factory, preview["batch_id"], "y", "execution")
+    assert get_handler("target_cleanup_execute") is run_target_cleanup_job
+    coordinator = release.LifecycleCoordinator()
+    session_factory.release_coordinator = coordinator
+    registry = release.SubprocessRegistry(environment.root / "runtime" / "children")
+    registry.coordinator = coordinator
+    coordinator.subprocess_registry = registry
+    child_entered = threading.Event()
+    allow_exit = threading.Event()
+    children = []
+
+    class ControlledCleanupProcess:
+        def __init__(self, arguments, **options):
+            self.pid = 23456
+            self.returncode = None
+            self.args = arguments
+            self.arguments = arguments
+            self.options = options
+            self.kill = Mock(side_effect=forbidden_boundary)
+            self.terminate = Mock(side_effect=forbidden_boundary)
+            children.append(self)
+            cleanup_service.begin_script(session_factory, execution["batch_id"], execution["job_id"], "execute")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exception):
+            self.wait()
+
+        def communicate(self, input=None, timeout=None):
+            child_entered.set()
+            assert allow_exit.wait(WAIT_SECONDS), "Cleanup child gate was not released"
+            write_synthetic_results(environment, execution["batch_id"], ("submitted", "submitted"))
+            self.returncode = 0
+            return None, None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            assert allow_exit.wait(WAIT_SECONDS)
+            return self.returncode
+
+    monkeypatch.setattr(subprocess, "Popen", ControlledCleanupProcess)
+    monkeypatch.setattr(launch_assistant, "database_path", lambda: environment.root / "assistant.sqlite3")
+    monkeypatch.setattr(launch_assistant, "ensure_user_dirs", lambda: environment.root)
+    monkeypatch.setattr(launch_assistant, "_read_runtime_state", lambda: STATE)
+    monkeypatch.setattr(launch_assistant, "_existing_instance", lambda state: (STATE["pid"], STATE["port"]))
+    terminate = Mock(side_effect=forbidden_boundary)
+    mark_interrupted = Mock(side_effect=forbidden_boundary)
+    startup = Mock(side_effect=forbidden_boundary)
+    monkeypatch.setattr(launch_assistant, "_terminate_process", terminate)
+    monkeypatch.setattr(launch_assistant, "_mark_interrupted_running_jobs", mark_interrupted)
+    monkeypatch.setattr(launch_assistant.bootstrap, "main", startup)
+    monkeypatch.setattr(sys, "argv", ["launch_assistant.py"])
+    with registry.track():
+        worker_thread = ThreadResult("cleanup-worker", lambda: job_worker.worker_loop_once(session_factory))
+        try:
+            assert child_entered.wait(WAIT_SECONDS)
+            assert coordinator.active_operations == 1
+            assert registry.has_active_children()
+            assert coordinator.request_idle_stop(session_factory) == "service-busy"
+            assert coordinator.stopping is False
+            assert launch_assistant.main() == 2
+            terminate.assert_not_called()
+            mark_interrupted.assert_not_called()
+            startup.assert_not_called()
+            with pytest.raises(release.ReleaseLifecycleError, match="^residual-subprocess-requires-review$"):
+                release.check_residual_jobs(environment.root / "assistant.sqlite3")
+            with session_factory() as session:
+                assert session.get(Job, execution["job_id"]).status == "running"
+            assert children[0].arguments[-2:] == ["--execute", "--yes"]
+            assert children[0].options["stdin"] == subprocess.DEVNULL
+        finally:
+            allow_exit.set()
+            assert worker_thread.join() == execution["job_id"]
+    assert not registry.has_active_children()
+    assert list(registry.directory.glob("*.json")) == []
+    children[0].kill.assert_not_called()
+    children[0].terminate.assert_not_called()
+    with session_factory() as session:
+        completed_job = session.get(Job, execution["job_id"])
+        assert completed_job.status == "succeeded", (completed_job.error_code, completed_job.error_summary)
+    release.check_residual_jobs(environment.root / "assistant.sqlite3")
+    assert coordinator.request_idle_stop(session_factory) == "accepted"
 
 
 def test_uncertain_spawn_keeps_marker_and_blocks_stop(database, isolated_home, monkeypatch):
