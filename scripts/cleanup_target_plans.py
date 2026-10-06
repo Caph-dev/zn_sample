@@ -59,10 +59,17 @@ def _run_claimed_batch(session_factory, request: dict, *, execute: bool, yes: bo
     mode = request["mode"]
     frozen = request["frozen"]
     directory = service.cleanup_directory()
-    navigation = navigate_from_seller_home_to_ongoing(frozen["store_id"])
-    destination = navigation.get("destination") or {}
-    if destination.get("shop_id") != frozen["shop_id"]:
-        raise TargetCleanupError("shop-changed")
+    try:
+        navigation = navigate_from_seller_home_to_ongoing(frozen["store_id"])
+        destination = navigation.get("destination") or {}
+        if destination.get("shop_id") != frozen["shop_id"]:
+            raise TargetCleanupError("shop-changed")
+    except Exception:
+        # Only this live exception path knows execute_snapshot has not begun.
+        # A crash or an exception after that boundary retains unknown-write recovery.
+        if mode == "execute":
+            service.finish_prewrite_navigation_failure(session_factory, request, execute=execute, yes=yes)
+        raise
     if mode == "preview":
         scan = scan_older_invitations(frozen["store_id"], cutoff=date.fromisoformat(frozen["cutoff"]))
         snapshot = create_snapshot(frozen, scan)

@@ -634,23 +634,46 @@ class ScanCompletenessTests(OfflineTestCase):
 
 
 class RecoveryTests(OfflineTestCase):
+    def setUp(self):
+        super().setUp()
+        from lib import target_invitation_navigation as navigation
+        self.context.enter_context(patch.object(navigation, "wait_for_target_shell", return_value={"href": TARGET_HREF}))
+        self.context.enter_context(patch.object(navigation, "wait_for_target_list_ready", return_value={"ready": True, "href": TARGET_HREF}))
+        self.raw_execute = self.execute
+
+        def transport(store_id, script, **options):
+            normalized = script.replace(
+                "const expectedContext = " + json.dumps(invitations._shop_context(TARGET_HREF)) + ";",
+                "const expectedContext = null;",
+            )
+            response = self.raw_execute(store_id, normalized, **options)
+            if "error" in response:
+                response = {"can_retry": False, **response}
+            if normalized == invitations.CLICK_LIST_RETRY_JS and response.get("ok"):
+                response = {"clicked": True, **response}
+            return {"href": TARGET_HREF, **response}
+
+        self.context.enter_context(patch.object(invitations, "zclaw_exec", transport))
+
     def test_recovery_order_is_ongoing_retry_100_then_last_page(self) -> None:
         self.execute.side_effect = [
             {"ok": True, "clicked": True}, {"ok": True, "already": True},
             {"ok": True, "error": True, "can_retry": True}, {"ok": True}, {"ok": True, "error": False},
             {"ok": True, "opened": True, "href": TARGET_HREF}, {"ok": True, "ready": True},
-            {"ok": True, "set": True}, {"ok": True, "ready": True, "current": "100/页"}, {"ok": True},
+            {"ok": True, "set": True}, {"ok": True, "ready": True, "current": "100/页"},
+            {"ok": True, "via": "last-btn"}, make_page(),
         ]
         result = invitations.restore_ongoing_list("store-two")
         self.assertTrue(result["nav"]["ok"])
         self.assertEqual([arguments.args[1] for arguments in self.execute.call_args_list], [
-            invitations.ENSURE_ONGOING_TAB_JS, invitations.ENSURE_ONGOING_TAB_JS,
+            invitations.ENSURE_ONGOING_TAB_JS, invitations.INSPECT_ONGOING_TAB_JS,
             invitations.INSPECT_LIST_ERROR_JS, invitations.CLICK_LIST_RETRY_JS, invitations.INSPECT_LIST_ERROR_JS,
             invitations.SET_PAGE_SIZE_JS,
             invitations.INSPECT_PAGE_SIZE_OPTION_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
             invitations.CLICK_PAGE_SIZE_OPTION_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
             invitations.INSPECT_PAGE_SIZE_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
             invitations.GOTO_LAST_PAGE_JS,
+            invitations._guard_recovery_script(invitations.EXTRACT_JS),
         ])
         self.assertIn("const want = 100;", invitations.SET_PAGE_SIZE_JS)
 
@@ -668,16 +691,17 @@ class RecoveryTests(OfflineTestCase):
         self.assertEqual(sum(arguments.args[1] == invitations.SET_PAGE_SIZE_JS
                              for arguments in self.execute.call_args_list), 1)
 
-    def test_last_page_navigation_has_four_bounded_attempts(self) -> None:
+    def test_last_page_navigation_rejects_receipt_without_replaying_action(self) -> None:
         self.execute.side_effect = [{"ok": True, "already": True}, {"ok": True, "error": False},
-                                    {"ok": True, "already": True}, *[{"ok": False}] * 4, make_page()]
-        self.assertFalse(invitations.restore_ongoing_list("store-two")["nav"]["ok"])
+                                    {"ok": True, "already": True}, {"ok": False}]
+        with self.assertRaisesRegex(RuntimeError, "rejected"):
+            invitations.restore_ongoing_list("store-two")
         self.assertEqual(sum(arguments.args[1] == invitations.GOTO_LAST_PAGE_JS
-                             for arguments in self.execute.call_args_list), 4)
+                             for arguments in self.execute.call_args_list), 1)
 
     def test_verified_empty_state_can_recover_without_a_page_size_widget(self) -> None:
         self.execute.side_effect = [{"ok": True, "already": True}, {"ok": True, "error": False},
-                                    {"ok": False},
+                                    {"ok": False, "reason": "no-pagesize-control"},
                                     make_page(rows=[], has_empty_state=True, page="", page_size="")]
         result = invitations.restore_ongoing_list("store-two")
         self.assertEqual(result["nav"], {"ok": True, "empty": True})
@@ -691,6 +715,86 @@ class RecoveryTests(OfflineTestCase):
             invitations.recover_list_if_error("store-two")
         self.assertEqual(sum(arguments.args[1] == invitations.CLICK_LIST_RETRY_JS
                              for arguments in self.execute.call_args_list), 3)
+
+
+RECOVERY_IDENTITY_HARNESS_JS = r"""
+const scripts = JSON.parse(process.argv[1]);
+const settings = JSON.parse(process.argv[2]);
+globalThis.location = {href:settings.href};
+let clicks = 0, queries = 0;
+const element = text => ({innerText:text, click:() => clicks++,
+  classList:{contains:() => Boolean(settings.ongoing)}, getAttribute:() => null,
+  getBoundingClientRect:() => ({width:100, height:20})});
+globalThis.document = {title:settings.title || '', readyState:'complete',
+  body:{innerText:settings.error ? 'Something went wrong' : 'Ongoing'},
+  querySelector:selector => {
+    queries++;
+    if (selector.includes('select-view-value')) return element('50/页');
+    return settings.error && selector.includes('pagination-item-next') ? null : element('1');
+  },
+  querySelectorAll:selector => {
+    queries++;
+    if (selector === 'table tbody tr') return [];
+    if (selector.includes('role=tab')) return settings.noTab ? [] : [element('Ongoing')];
+    if (selector.includes('role=option')) return [element('100/页')];
+    if (selector.includes('role=button')) return [element('Retry')];
+    return [];
+  }
+};
+const responses = scripts.map(script => JSON.parse(eval(script)));
+process.stdout.write(JSON.stringify({responses, clicks, queries}));
+"""
+
+
+class RecoveryJavascriptTests(unittest.TestCase):
+    def execute_scripts(self, scripts, **settings):
+        node_path = shutil.which("node")
+        self.assertIsNotNone(node_path, "Node is required for production-JS identity tests")
+        completed = subprocess.run(
+            [node_path, "-e", RECOVERY_IDENTITY_HARNESS_JS, json.dumps(scripts),
+             json.dumps({"href": TARGET_HREF, **settings})],
+            shell=False, capture_output=True, text=True, encoding="utf-8", timeout=10, check=True,
+        )
+        return json.loads(completed.stdout)
+
+    def test_every_recovery_side_effect_checks_identity_inside_its_script(self):
+        context = invitations._shop_context(TARGET_HREF)
+        scripts = [invitations._bind_recovery_context(source, context) for source in (
+            invitations.ENSURE_ONGOING_TAB_JS, invitations.CLICK_LIST_RETRY_JS,
+            invitations.SET_PAGE_SIZE_JS, invitations.GOTO_LAST_PAGE_JS,
+            invitations.CLICK_PAGE_SIZE_OPTION_JS_TMPL.replace("%EXPECTED_HREF%", json.dumps(TARGET_HREF)),
+        )]
+        valid = self.execute_scripts(scripts)
+        self.assertTrue(all(response["ok"] for response in valid["responses"]))
+        self.assertEqual(valid["clicks"], 5)
+        bad_hrefs = (
+            TARGET_HREF.replace("shop-two", "changed"), TARGET_HREF.replace("shop_region=US", "shop_region=GB"),
+            TARGET_HREF + "&shop_id=other", TARGET_HREF + "&shop_id=", TARGET_HREF + "&shop_region=",
+            TARGET_HREF.replace("shop_id=shop-two", "shop_id="), TARGET_HREF.replace("shop_region=US", "shop_region="),
+            TARGET_HREF.replace("https:", "http:"), TARGET_HREF.replace("affiliate.tiktokshopglobalselling.com", "example.invalid"),
+            TARGET_HREF.replace("/affiliate/collaboration/target-invitation", "/unknown/target-invitation"),
+            "https://affiliate.tiktokshopglobalselling.com/login", "about:blank",
+        )
+        for href in bad_hrefs:
+            with self.subTest(href=href):
+                result = self.execute_scripts(scripts, href=href)
+                self.assertTrue(all(response.get("reason") == "list-context-changed" for response in result["responses"]))
+                self.assertEqual(result["clicks"], 0)
+                self.assertEqual(result["queries"], 0)
+        login_overlay = self.execute_scripts(scripts, title="Log in to TikTok Shop")
+        self.assertEqual(login_overlay["clicks"], 0)
+        self.assertTrue(all(not response["ok"] for response in login_overlay["responses"]))
+
+    def test_recoverable_shell_never_claims_error_list_is_ready(self):
+        from lib import target_invitation_navigation as navigation
+        scripts = [navigation.INSPECT_TARGET_SHELL_JS, navigation.INSPECT_TARGET_LIST_READINESS_JS]
+        result = self.execute_scripts(scripts, error=True)
+        self.assertTrue(result["responses"][0]["shell_ready"])
+        self.assertFalse(result["responses"][1]["ready"])
+        self.assertEqual(result["clicks"], 0)
+        missing_tab = self.execute_scripts(scripts, noTab=True)
+        self.assertFalse(missing_tab["responses"][0]["shell_ready"])
+        self.assertFalse(missing_tab["responses"][1]["ready"])
 
 
 class FixedTargetTests(OfflineTestCase):
@@ -827,7 +931,7 @@ class CancellationEvidenceTests(OfflineTestCase):
         self.assertFalse(result["confirmed"])
         self.assertIsNone(result["gone"])
         self.extract.assert_called_once_with("store-two")
-        self.restore.assert_called_once_with("store-two")
+        self.restore.assert_called_once_with("store-two", expected_context=invitations._shop_context(TARGET_HREF))
         self.assertFalse(self.wait.call_args.kwargs["required"])
         self.assertEqual(self.execute.call_count, 3)
         for arguments in self.execute.call_args_list:

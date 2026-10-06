@@ -14,7 +14,10 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-from .target_invitation_dom import ensure_ongoing_tab
+from .target_invitation_dom import (
+    ONGOING_TAB_LOOKUP_JS, _guard_recovery_script,
+    _is_transient_read_error, _read_recovery_state, ensure_ongoing_tab, restore_ongoing_list,
+)
 from .zclaw import zclaw_exec
 
 logger = logging.getLogger(__name__)
@@ -68,7 +71,14 @@ INSPECT_TARGET_LIST_READINESS_JS = r"""
   const bodyText = document.body && document.body.innerText || '';
   const rowCount = document.querySelectorAll('table tbody tr').length;
   const hasEmptyState = /暂无数据|No data|没有数据/i.test(bodyText);
-  const hasOngoingTab = /进行中|Ongoing/i.test(bodyText);
+  const ongoingTab = [...document.querySelectorAll('.core-tabs-header-title, [role=tab]')].find(element => {
+    const text = (element.innerText || '').trim().replace(/\s+/g, ' ');
+    return (/^(进行中|Ongoing)\b/i.test(text) || text === '进行中' || /^进行中\s*\d+/.test(text))
+      && element.getBoundingClientRect().width > 0;
+  });
+  const hasOngoingTab = !!ongoingTab;
+  const ongoing = !!ongoingTab && (ongoingTab.classList.contains('core-tabs-header-title-active')
+    || ongoingTab.getAttribute('aria-selected') === 'true');
   const hasPagination = !!document.querySelector(
     '.core-pagination-item-next, .arco-pagination-item-next, .core-pagination-item-active, .arco-pagination-item-active'
   );
@@ -77,9 +87,17 @@ INSPECT_TARGET_LIST_READINESS_JS = r"""
     && hasOngoingTab && (hasPagination || hasEmptyState);
   return JSON.stringify({ok:true, href:location.href || '', ready_state:document.readyState,
     row_count:rowCount, has_empty_state:hasEmptyState, has_ongoing_tab:hasOngoingTab,
-    has_pagination:hasPagination, list_error:listError, ready});
+    has_pagination:hasPagination, list_error:listError, ongoing, ready});
 })()
 """
+
+# Reuse the proven visible tab finder, not a text-only match or a clicking script.
+INSPECT_TARGET_SHELL_JS = _guard_recovery_script("(() => {\n" + ONGOING_TAB_LOOKUP_JS + r"""
+  return JSON.stringify({ok:true, href:location.href,
+    shell_ready:!!document.body && document.readyState === 'complete' && !!ongoingTab});
+})()
+""")
+INSPECT_TARGET_LIST_READINESS_JS = _guard_recovery_script(INSPECT_TARGET_LIST_READINESS_JS)
 
 
 def target_invitation_url(
@@ -138,7 +156,7 @@ def validate_target_invitation_destination(page_state: dict[str, Any]) -> dict[s
     if page_state.get("page_type") == "login" or not is_target_invitation_href(href):
         raise RuntimeError(f"Not at target invitation list: {href[:180]}")
     parsed = urllib.parse.urlsplit(href)
-    query = urllib.parse.parse_qs(parsed.query)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     for field in ("shop_id", "shop_region"):
         if len(query.get(field) or []) != 1 or not query[field][0].strip():
             raise RuntimeError(f"Target invitation URL requires one {field}: {href[:180]}")
@@ -164,7 +182,7 @@ def current_page_href(store_id: str, *, execute_script_fn: Callable[..., Any] | 
 
 
 def schedule_page_navigation(
-    store_id: str, url: str, *, execute_script_fn: Callable[..., Any] | None = None,
+    store_id: str, url: str, *, execute_script_fn: Callable[..., Any] | None = None, deadline: float | None = None,
 ) -> dict[str, Any]:
     if not is_target_invitation_href(url):
         raise ValueError("Navigation only accepts the proven target invitation URLs")
@@ -176,7 +194,12 @@ def schedule_page_navigation(
   return JSON.stringify({{ok:true, scheduled:true, target_url:targetUrl}});
 }})()
 """
-    result = execute_script(store_id, script, timeout=30)
+    options = {"timeout": 30} if deadline is None else {
+        "timeout": 15, "deadline": deadline, "retries": 0, "retry_timeout_expired": False,
+    }
+    if deadline is not None and deadline - time.monotonic() < 0.5:
+        raise RuntimeError("Target navigation deadline expired")
+    result = execute_script(store_id, script, **options)
     if not isinstance(result, dict) or result.get("ok") is not True:
         raise RuntimeError(f"Unable to schedule target navigation: {result!r}"[:300])
     return result
@@ -185,23 +208,38 @@ def schedule_page_navigation(
 def wait_for_target_list_ready(
     store_id: str, *, timeout: float = NAVIGATION_TIMEOUT_SECONDS, poll_interval: float = 1.5,
     execute_script_fn: Callable[..., Any] | None = None,
+    deadline: float | None = None, expected_context=None, require_ongoing: bool = False,
 ) -> dict[str, Any]:
     execute_script = execute_script_fn or zclaw_exec
-    deadline = time.monotonic() + max(1.0, timeout)
+    deadline = deadline if deadline is not None else time.monotonic() + max(1.0, timeout)
     last_state: dict[str, Any] = {}
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            candidate = execute_script(store_id, INSPECT_TARGET_LIST_READINESS_JS, timeout=15)
-            if isinstance(candidate, dict):
-                last_state = candidate
-                if candidate.get("ready") is True:
-                    validate_target_invitation_destination(candidate)
-                    return candidate
-        except Exception as error:
-            last_error = str(error)
-        time.sleep(max(0.2, poll_interval))
-    raise RuntimeError(f"Target invitation list readiness timed out: {last_state!r}; {last_error}"[:400])
+    while deadline - time.monotonic() >= 0.5:
+        candidate = _read_recovery_state(store_id, INSPECT_TARGET_LIST_READINESS_JS, context=expected_context,
+                                         deadline=deadline, execute_script_fn=execute_script)
+        last_state = candidate
+        context = validate_target_invitation_destination(candidate)
+        if expected_context is not None and (AFFILIATE_CENTER_HOST, context["shop_id"], context["shop_region"]) != expected_context:
+            raise RuntimeError("Platform shop changed while waiting for target list")
+        if type(candidate.get("ready")) is not bool or (require_ongoing and type(candidate.get("ongoing")) is not bool):
+            raise RuntimeError("Malformed target list readiness")
+        if candidate["ready"] and (not require_ongoing or candidate["ongoing"]):
+            return candidate
+        time.sleep(min(max(0.2, poll_interval), max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"Target invitation list readiness timed out: {last_state!r}"[:400])
+
+
+def wait_for_target_shell(store_id: str, *, deadline: float, expected_context=None,
+                          execute_script_fn=None, poll_interval: float = 1.5) -> dict[str, Any]:
+    while deadline - time.monotonic() >= 0.5:
+        state = _read_recovery_state(store_id, INSPECT_TARGET_SHELL_JS, deadline=deadline,
+                                context=expected_context, execute_script_fn=execute_script_fn)
+        validate_target_invitation_destination(state)
+        if type(state.get("shell_ready")) is not bool:
+            raise RuntimeError("Malformed target invitation shell")
+        if state.get("shell_ready") is True:
+            return state
+        time.sleep(min(max(0.2, poll_interval), max(0.0, deadline - time.monotonic())))
+    raise RuntimeError("Target invitation shell readiness timed out")
 
 
 def navigate_from_seller_home_to_ongoing(
@@ -210,12 +248,14 @@ def navigate_from_seller_home_to_ongoing(
     execute_script_fn: Callable[..., Any] | None = None,
     ensure_ongoing_fn: Callable[..., dict[str, Any]] | None = None,
     wait_ready_fn: Callable[..., dict[str, Any]] | None = None,
+    wait_shell_fn: Callable[..., dict[str, Any]] | None = None,
+    restore_list_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Navigate an already logged-in store; failures never restart or switch it."""
     execute_script = execute_script_fn or zclaw_exec
-    ensure_ongoing = ensure_ongoing_fn or ensure_ongoing_tab
-    wait_ready = wait_ready_fn or wait_for_target_list_ready
-    initial_state = execute_script(store_id, INSPECT_NAVIGATION_PAGE_JS, timeout=30)
+    deadline = time.monotonic() + max(1.0, navigation_timeout)
+    initial_state = execute_script(store_id, INSPECT_NAVIGATION_PAGE_JS, timeout=15,
+                                   deadline=deadline, retries=0, retry_timeout_expired=False)
     if not isinstance(initial_state, dict):
         raise RuntimeError(f"Unable to identify store page: {initial_state!r}"[:300])
     initial_page_type = validate_navigation_start(initial_state)
@@ -232,41 +272,45 @@ def navigate_from_seller_home_to_ongoing(
     if not already:
         logger.info("Navigating to target invitation list: %s", target_url)
         navigator = navigate_page_fn or (
-            lambda store_identifier, url: schedule_page_navigation(store_identifier, url, execute_script_fn=execute_script)
+            lambda store_identifier, url: schedule_page_navigation(store_identifier, url, execute_script_fn=execute_script,
+                                                                   deadline=deadline)
         )
         navigator(store_id, target_url)
-        time.sleep(max(0.2, poll_interval))
-        deadline = time.monotonic() + max(1.0, navigation_timeout)
+        time.sleep(min(max(0.2, poll_interval), max(0.0, deadline - time.monotonic())))
         last_error = ""
-        while time.monotonic() < deadline:
+        while deadline - time.monotonic() >= 0.5:
             try:
-                candidate = execute_script(store_id, INSPECT_NAVIGATION_PAGE_JS, timeout=15)
-                if isinstance(candidate, dict):
+                candidate = execute_script(store_id, INSPECT_NAVIGATION_PAGE_JS, timeout=15,
+                                           deadline=deadline, retries=0, retry_timeout_expired=False)
+            except Exception as error:
+                if not _is_transient_read_error(error):
+                    raise
+                last_error = str(error)
+                time.sleep(min(max(0.2, poll_interval), max(0.0, deadline - time.monotonic())))
+                continue
+            if not isinstance(candidate, dict) or candidate.get("ok") is not True:
+                raise RuntimeError("Malformed target navigation page")
+            validate_navigation_start(candidate)
+            if is_target_invitation_href(str(candidate.get("href") or "")):
+                try:
                     destination_context = validate_target_invitation_destination(candidate)
                     break
-            except Exception as error:
-                last_error = str(error)
-            time.sleep(max(0.2, poll_interval))
+                except RuntimeError as error:
+                    # The platform may still be adding shop context during route migration.
+                    last_error = str(error)
+            time.sleep(min(max(0.2, poll_interval), max(0.0, deadline - time.monotonic())))
         if destination_context is None:
             raise RuntimeError(f"Target navigation timed out: {target_url}; {last_error}")
     if shop_id and destination_context["shop_id"] != shop_id:
         raise RuntimeError("Platform shop_id changed during target navigation")
     if destination_context["shop_region"] != shop_region:
         raise RuntimeError("Platform shop_region changed during target navigation")
-    readiness = wait_ready(
-        store_id, timeout=max(5.0, navigation_timeout), poll_interval=poll_interval,
-        execute_script_fn=execute_script,
+    restored = (restore_list_fn or restore_ongoing_list)(
+        store_id, expected_context=(AFFILIATE_CENTER_HOST, destination_context["shop_id"], destination_context["shop_region"]),
+        deadline=deadline, execute_script_fn=execute_script, ensure_ongoing_fn=ensure_ongoing_fn or ensure_ongoing_tab,
+        wait_ready_fn=wait_ready_fn, wait_shell_fn=wait_shell_fn,
     )
-    if not isinstance(readiness, dict) or readiness.get("ready") is not True:
-        raise RuntimeError("Target invitation list readiness not verified")
-    if readiness.get("href"):
-        ready_context = validate_target_invitation_destination(readiness)
-        if (ready_context["shop_id"], ready_context["shop_region"]) != (
-            destination_context["shop_id"], destination_context["shop_region"],
-        ):
-            raise RuntimeError("Platform shop changed while waiting for target list")
-    ongoing = ensure_ongoing(store_id, page_wait=max(0.5, poll_interval))
-    if not isinstance(ongoing, dict) or ongoing.get("ok") is not True:
-        raise RuntimeError("Ongoing invitation tab not verified")
+    if not isinstance(restored, dict) or restored.get("nav", {}).get("ok") is not True:
+        raise RuntimeError("Target invitation list recovery not verified")
     return {"ok": True, "already": already, "initial_page_type": initial_page_type,
-            "destination": destination_context, "ongoing_tab": ongoing, "target_url": target_url}
+            "destination": destination_context, "ongoing_tab": restored["tab"], "target_url": target_url}

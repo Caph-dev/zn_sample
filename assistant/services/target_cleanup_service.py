@@ -455,6 +455,58 @@ def validate_script_identity(session_factory, batch_id: str, job_id: str, mode: 
         _require_identity(batch)
 
 
+def finish_prewrite_navigation_failure(session_factory, request: dict[str, Any], *, execute: bool, yes: bool) -> None:
+    """Close the live child's navigation exception, before it enters execute_snapshot.
+
+    This is not crash recovery or a generic no-write flag. The sole production
+    caller is the exception block immediately around navigation in the claimed
+    child. Missing artifacts alone never call this path or establish innocence.
+    Revalidate the complete running claim and reject any contradictory evidence
+    before publishing an immutable, explicitly not-processed journal.
+    """
+    if execute is not True or yes is not True or not isinstance(request, dict) or request.get("mode") != "execute":
+        raise TargetCleanupServiceError("prewrite-failure-not-authorized")
+    with _transaction(session_factory) as session:
+        batch = _get_batch(session, request.get("batch_id"))
+        if batch.execute_status != "running":
+            raise TargetCleanupServiceError("execution-not-running")
+        _require_running_job(session, batch, request.get("job_id"), "execute")
+        _require_idle(session, ignore_job_id=request["job_id"])
+        snapshot = _read_bound_snapshot(session, batch)
+        paths = _verified_paths(batch)
+        envelope = _read_envelope(batch, paths["execute_envelope"])
+        if (request.get("snapshot_sha256") != batch.snapshot_sha256 or request.get("snapshot") != snapshot
+                or request.get("frozen") != _decode_json(batch.frozen_json)
+                or request.get("envelope") != envelope or request.get("store_id") != batch.store_id
+                or request.get("shop_id") != batch.shop_id
+                or request.get("paths") != {name: str(path) for name, path in paths.items()}
+                or batch.execute_started_at is None):
+            raise TargetCleanupServiceError("prewrite-claim-binding-mismatch")
+        items = _items(session, batch.id)
+        if any(item.status != "pending" or item.action or item.summary or item.attempted_at is not None
+               or item.returned_at is not None for item in items):
+            raise TargetCleanupServiceError("prewrite-evidence-requires-review")
+        if any(paths[name].exists() or paths[name].is_symlink() for name in (
+                "backup_json", "backup_csv", "results_json", "results_csv")):
+            raise TargetCleanupServiceError("prewrite-evidence-requires-review")
+        _require_clean_history(session, batch, snapshot)
+        results = [{**_item_payload(item), "status": "not_processed",
+                    "summary": "Navigation failed before entering the execution write chain."} for item in items]
+        report = {"schema_version": core.SCHEMA_VERSION, "batch_id": batch.id,
+                  "snapshot_sha256": batch.snapshot_sha256, "items": results}
+        for item, result in zip(items, results, strict=True):
+            _validate_result(item, result)
+        # Never replace old artifacts, including a concurrent publication.
+        core.atomic_write_json(paths["results_json"], report, immutable=True)
+        core.write_csv_report(paths["results_csv"], results, results=True, immutable=True)
+        for item, result in zip(items, results, strict=True):
+            _apply_result(item, result)
+        batch.execute_status = "partial"
+        batch.execute_finished_at = _utc_now()
+        batch.error_code = "navigation-failed-before-execution"
+        batch.error_summary = "Navigation failed before any cancellation; no automatic retry."
+
+
 def finish_preview(session_factory, batch_id: str, snapshot: dict[str, Any]) -> None:
     try:
         core.validate_snapshot(snapshot)

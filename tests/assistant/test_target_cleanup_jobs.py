@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import uuid
@@ -28,6 +29,267 @@ from tests.assistant.test_target_cleanup_api import (
     BATCHES_URL, cleanup_client, cleanup_environment, finish_synthetic_preview,
     set_job_status, write_synthetic_results,
 )
+from tests.test_target_invitation_navigation import RecoveryClock, RecoveryTransport
+from tests.test_target_invitation_dom import make_page, make_row
+
+
+class ClaimedBatchTransport(RecoveryTransport):
+    """Drive actual navigation, scanning, locating, cancellation and restoration."""
+    def __init__(self, environment, *, confirmation=False, failure=None):
+        super().__init__(shop_id="shop-1")
+        self.environment = environment
+        self.confirmation = confirmation
+        self.failure = failure
+        self.created = None
+        self.cancelled_ids = []
+        self.confirmed_ids = []
+        self.active_id = None
+        self.ongoing = True
+        self.page_size = "100/页"
+        self.menu_ready = False
+        self.confirmation_ready = False
+
+    def execute(self, store_id, script, **options):
+        from lib import target_invitation_dom as invitations
+
+        if script == invitations.PREPARE_LIST_JS:
+            return {"ok": True}
+        if "count:rows.length" in script:
+            self.events.append("extract")
+            if self.failure == "stalled-last" and self.cancelled_ids:
+                from tests.test_target_invitation_dom import make_covered_page
+                return make_covered_page(1, 200, href=self.href, next_disabled=False)
+            # Keep submitted IDs visible: submission never requires disappearance.
+            return make_page(rows=[make_row(identifier, "2020/01/01") for identifier in ("invite-1", "invite-2")],
+                             href=self.href, ongoing=self.ongoing, page_size=self.page_size, list_error=self.error)
+        if script == invitations.CLEAR_CANCELLATION_ATTEMPT_JS:
+            return {"ok": True}
+        if "opened:true" in script and "const targetId =" in script:
+            self.active_id = json.loads(re.search(r"const targetId = ([^\n]+);", script)[1])
+            self.events.append("menu:" + self.active_id)
+            self.menu_ready = True
+            return {"ok": True, "opened": True}
+        if "ready:menuItems.length" in script:
+            return {"ok": True, "ready": self.menu_ready}
+        if "clickedCancel:true" in script:
+            assert options == {"retries": 0, "retry_timeout_expired": False}
+            artifact_paths = service.artifact_paths(self.created["batch_id"])
+            assert artifact_paths["backup_json"].is_file() and artifact_paths["backup_csv"].is_file()
+            persisted = json.loads(artifact_paths["results_json"].read_text(encoding="utf-8"))
+            assert next(item for item in persisted["items"] if item["invitation_id"] == self.active_id)["status"] == "attempting"
+            payload = service.batch_payload(self.environment.session_factory, self.created["batch_id"])
+            assert next(item for item in payload["items"] if item["invitation_id"] == self.active_id)["status"] == "attempting"
+            assert self.active_id not in self.cancelled_ids
+            self.cancelled_ids.append(self.active_id)
+            self.events.append("cancel:" + self.active_id)
+            self.ongoing = False
+            self.page_size = "50/页"
+            self.error = True
+            self.confirmation_ready = self.confirmation
+            if self.failure == "persistent":
+                self.persistent = True
+            if self.failure == "shop":
+                self.after_retry_href = self.href.replace("shop-1", "changed-shop")
+            if self.failure == "lost-receipt":
+                raise RuntimeError("Synthetic lost cancellation response")
+            return {"ok": True, "invitation_id": "wrong-id" if self.failure == "mismatched-receipt" else self.active_id,
+                    "clickedCancel": True}
+        if "ready:confirmations.length" in script:
+            return {"ok": True, "ready": self.confirmation_ready}
+        if "confirmed:true" in script:
+            assert self.active_id not in self.confirmed_ids
+            self.confirmed_ids.append(self.active_id)
+            self.events.append("confirm:" + self.active_id)
+            return {"ok": False} if self.failure == "confirmation" else {"ok": True, "confirmed": True}
+        if "options.length" in script:
+            if "options[0].click()" in script:
+                self.events.append("option")
+                self.page_size = "100/页"
+                return {"ok": True, "set": True}
+            return {"ok": True, "ready": True}
+        if "ready:current ===" in script:
+            return {"ok": True, "ready": self.page_size == "100/页", "current": self.page_size}
+        context = invitations._shop_context(self.href)
+        if "const expectedContext =" in script and context != (
+                "affiliate.tiktokshopglobalselling.com", "shop-1", "US"):
+            return {"ok": False, "reason": "list-context-changed"}
+        if "has_pagination:hasPagination" in script:
+            self.events.append("ready")
+            return {"ok": True, "href": self.href, "ready": not self.error, "ongoing": self.ongoing}
+        if "const ongoingTab =" in script and "shell_ready" not in script:
+            self.events.append("ongoing")
+            clicked = not self.ongoing
+            self.ongoing = True
+            return {"ok": True, "href": self.href, "clicked": clicked, "already": not clicked}
+        if "const want = 100;" in script:
+            self.events.append("size")
+            return {"ok": True, "href": self.href, "already": self.page_size == "100/页",
+                    "opened": self.page_size != "100/页"}
+        return super().execute(store_id, script, **options)
+
+
+def install_claimed_transport(monkeypatch, transport):
+    from lib import target_invitation_dom as invitations, target_invitation_navigation as navigation, zclaw
+    clock = RecoveryClock()
+    monkeypatch.setattr(invitations.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(invitations.time, "sleep", clock.sleep)
+    monkeypatch.setattr(invitations, "zclaw_exec", transport.execute)
+    monkeypatch.setattr(navigation, "zclaw_exec", transport.execute)
+    monkeypatch.setattr(zclaw, "zclaw_invoke", Mock(side_effect=AssertionError("No real CLI allowed")))
+    return clock
+
+
+@pytest.mark.parametrize("persistent", (False, True))
+def test_real_claimed_preview_reaches_error_recovery_before_scanning(cleanup_environment, monkeypatch, persistent):
+    import cleanup_target_plans as script
+    environment = cleanup_environment
+    transport = ClaimedBatchTransport(environment)
+    transport.persistent = persistent
+    install_claimed_transport(monkeypatch, transport)
+    created = service.create_preview(environment.session_factory, 4, "real-preview")
+    set_job_status(environment, created["job_id"], "running")
+    if persistent:
+        with pytest.raises(RuntimeError, match="not recovered"):
+            script.run_batch(environment.session_factory, batch_id=created["batch_id"], job_id=created["job_id"], mode="preview")
+    else:
+        assert script.run_batch(environment.session_factory, batch_id=created["batch_id"], job_id=created["job_id"], mode="preview") == 0
+    set_job_status(environment, created["job_id"], "failed" if persistent else "succeeded")
+    payload = service.batch_payload(environment.session_factory, created["batch_id"])
+    assert payload["preview_status"] == ("failed" if persistent else "completed")
+    assert transport.retry_count == (3 if persistent else 1)
+    assert not transport.cancelled_ids and not transport.confirmed_ids
+    if persistent:
+        assert not payload["can_execute"] and not payload["snapshot_sha256"]
+        with pytest.raises(service.TargetCleanupServiceError):
+            service.create_execution(environment.session_factory, created["batch_id"], "y", "blocked")
+    else:
+        assert payload["candidate_count"] == 2 and payload["can_execute"]
+        assert transport.events.index("retry") < transport.events.index("extract")
+        assert service.artifact_paths(created["batch_id"])["snapshot"].is_file()
+
+
+@pytest.mark.parametrize("confirmation", (False, True))
+@pytest.mark.parametrize("failure", (None, "persistent", "shop", "lost-receipt", "mismatched-receipt", "confirmation", "stalled-last"))
+def test_real_claimed_execution_preserves_receipts_and_stops_unknown_writes(cleanup_environment, monkeypatch,
+                                                                          confirmation, failure):
+    import cleanup_target_plans as script
+    from lib import target_invitation_dom as invitations
+    environment = cleanup_environment
+    created = create_execution(environment)
+    transport = ClaimedBatchTransport(environment, confirmation=confirmation, failure=failure)
+    # Frozen synthetic preview uses cutoff-1, so preserve its actual immutable displayed dates.
+    payload = service.batch_payload(environment.session_factory, created["batch_id"])
+    modified_by_id = {item["invitation_id"]: item["last_modified"] for item in payload["items"]}
+    original_execute = transport.execute
+    def transport_with_frozen_dates(store_id, source, **options):
+        response = original_execute(store_id, source, **options)
+        if "count:rows.length" in source and not (failure == "stalled-last" and transport.cancelled_ids):
+            for row in response["rows"]:
+                row["last_modified"] = modified_by_id[row["invitation_id"]]
+        return response
+    transport.execute = transport_with_frozen_dates
+    transport.created = created
+    install_claimed_transport(monkeypatch, transport)
+    set_job_status(environment, created["job_id"], "running")
+    captures = []
+    real_cancel = invitations.cancel_invitation_by_id
+    def capture_cancel(*arguments, **options):
+        result = real_cancel(*arguments, **options)
+        captures.append(result)
+        return result
+    monkeypatch.setattr(invitations, "cancel_invitation_by_id", capture_cancel)
+    uncertain = failure is not None and (failure != "confirmation" or confirmation)
+    exit_code = script.run_batch(environment.session_factory, batch_id=created["batch_id"],
+                                  job_id=created["job_id"], mode="execute", execute=True, yes=True)
+    assert exit_code == int(uncertain)
+    payload = service.batch_payload(environment.session_factory, created["batch_id"])
+    assert [item["status"] for item in payload["items"]] == (
+        ["uncertain", "not_processed"] if uncertain else ["submitted", "submitted"])
+    assert transport.cancelled_ids == (["invite-1"] if uncertain else ["invite-1", "invite-2"])
+    expected_confirmed = transport.cancelled_ids if confirmation and failure not in {"lost-receipt", "mismatched-receipt"} else []
+    assert transport.confirmed_ids == expected_confirmed
+    if failure == "stalled-last":
+        write_position = transport.events.index("cancel:invite-1")
+        assert transport.events[write_position:].count("last") == 1
+        assert "menu:invite-2" not in transport.events
+    assert all(result["gone"] is None for result in captures)
+    if not uncertain:
+        assert all(result["confirmed"] is confirmation for result in captures)
+        assert transport.events.count("option") == 2
+        assert transport.retry_count == 3  # initial recovery plus exactly one per cancellation
+        first_cancel = transport.events.index("cancel:invite-1")
+        next_menu = transport.events.index("menu:invite-2")
+        restored_events = transport.events[first_cancel + 1:next_menu]
+        assert restored_events.index("ongoing") < restored_events.index("retry") < restored_events.index("size") < restored_events.index("last")
+    elif failure == "persistent":
+        assert transport.retry_count == 4  # initial success + bounded three postwrite retries
+    elif failure in {"lost-receipt", "mismatched-receipt", "confirmation"}:
+        assert transport.retry_count == 2  # restoration cannot upgrade an untrusted receipt
+    persisted = json.loads(service.artifact_paths(created["batch_id"])["results_json"].read_text(encoding="utf-8"))
+    assert [item["status"] for item in persisted["items"]] == [item["status"] for item in payload["items"]]
+    # Both persisted evidence and the one-time server claim survive a retry attempt.
+    with pytest.raises(service.TargetCleanupServiceError):
+        script.run_batch(environment.session_factory, batch_id=created["batch_id"],
+                           job_id=created["job_id"], mode="execute", execute=True, yes=True)
+    assert transport.cancelled_ids == (["invite-1"] if uncertain else ["invite-1", "invite-2"])
+    set_job_status(environment, created["job_id"], "failed" if uncertain else "succeeded")
+    next_preview = service.create_preview(environment.session_factory, 4, "new-preview")
+    finish_synthetic_preview(environment, next_preview)
+    with pytest.raises(service.TargetCleanupServiceError) as historical:
+        service.create_execution(environment.session_factory, next_preview["batch_id"], "y", "new-execution")
+    assert historical.value.code == "historical-write-requires-review"
+
+
+def test_real_execution_navigation_failure_never_starts_a_write(cleanup_environment, monkeypatch):
+    import cleanup_target_plans as script
+    environment = cleanup_environment
+    created = create_execution(environment)
+    transport = ClaimedBatchTransport(environment)
+    transport.created = created
+    transport.persistent = True
+    install_claimed_transport(monkeypatch, transport)
+    def run_real_child(arguments, **options):
+        with pytest.raises(RuntimeError, match="not recovered"):
+            script.run_batch(environment.session_factory, batch_id=created["batch_id"],
+                               job_id=created["job_id"], mode="execute", execute=True, yes=True)
+        return SimpleNamespace(returncode=1)
+    child = Mock(side_effect=run_real_child)
+    monkeypatch.setattr(subprocess, "run", child)
+    assert worker_loop_once(environment.session_factory) == created["job_id"]
+    child.assert_called_once()
+    payload = service.batch_payload(environment.session_factory, created["batch_id"])
+    assert payload["counts"]["not_processed"] == 2
+    assert payload["counts"]["uncertain"] == payload["counts"]["submitted"] == 0
+    assert not transport.cancelled_ids and not transport.confirmed_ids
+    assert transport.retry_count == 3
+    assert not service.artifact_paths(created["batch_id"])["backup_json"].exists()
+
+
+@pytest.mark.parametrize("journal", ("missing", "invalid"))
+def test_exception_after_entering_execution_never_uses_prewrite_closure(cleanup_environment, monkeypatch, journal):
+    import cleanup_target_plans as script
+    environment = cleanup_environment
+    created = create_execution(environment)
+    transport = ClaimedBatchTransport(environment)
+    install_claimed_transport(monkeypatch, transport)
+    set_job_status(environment, created["job_id"], "running")
+    def crash_at_execution_boundary(*arguments, **options):
+        if journal == "invalid":
+            service.artifact_paths(created["batch_id"])["results_json"].write_bytes(b"corrupt execution journal")
+        raise RuntimeError("Synthetic exception after execution phase began")
+    execute = Mock(side_effect=crash_at_execution_boundary)
+    monkeypatch.setattr(script, "execute_snapshot", execute)
+    closure = Mock(side_effect=AssertionError("No prewrite attestation after execution began"))
+    monkeypatch.setattr(service, "finish_prewrite_navigation_failure", closure)
+    with pytest.raises(RuntimeError, match="execution phase began"):
+        script.run_batch(environment.session_factory, batch_id=created["batch_id"],
+                           job_id=created["job_id"], mode="execute", execute=True, yes=True)
+    execute.assert_called_once()
+    closure.assert_not_called()
+    payload = service.batch_payload(environment.session_factory, created["batch_id"])
+    assert payload["counts"]["uncertain"] == 2 and payload["counts"]["not_processed"] == 0
+    assert payload["execute_status"] == "needs_review"
+    assert not transport.cancelled_ids
 
 
 def create_execution(environment, *, identifiers=("invite-1", "invite-2")):

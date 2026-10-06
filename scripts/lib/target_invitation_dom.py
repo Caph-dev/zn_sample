@@ -22,7 +22,7 @@ import urllib.parse
 from datetime import date
 from typing import Any, Mapping, TypedDict
 
-from .zclaw import zclaw_exec
+from .zclaw import is_bridge_network_error, is_timeout_expired_error, zclaw_exec
 
 logger = logging.getLogger(__name__)
 
@@ -375,19 +375,28 @@ CLICK_LIST_RETRY_JS = r"""
 })()
 """
 
-ENSURE_ONGOING_TAB_JS = r"""
-(() => {
+ONGOING_TAB_LOOKUP_JS = r"""
   const ongoingTab = [...document.querySelectorAll('.core-tabs-header-title, [role=tab]')].find(element => {
     const text = (element.innerText || '').trim().replace(/\s+/g, ' ');
     return (/^(进行中|Ongoing)\b/i.test(text) || text === '进行中' || /^进行中\s*\d+/.test(text))
       && element.getBoundingClientRect().width > 0;
   });
+"""
+
+ENSURE_ONGOING_TAB_JS = "(() => {\n" + ONGOING_TAB_LOOKUP_JS + r"""
   if (!ongoingTab) return JSON.stringify({ok:false, reason:'ongoing-tab-not-found', href:location.href});
   const already = ongoingTab.classList.contains('core-tabs-header-title-active')
     || ongoingTab.getAttribute('aria-selected') === 'true';
   if (already) return JSON.stringify({ok:true, already:true, href:location.href});
   ongoingTab.click();
   return JSON.stringify({ok:true, clicked:true, href:location.href});
+})()
+"""
+
+INSPECT_ONGOING_TAB_JS = "(() => {\n" + ONGOING_TAB_LOOKUP_JS + r"""
+  if (!ongoingTab) return JSON.stringify({ok:false, reason:'ongoing-tab-not-found', href:location.href});
+  return JSON.stringify({ok:true, already:ongoingTab.classList.contains('core-tabs-header-title-active')
+    || ongoingTab.getAttribute('aria-selected') === 'true', href:location.href});
 })()
 """
 
@@ -402,6 +411,92 @@ PREPARE_LIST_JS = r"""
   return JSON.stringify({ok:true, rowCount:document.querySelectorAll('table tbody tr').length});
 })()
 """
+
+RECOVERY_CONTEXT_GUARD_JS = r"""
+  const expectedContext = null;
+  const currentUrl = new URL(location.href);
+  const shopIds = currentUrl.searchParams.getAll('shop_id');
+  const regions = currentUrl.searchParams.getAll('shop_region');
+  const currentContext = [currentUrl.hostname, (shopIds[0] || '').trim(), (regions[0] || '').trim().toUpperCase()];
+  if (currentUrl.protocol !== 'https:' || currentUrl.hostname !== 'affiliate.tiktokshopglobalselling.com'
+    || !['/affiliate/collaboration/target-invitation', '/connection/target-invitation'].includes(currentUrl.pathname.replace(/\/$/, ''))
+    || shopIds.length !== 1 || regions.length !== 1 || !currentContext[1] || !currentContext[2]
+    || (expectedContext && currentContext.some((value, index) => value !== expectedContext[index]))
+    || /log\s*in|sign[-_]?in|passport/i.test(document.title || '')
+    || /Log in to TikTok Shop|登录 TikTok Shop|Sign in to TikTok Shop/i.test(document.body && document.body.innerText || '')) {
+    return JSON.stringify({ok:false, reason:'list-context-changed', href:location.href});
+  }
+"""
+
+
+def _guard_recovery_script(script: str, context: tuple[str, str, str] | None = None) -> str:
+    guard = RECOVERY_CONTEXT_GUARD_JS.replace("const expectedContext = null;",
+                                            "const expectedContext = " + json.dumps(context) + ";")
+    return script.replace("(() => {", "(() => {\n" + guard, 1)
+
+
+# The identity check runs in the same script before any recovery side effect.
+ENSURE_ONGOING_TAB_JS = _guard_recovery_script(ENSURE_ONGOING_TAB_JS)
+INSPECT_ONGOING_TAB_JS = _guard_recovery_script(INSPECT_ONGOING_TAB_JS)
+CLICK_LIST_RETRY_JS = _guard_recovery_script(CLICK_LIST_RETRY_JS)
+INSPECT_LIST_ERROR_JS = _guard_recovery_script(INSPECT_LIST_ERROR_JS)
+SET_PAGE_SIZE_JS = _guard_recovery_script(SET_PAGE_SIZE_JS)
+GOTO_LAST_PAGE_JS = _guard_recovery_script(GOTO_LAST_PAGE_JS)
+CLICK_PAGE_SIZE_OPTION_JS_TMPL = _guard_recovery_script(CLICK_PAGE_SIZE_OPTION_JS_TMPL)
+
+
+def _bind_recovery_context(script: str, context: tuple[str, str, str] | None) -> str:
+    return script.replace("const expectedContext = null;", "const expectedContext = " + json.dumps(context) + ";")
+
+
+def _recovery_probe(store_id: str, script: str, *, deadline: float,
+                    context: tuple[str, str, str] | None = None, execute_script_fn=None) -> dict[str, Any]:
+    if deadline - time.monotonic() < 0.5:
+        raise RuntimeError("List recovery deadline expired")
+    execute_script = execute_script_fn or zclaw_exec
+    result = execute_script(store_id, _bind_recovery_context(script, context), timeout=15,
+                            deadline=deadline, retries=0, retry_timeout_expired=False)
+    if time.monotonic() >= deadline:
+        raise RuntimeError("List recovery deadline expired")
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        if isinstance(result, dict) and result.get("reason") == "last-page-control-not-found":
+            raise RecoveryControlUnavailable("Last-page control not found")
+        raise RuntimeError(f"List recovery rejected: {result!r}")
+    return result
+
+
+def _recovery_sleep(seconds: float, deadline: float) -> None:
+    time.sleep(min(seconds, max(0.0, deadline - time.monotonic())))
+
+
+def _is_transient_read_error(error: Exception) -> bool:
+    return isinstance(error, TimeoutError) or is_timeout_expired_error(error) or is_bridge_network_error(error)
+
+
+def _read_recovery_state(store_id: str, script: str, *, deadline: float,
+                         context=None, execute_script_fn=None, timeout: int = 15) -> dict[str, Any]:
+    """Repeat only read transport failures; page rejection is never a retry signal."""
+    execute_script = execute_script_fn or zclaw_exec
+    while deadline - time.monotonic() >= 0.5:
+        try:
+            result = execute_script(store_id, _bind_recovery_context(script, context), timeout=timeout,
+                                    deadline=deadline, retries=0, retry_timeout_expired=False)
+        except Exception as error:
+            if not _is_transient_read_error(error):
+                raise
+            _recovery_sleep(UI_POLL_INTERVAL_SECONDS, deadline)
+            continue
+        if time.monotonic() >= deadline:
+            break
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError(f"List recovery read rejected: {result!r}")
+        return result
+    raise RuntimeError("List recovery read deadline expired")
+
+
+class RecoveryControlUnavailable(RuntimeError):
+    """A known missing control permits only a guarded genuine-empty-state read."""
+
 
 def parse_ui_date(text: str) -> date | None:
     """Source date semantics: unambiguous year-first or English month names."""
@@ -493,25 +588,38 @@ def _validate_cutoff(cutoff: date) -> None:
         raise ValueError("cutoff must be the frozen calendar date")
 
 
-def ensure_ongoing_tab(store_id: str, *, page_wait: float = PAGE_WAIT_SECONDS) -> dict[str, Any]:
-    result = zclaw_exec(store_id, ENSURE_ONGOING_TAB_JS)
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        raise RuntimeError(f"Cannot select ongoing invitations: {result!r}")
+def ensure_ongoing_tab(store_id: str, *, page_wait: float = PAGE_WAIT_SECONDS,
+                       expected_context=None, deadline: float | None = None, execute_script_fn=None) -> dict[str, Any]:
+    deadline = deadline if deadline is not None else time.monotonic() + 90.0
+    result = _recovery_probe(store_id, ENSURE_ONGOING_TAB_JS, context=expected_context,
+                             deadline=deadline, execute_script_fn=execute_script_fn)
+    context = expected_context or _shop_context(str(result.get("href") or ""))
+    if context is None:
+        raise RuntimeError("Ongoing invitations context not verified")
     if result.get("clicked"):
-        time.sleep(page_wait)
-        result = zclaw_exec(store_id, ENSURE_ONGOING_TAB_JS)
+        _recovery_sleep(page_wait, deadline)
+        # Verify selection without invoking another possibly-clicking tab script.
+        result = _read_recovery_state(store_id, INSPECT_ONGOING_TAB_JS, context=context,
+                                     deadline=deadline, execute_script_fn=execute_script_fn)
     if not isinstance(result, dict) or result.get("already") is not True:
         raise RuntimeError(f"Ongoing invitations tab not verified: {result!r}")
     return result
 
 
-def ensure_page_size(store_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + PAGE_SIZE_OPTION_WAIT_SECONDS
-    result = zclaw_exec(
-        store_id, SET_PAGE_SIZE_JS, timeout=3, deadline=deadline,
+def ensure_page_size(store_id: str, *, expected_context=None, deadline: float | None = None,
+                     execute_script_fn=None) -> dict[str, Any]:
+    overall_deadline = deadline if deadline is not None else time.monotonic() + 90.0
+    deadline = min(overall_deadline, time.monotonic() + PAGE_SIZE_OPTION_WAIT_SECONDS)
+    if deadline - time.monotonic() < 0.5:
+        raise RuntimeError("Cannot restore 100 rows per page: deadline expired")
+    execute_script = execute_script_fn or zclaw_exec
+    result = execute_script(
+        store_id, _bind_recovery_context(SET_PAGE_SIZE_JS, expected_context), timeout=3, deadline=deadline,
         retries=0, retry_timeout_expired=False,
     )
     if not isinstance(result, dict) or result.get("ok") is not True:
+        if isinstance(result, dict) and result.get("reason") == "no-pagesize-control":
+            raise RecoveryControlUnavailable("Cannot restore 100 rows per page: no-pagesize-control")
         raise RuntimeError(f"Cannot restore 100 rows per page: {result!r}")
     if result.get("already") is True:
         return result
@@ -521,33 +629,35 @@ def ensure_page_size(store_id: str) -> dict[str, Any]:
     replacements = {"%EXPECTED_HREF%": json.dumps(expected_href, ensure_ascii=False)}
 
     def render_script(template: str) -> str:
-        return re.sub(r"%EXPECTED_HREF%", lambda match: replacements[match.group()], template)
+        script = re.sub(r"%EXPECTED_HREF%", lambda match: replacements[match.group()], template)
+        return _bind_recovery_context(script, expected_context or _shop_context(expected_href))
 
-    _wait_for_ui_ready(store_id, render_script(INSPECT_PAGE_SIZE_OPTION_JS_TMPL), deadline=deadline)
+    _wait_for_ui_ready(store_id, render_script(INSPECT_PAGE_SIZE_OPTION_JS_TMPL), deadline=deadline,
+                       execute_script_fn=execute_script)
     if deadline - time.monotonic() < 0.5:
         raise RuntimeError("Cannot restore 100 rows per page: option deadline expired")
-    selected = zclaw_exec(
+    selected = execute_script(
         store_id, render_script(CLICK_PAGE_SIZE_OPTION_JS_TMPL), timeout=3, deadline=deadline,
         retries=0, retry_timeout_expired=False,
     )
     if not isinstance(selected, dict) or selected.get("ok") is not True or selected.get("set") is not True:
         raise RuntimeError(f"Cannot restore 100 rows per page: option click unverified: {selected!r}")
     verified = _wait_for_ui_ready(
-        store_id, render_script(INSPECT_PAGE_SIZE_JS_TMPL), deadline=time.monotonic() + PAGE_WAIT_SECONDS,
+        store_id, render_script(INSPECT_PAGE_SIZE_JS_TMPL),
+        deadline=min(overall_deadline, time.monotonic() + PAGE_WAIT_SECONDS), execute_script_fn=execute_script,
     )
     return {"ok": True, "set": True, "previous": result.get("current"), "current": verified["current"]}
 
 
 def _wait_for_ui_ready(
-    store_id: str, script: str, *, deadline: float, required: bool = True,
+    store_id: str, script: str, *, deadline: float, required: bool = True, execute_script_fn=None,
 ) -> dict[str, Any]:
     """Only read probes repeat; neither blocking probes nor sleeps extend the budget."""
     # The existing transport needs at least half a second and rounds to whole seconds.
     while deadline - time.monotonic() >= 0.5:
-        state = zclaw_exec(
-            store_id, script, timeout=3, deadline=deadline, retries=0, retry_timeout_expired=False,
-        )
-        if not isinstance(state, dict) or state.get("ok") is not True:
+        state = _read_recovery_state(store_id, script, timeout=3, deadline=deadline,
+                                     execute_script_fn=execute_script_fn)
+        if type(state.get("ready")) is not bool:
             raise RuntimeError(f"UI readiness rejected: {state!r}")
         if time.monotonic() >= deadline:
             break
@@ -559,50 +669,107 @@ def _wait_for_ui_ready(
     return {"ok": True, "ready": False}
 
 
-def recover_list_if_error(store_id: str) -> dict[str, Any]:
+def recover_list_if_error(store_id: str, *, expected_context=None, deadline: float | None = None,
+                          execute_script_fn=None) -> dict[str, Any]:
     """Only the source's observed list-error Retry action; never reopen a store."""
+    deadline = deadline if deadline is not None else time.monotonic() + 90.0
     for attempt in range(4):
-        state = zclaw_exec(store_id, INSPECT_LIST_ERROR_JS)
-        if not isinstance(state, dict) or state.get("ok") is not True:
-            raise RuntimeError(f"Cannot inspect list error state: {state!r}")
+        state = _read_recovery_state(store_id, INSPECT_LIST_ERROR_JS, context=expected_context,
+                                     deadline=deadline, execute_script_fn=execute_script_fn)
+        if type(state.get("error")) is not bool or type(state.get("can_retry")) is not bool:
+            raise RuntimeError(f"Malformed list error state: {state!r}")
+        expected_context = expected_context or _shop_context(str(state.get("href") or ""))
+        if expected_context is None:
+            raise RuntimeError("List recovery context not verified")
         if state.get("error") is False:
             return {"ok": True, "needed": attempt > 0, "state": state}
         if attempt == 3 or state.get("can_retry") is not True:
             raise RuntimeError(f"List error not recovered: {state!r}")
         logger.warning("Recovering target invitation list error (%s/3)", attempt + 1)
-        clicked = zclaw_exec(store_id, CLICK_LIST_RETRY_JS)
-        if not isinstance(clicked, dict) or clicked.get("ok") is not True:
-            raise RuntimeError(f"List retry failed: {clicked!r}")
-        time.sleep(2.5 * (attempt + 1))
+        clicked = _recovery_probe(store_id, CLICK_LIST_RETRY_JS, context=expected_context,
+                                  deadline=deadline, execute_script_fn=execute_script_fn)
+        if clicked.get("clicked") is not True:
+            raise RuntimeError("List retry action response unverified")
+        _recovery_sleep(2.5 * (attempt + 1), deadline)
     raise AssertionError("Unreachable recovery state")
 
 
-def restore_ongoing_list(store_id: str) -> dict[str, Any]:
+def restore_ongoing_list(store_id: str, *, expected_context=None, deadline: float | None = None,
+                          execute_script_fn=None, ensure_ongoing_fn=None, wait_ready_fn=None,
+                          wait_shell_fn=None) -> dict[str, Any]:
     """Required order: ongoing, list recovery, fixed 100/page, last page."""
-    tab = ensure_ongoing_tab(store_id)
-    recovered = recover_list_if_error(store_id)
+    from .target_invitation_navigation import wait_for_target_list_ready, wait_for_target_shell
+
+    deadline = deadline if deadline is not None else time.monotonic() + 90.0
+    execute_script = execute_script_fn or zclaw_exec
+    shell = (wait_shell_fn or wait_for_target_shell)(store_id, deadline=deadline,
+              expected_context=expected_context, execute_script_fn=execute_script)
+    expected_context = expected_context or _shop_context(str(shell.get("href") or ""))
+    if expected_context is None:
+        raise RuntimeError("List recovery context not verified")
+    tab = (ensure_ongoing_fn or ensure_ongoing_tab)(store_id, expected_context=expected_context,
+              deadline=deadline, execute_script_fn=execute_script)
+    recovered = recover_list_if_error(store_id, expected_context=expected_context,
+                 deadline=deadline, execute_script_fn=execute_script)
+    wait_ready = wait_ready_fn or wait_for_target_list_ready
+    readiness_options = {"deadline": deadline, "expected_context": expected_context,
+                         "require_ongoing": True, "execute_script_fn": execute_script}
+    ready = wait_ready(store_id, **readiness_options)
+    if ready.get("ready") is not True:
+        raise RuntimeError("Target invitation list readiness not verified")
+    if _shop_context(str(ready.get("href") or "")) != expected_context:
+        raise RuntimeError("Platform shop changed while waiting for target list")
     try:
-        paging = ensure_page_size(store_id)
-    except RuntimeError:
+        paging = ensure_page_size(store_id, expected_context=expected_context,
+                                  deadline=deadline, execute_script_fn=execute_script)
+    except RecoveryControlUnavailable:
         # Do not replay a trigger or option click after an unverified response.
-        empty_state = extract_page(store_id)
-        if not empty_state["rows"] and not _page_problem(empty_state, None):
+        if time.monotonic() >= deadline:
+            raise
+        empty_state = _read_recovery_state(store_id, _guard_recovery_script(EXTRACT_JS),
+                        context=expected_context, deadline=deadline, execute_script_fn=execute_script)
+        if not empty_state["rows"] and not _page_problem(empty_state, expected_context):
             return {"tab": tab, "recovered": recovered, "paging": {"ok": True, "empty": True},
                     "nav": {"ok": True, "empty": True}}
         raise
-    navigation: Any = None
-    for attempt in range(4):
-        navigation = zclaw_exec(store_id, GOTO_LAST_PAGE_JS)
-        if isinstance(navigation, dict) and navigation.get("ok") is True:
-            time.sleep(PAGE_WAIT_SECONDS)
-            break
-        if attempt < 3:
-            time.sleep(PAGE_WAIT_SECONDS)
-    if not isinstance(navigation, dict) or navigation.get("ok") is not True:
-        empty_state = extract_page(store_id)
-        if not empty_state["rows"] and not _page_problem(empty_state, None):
-            navigation = {"ok": True, "empty": True}
+    # Single action receipt; only the observation below may repeat.
+    try:
+        navigation = _recovery_probe(store_id, GOTO_LAST_PAGE_JS, context=expected_context,
+                                      deadline=deadline, execute_script_fn=execute_script)
+    except RecoveryControlUnavailable:
+        empty_state = _read_recovery_state(store_id, _guard_recovery_script(EXTRACT_JS),
+                       context=expected_context, deadline=deadline, execute_script_fn=execute_script)
+        if not isinstance(empty_state.get("rows"), list) or empty_state["rows"] or _page_problem(empty_state, expected_context):
+            raise RuntimeError("Missing last-page control without verified empty list")
+        return {"tab": tab, "recovered": recovered, "paging": paging, "nav": {"ok": True, "empty": True}}
+    if navigation.get("already") is not True and navigation.get("via") not in {"last-btn", "max-page-item"}:
+        raise RuntimeError("Last-page action response unverified")
+    observed = _wait_for_last_page(store_id, expected_context=expected_context,
+                                   deadline=deadline, execute_script_fn=execute_script)
+    navigation = {**navigation, "observed_page": observed.get("page"), "empty": not observed["rows"]}
+    final_ready = wait_ready(store_id, **readiness_options)
+    if final_ready.get("ready") is not True:
+        raise RuntimeError("Target invitation list readiness not verified")
+    if _shop_context(str(final_ready.get("href") or "")) != expected_context:
+        raise RuntimeError("Platform shop changed while waiting for target list")
     return {"tab": tab, "recovered": recovered, "paging": paging, "nav": navigation}
+
+
+def _wait_for_last_page(store_id: str, *, expected_context, deadline: float,
+                        execute_script_fn=None) -> dict[str, Any]:
+    last_problem = "last-page-unverified"
+    while deadline - time.monotonic() >= 0.5:
+        state = _read_recovery_state(store_id, _guard_recovery_script(EXTRACT_JS),
+                                     context=expected_context, deadline=deadline, execute_script_fn=execute_script_fn)
+        if not isinstance(state.get("rows"), list) or any(not isinstance(row, dict) for row in state["rows"]):
+            raise RuntimeError("Malformed last-page observation")
+        last_problem = _page_problem(state, expected_context)
+        if last_problem in {"list-context-changed", "page-total-unverified", "duplicate-invitation-id", "page-size-exceeded"}:
+            raise RuntimeError(f"Last-page observation rejected: {last_problem}")
+        if not last_problem and (not state["rows"] or _at_last_page(state)):
+            return state
+        _recovery_sleep(UI_POLL_INTERVAL_SECONDS, deadline)
+    raise RuntimeError(f"Last-page observation timed out: {last_problem or 'last-page-unverified'}")
 
 
 def extract_page(store_id: str) -> dict[str, Any]:
@@ -630,7 +797,7 @@ def _shop_context(href: str) -> tuple[str, str, str] | None:
         "/affiliate/collaboration/target-invitation", "/connection/target-invitation",
     }:
         return None
-    query = urllib.parse.parse_qs(parsed.query)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     if any(len(query.get(field) or []) != 1 for field in ("shop_id", "shop_region")):
         return None
     shop_id = (query.get("shop_id") or [""])[0].strip()
@@ -953,7 +1120,7 @@ def cancel_invitation_by_id(
             logger.warning("Cannot clear cancellation UI state: %s", error)
         if menu_opened or result["write_attempted"]:
             try:
-                restored = restore_ongoing_list(store_id)
+                restored = restore_ongoing_list(store_id, expected_context=_shop_context(str(data["href"])))
                 if restored.get("nav", {}).get("ok") is not True:
                     raise RuntimeError("Last-page recovery failed")
             except Exception as error:

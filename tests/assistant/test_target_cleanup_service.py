@@ -370,6 +370,107 @@ class TargetCleanupServiceTests(unittest.TestCase):
         self.assertEqual(request["snapshot"]["candidate_ids"], ["invite-1", "invite-2"])
         self.assert_code("batch-already-claimed", service.begin_script, self.other_session_factory, preview["batch_id"], created["job_id"], "execute")
 
+    def test_navigation_failure_closes_only_current_untouched_claim(self):
+        preview, snapshot = self._preview()
+        created = self._execution(preview, begin=False)
+        self._job_status(created["job_id"], "running")
+        request = service.begin_script(self.session_factory, preview["batch_id"], created["job_id"], "execute")
+        service.finish_prewrite_navigation_failure(self.session_factory, request, execute=True, yes=True)
+        payload = service.batch_payload(self.session_factory, preview["batch_id"])
+        self.assertEqual(payload["execute_status"], "partial")
+        self.assertEqual(payload["counts"]["not_processed"], 2)
+        self.assertEqual(payload["counts"]["uncertain"], 0)
+        paths = service.artifact_paths(preview["batch_id"])
+        results = core.read_execution_results(paths["results_json"], snapshot, core.payload_digest(snapshot))
+        self.assertTrue(all(item["status"] == "not_processed" and not item["attempted_at"] for item in results))
+        self.assertFalse(paths["backup_json"].exists())
+        original = {path.name: path.read_bytes() for path in paths.values() if path.is_file()}
+        service.fail_batch(self.session_factory, preview["batch_id"], "execute", "worker failed")
+        self.assertEqual(service.batch_payload(self.session_factory, preview["batch_id"])["counts"]["not_processed"], 2)
+        with self.assertRaises(service.TargetCleanupServiceError):
+            service.finish_prewrite_navigation_failure(self.session_factory, request, execute=True, yes=True)
+        self.assertEqual(original, {path.name: path.read_bytes() for path in paths.values() if path.is_file()})
+
+    def test_navigation_failure_rejects_binding_gate_or_any_prior_evidence_without_clobber(self):
+        preview, _snapshot = self._preview()
+        created = self._execution(preview, begin=False)
+        self._job_status(created["job_id"], "running")
+        request = service.begin_script(self.session_factory, preview["batch_id"], created["job_id"], "execute")
+        for field, value in (("job_id", preview["job_id"]), ("batch_id", preview["job_id"]),
+                             ("snapshot_sha256", "0" * 64), ("mode", "preview"), ("store_id", "other-store"),
+                             ("snapshot", {}), ("envelope", {}), ("paths", {}), ("frozen", {})):
+            with self.subTest(field=field), self.assertRaises(service.TargetCleanupServiceError):
+                service.finish_prewrite_navigation_failure(self.session_factory, {**request, field: value}, execute=True, yes=True)
+        for execute, yes in ((False, True), (True, False)):
+            with self.subTest(execute=execute, yes=yes), self.assertRaises(service.TargetCleanupServiceError):
+                service.finish_prewrite_navigation_failure(self.session_factory, request, execute=execute, yes=yes)
+        paths = service.artifact_paths(preview["batch_id"])
+        for name in ("results_json", "results_csv", "backup_json", "backup_csv"):
+            with self.subTest(artifact=name):
+                paths[name].write_bytes(b"existing evidence, never replace")
+                original = paths[name].read_bytes()
+                with self.assertRaises(service.TargetCleanupServiceError):
+                    service.finish_prewrite_navigation_failure(self.session_factory, request, execute=True, yes=True)
+                self.assertEqual(paths[name].read_bytes(), original)
+                paths[name].unlink()
+        for field, value in (("action", "cancel:unknown"), ("attempted_at", datetime.now(timezone.utc)),
+                             ("returned_at", datetime.now(timezone.utc)), ("status", "attempting"),
+                             ("status", "submitted"), ("status", "uncertain")):
+            with self.subTest(field=field, value=value):
+                with self.session_factory() as session:
+                    item = session.scalar(select(TargetCleanupItem))
+                    setattr(item, field, value)
+                    session.commit()
+                with self.assertRaises(service.TargetCleanupServiceError):
+                    service.finish_prewrite_navigation_failure(self.session_factory, request, execute=True, yes=True)
+                with self.session_factory() as session:
+                    item = session.scalar(select(TargetCleanupItem))
+                    self.assertEqual(getattr(item, field), value)
+                    setattr(item, field, "pending" if field == "status" else "" if field == "action" else None)
+                    session.commit()
+        self.assertFalse(paths["results_json"].exists())
+
+    def test_navigation_failure_rejects_inactive_owner_and_concurrent_artifact_publication(self):
+        preview, _snapshot = self._preview()
+        created = self._execution(preview, begin=False)
+        self._job_status(created["job_id"], "running")
+        request = service.begin_script(self.session_factory, preview["batch_id"], created["job_id"], "execute")
+        self._job_status(created["job_id"], "interrupted")
+        self.assert_code("job-claim-required", service.finish_prewrite_navigation_failure,
+                         self.session_factory, request, execute=True, yes=True)
+        self._job_status(created["job_id"], "running")
+        paths = service.artifact_paths(preview["batch_id"])
+        real_publish = core.atomic_write_json
+        def concurrent_publish(path, content, **options):
+            self.assertEqual(path, paths["results_json"])
+            self.assertTrue(options["immutable"])
+            path.write_bytes(b"concurrent contradictory evidence")
+            return real_publish(path, content, **options)
+        with patch.object(core, "atomic_write_json", side_effect=concurrent_publish), self.assertRaises(FileExistsError):
+            service.finish_prewrite_navigation_failure(self.session_factory, request, execute=True, yes=True)
+        self.assertEqual(paths["results_json"].read_bytes(), b"concurrent contradictory evidence")
+        self.assertEqual(service.batch_payload(self.session_factory, preview["batch_id"])["counts"]["pending"], 2)
+        service.fail_batch(self.session_factory, preview["batch_id"], "execute", "publication failed")
+        self.assertEqual(service.batch_payload(self.session_factory, preview["batch_id"])["counts"]["uncertain"], 2)
+
+    def test_navigation_failure_rejects_late_historical_write_evidence(self):
+        preview, _snapshot = self._preview()
+        created = self._execution(preview, begin=False)
+        self._job_status(created["job_id"], "running")
+        request = service.begin_script(self.session_factory, preview["batch_id"], created["job_id"], "execute")
+        # A separate persisted historical item appears after the initial claim.
+        with self.session_factory() as session:
+            session.add(TargetCleanupBatch(id=created["job_id"], months=4, store_id="store-1", shop_id="shop-1", shop_region="US",
+                                            preview_job_id=preview["job_id"], preview_idempotency_key="historical-key",
+                                            preview_request_fingerprint="historical-fingerprint", snapshot_path="historical", artifacts_json="{}"))
+            session.flush()
+            session.add(TargetCleanupItem(batch_id=created["job_id"], store_id="store-1", invitation_id="invite-1",
+                                          position=0, row_json="{}", status="uncertain"))
+            session.commit()
+        self.assert_code("historical-write-requires-review", service.finish_prewrite_navigation_failure,
+                         self.session_factory, request, execute=True, yes=True)
+        self.assertFalse(service.artifact_paths(preview["batch_id"])["results_json"].exists())
+
     def test_modified_snapshot_and_database_evidence_are_rejected(self):
         preview, snapshot = self._preview()
         path = service.artifact_paths(preview["batch_id"])["snapshot"]
