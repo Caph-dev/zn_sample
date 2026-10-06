@@ -111,6 +111,33 @@ def execute_fixture(snapshot, directory, callbacks, **overrides):
     return cleanup.execute_snapshot(snapshot, **arguments)
 
 
+def test_fresh_v1_preview_with_valid_digest_cannot_execute_or_be_resigned(tmp_path, monkeypatch):
+    assert cleanup.IMPLEMENTATION_VERSION == "target-cleanup-v2"
+    with monkeypatch.context() as legacy_implementation:
+        legacy_implementation.setattr(cleanup, "IMPLEMENTATION_VERSION", "target-cleanup-v1")
+        snapshot = make_snapshot()
+        digest = cleanup.persist_preview(snapshot, tmp_path)
+        cleanup.validate_freshness(snapshot)
+    original_files = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    snapshot_path = cleanup.artifact_paths(tmp_path, snapshot["batch_id"])["snapshot"]
+    assert digest == cleanup.payload_digest(snapshot)
+    assert cleanup.parse_timestamp(snapshot["expires_at"]) > datetime.now(timezone.utc)
+    for validate in (cleanup.validate_snapshot, cleanup.validate_freshness):
+        with pytest.raises(cleanup.TargetCleanupError) as error:
+            validate(snapshot)
+        assert error.value.code == "invalid-snapshot"
+    with pytest.raises(cleanup.TargetCleanupError) as error:
+        cleanup.read_snapshot(snapshot_path, digest)
+    assert error.value.code == "invalid-snapshot"
+    callbacks = execution_callbacks()
+    with pytest.raises(cleanup.TargetCleanupError) as error:
+        execute_fixture(snapshot, tmp_path, callbacks)
+    assert error.value.code == "invalid-snapshot"
+    for callback in callbacks.values():
+        callback.assert_not_called()
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == original_files
+
+
 @pytest.mark.parametrize("flags", [(False, False), (True, False), (False, True)])
 def test_missing_execution_gate_has_zero_platform_calls(tmp_path, flags):
     snapshot = make_snapshot()

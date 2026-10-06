@@ -28,11 +28,24 @@ def make_row(invitation_id: str = "old", modified: str = "2025/11/27", **fields)
 
 
 def make_page(page_number: int = 1, rows: list[dict] | None = None, **fields) -> dict:
+    page_rows = [make_row()] if rows is None else rows
+    total = (page_number - 1) * invitations.PAGE_SIZE + len(page_rows) if page_rows else 0
     return {"ok": True, "href": TARGET_HREF, "ready_state": "complete", "ongoing": True,
-            "rows": [make_row()] if rows is None else rows, "page": str(page_number), "total": "",
+            "rows": page_rows, "page": str(page_number), "total": str(total),
             "page_size": "100/页", "list_error": False, "has_empty_state": False,
             "next_control_present": True, "next_disabled": True,
             "previous_control_present": True, "previous_disabled": page_number == 1, **fields}
+
+
+def make_covered_page(page_number: int, total: int, leading_rows: list[dict] | None = None,
+                      **fields) -> dict:
+    expected_count = min(invitations.PAGE_SIZE, total - (page_number - 1) * invitations.PAGE_SIZE)
+    page_rows = list(leading_rows or [])
+    page_rows.extend(make_row(f"page-{page_number}-row-{index}")
+                     for index in range(len(page_rows), expected_count))
+    return make_page(page_number, page_rows, total=str(total),
+                     next_disabled=page_number == (total + invitations.PAGE_SIZE - 1) // invitations.PAGE_SIZE,
+                     **fields)
 
 
 class OfflineTestCase(unittest.TestCase):
@@ -159,12 +172,37 @@ class ScanCompletenessTests(OfflineTestCase):
             self.assertIn(arguments.args[1], (invitations.PREPARE_LIST_JS, invitations.CLICK_PREV_JS))
         return result, extract
 
+    def test_unknown_total_partial_pages_are_incomplete(self) -> None:
+        pages = [
+            make_page(2, [make_row(f"old-{index}") for index in range(20)], total=""),
+            make_page(1, [make_row(f"boundary-{index}", "2026/06/05") for index in range(20)],
+                      total="", next_disabled=False),
+        ]
+        result, _ = self.run_scan(pages)
+        self.assertFalse(result["scan_complete"])
+        self.assertEqual(result["stop_reason"], "page-total-unverified")
+        self.assertEqual(result["pages_scanned"], 1)
+        self.assertEqual([row["invitation_id"] for row in result["rows"]],
+                         [f"old-{index}" for index in range(20)])
+
     def test_reverse_date_boundary_is_complete_and_keeps_scanned_recent_rows(self) -> None:
-        result, _ = self.run_scan([make_page(3), make_page(2, [make_row("boundary", "2026/06/05")])])
+        result, _ = self.run_scan([
+            make_covered_page(3, 201, [make_row()]),
+            make_covered_page(2, 201, [make_row("boundary", "2026/06/05")]),
+        ])
         self.assertEqual(result["stop_reason"], "date-boundary")
         self.assertTrue(result["scan_complete"])
         self.assertEqual(result["pages_scanned"], 2)
-        self.assertEqual([row["invitation_id"] for row in result["rows"]], ["old", "boundary"])
+        self.assertEqual(len(result["rows"]), 101)
+        self.assertEqual([row["invitation_id"] for row in result["rows"][:2]], ["old", "boundary"])
+
+    def test_complete_reverse_scan_reaches_first_page_with_consistent_total(self) -> None:
+        result, _ = self.run_scan([make_covered_page(page_number, 201) for page_number in (3, 2, 1)])
+        self.assertTrue(result["scan_complete"])
+        self.assertEqual(result["stop_reason"], "first-page")
+        self.assertEqual(result["pages_scanned"], 3)
+        self.assertEqual(len(result["rows"]), 201)
+        self.assertEqual(len({row["invitation_id"] for row in result["rows"]}), 201)
 
     def test_verified_first_page_is_complete(self) -> None:
         result, _ = self.run_scan([make_page()])
@@ -218,10 +256,10 @@ class ScanCompletenessTests(OfflineTestCase):
                 self.assertFalse(result["scan_complete"])
 
     def test_fifty_page_limit_preserves_rows_and_never_clicks_the_fifty_first_page(self) -> None:
-        pages = [make_page(page_number, [make_row(str(page_number))]) for page_number in range(60, 10, -1)]
+        pages = [make_covered_page(page_number, 5901) for page_number in range(60, 10, -1)]
         result, _ = self.run_scan(pages)
         self.assertEqual(result["pages_scanned"], 50)
-        self.assertEqual(len(result["rows"]), 50)
+        self.assertEqual(len(result["rows"]), 4901)
         self.assertEqual(result["stop_reason"], "max-pages")
         self.assertFalse(result["scan_complete"])
         self.assertEqual(sum(arguments.args[1] == invitations.CLICK_PREV_JS
@@ -236,11 +274,13 @@ class ScanCompletenessTests(OfflineTestCase):
         self.assertFalse(result["scan_complete"])
 
     def test_page_stall_duplicate_content_wrong_sequence_or_shop_change_is_incomplete(self) -> None:
+        repeated_rows = [make_row(f"repeated-{index}") for index in range(100)]
         cases = (
             ([make_page(3)] * 13, "pagination-stalled"),
-            ([make_page(3), make_page(2)], "repeated-page"),
+            ([make_page(3, repeated_rows, total="300"),
+              make_page(2, repeated_rows, total="300", next_disabled=False)], "repeated-page"),
             ([make_page(3), make_page(1, [make_row("other")])], "page-sequence-changed"),
-            ([make_page(3), make_page(2, [make_row("other")], href=TARGET_HREF.replace("shop-two", "shop-other"))],
+            ([make_page(3), make_covered_page(2, 201, href=TARGET_HREF.replace("shop-two", "shop-other"))],
              "list-context-changed"),
         )
         for pages, expected in cases:
@@ -248,6 +288,49 @@ class ScanCompletenessTests(OfflineTestCase):
                 result, _ = self.run_scan(pages)
                 self.assertFalse(result["scan_complete"])
                 self.assertEqual(result["stop_reason"], expected)
+
+    def test_unknown_or_invalid_totals_never_allow_boundary_or_first_page_completion(self) -> None:
+        for total in ("", "Total: 20", None, "-1", "20.0", "\u00b2"):
+            for page_number in (1, 2):
+                with self.subTest(total=total, page_number=page_number):
+                    rows = [make_row(f"boundary-{index}", "2026/06/05") for index in range(20)]
+                    result, _ = self.run_scan([make_page(page_number, rows, total=total)])
+                    self.assertFalse(result["scan_complete"])
+                    self.assertEqual(result["stop_reason"], "page-total-unverified")
+                    self.assertEqual(len(result["rows"]), 20)
+
+    def test_full_page_and_disabled_next_do_not_substitute_for_total_evidence(self) -> None:
+        page = make_page(rows=[make_row(f"old-{row_index}") for row_index in range(100)])
+        del page["total"]
+        result, _ = self.run_scan([page])
+        self.assertFalse(result["scan_complete"])
+        self.assertEqual(result["stop_reason"], "page-total-unverified")
+        self.assertEqual(len(result["rows"]), 100)
+
+    def test_zero_out_of_range_or_partial_rows_with_known_total_are_incomplete(self) -> None:
+        cases = (
+            make_page(total="0"), make_page(total=0), make_page(2, total="1"),
+            make_page(2, [make_row(f"old-{index}") for index in range(20)], total="220"),
+            make_page(3, [make_row(f"old-{index}") for index in range(20)], total="225"),
+            make_page(rows=[make_row("boundary", "2026/06/05")], total="2"),
+        )
+        for page in cases:
+            with self.subTest(page_number=page["page"], total=page["total"]):
+                result, _ = self.run_scan([page])
+                self.assertFalse(result["scan_complete"])
+                self.assertEqual(result["stop_reason"], "page-rows-incomplete")
+                self.assertEqual(len(result["rows"]), len(page["rows"]))
+
+    def test_partial_nonlast_page_cannot_be_overridden_by_date_boundary(self) -> None:
+        result, _ = self.run_scan([
+            make_covered_page(3, 220),
+            make_page(2, [make_row(f"boundary-{index}", "2026/06/05") for index in range(20)],
+                      total="220", next_disabled=False),
+        ])
+        self.assertFalse(result["scan_complete"])
+        self.assertEqual(result["stop_reason"], "page-rows-incomplete")
+        self.assertEqual(result["pages_scanned"], 2)
+        self.assertEqual(len(result["rows"]), 40)
 
     def test_partial_virtual_rows_or_wrong_page_size_are_blocked(self) -> None:
         for fields in ({"total": "200"}, {"page_size": "50/页"}, {"page_size": "1000/页"}):
@@ -336,7 +419,8 @@ class FixedTargetTests(OfflineTestCase):
     def test_locator_returns_only_requested_id_and_never_calls_cancellation(self) -> None:
         self.context.enter_context(patch.object(invitations, "restore_ongoing_list", return_value=RESTORED))
         self.context.enter_context(patch.object(invitations, "extract_page", side_effect=[
-            make_page(3, [make_row("unlisted")]), make_page(2, [make_row("old"), make_row("another-unlisted")]),
+            make_covered_page(3, 201, [make_row("unlisted")]),
+            make_covered_page(2, 201, [make_row("old"), make_row("another-unlisted")]),
         ]))
         self.execute.side_effect = None
         self.execute.return_value = {"ok": True}
@@ -383,6 +467,23 @@ class FixedTargetTests(OfflineTestCase):
         )
         self.assertEqual(result["reason"], "first-page-unverified")
 
+    def test_locator_does_not_trust_even_a_matching_id_without_complete_page_evidence(self) -> None:
+        self.context.enter_context(patch.object(invitations, "restore_ongoing_list", return_value=RESTORED))
+        extract = self.context.enter_context(patch.object(invitations, "extract_page"))
+        self.execute.side_effect = None
+        self.execute.return_value = {"ok": True}
+        for total, reason in (("", "page-total-unverified"), ("2", "page-rows-incomplete")):
+            with self.subTest(total=total):
+                extract.return_value = make_page(total=total)
+                result = invitations.locate_target_invitation(
+                    "store-two", invitation_id="old", expected_last_modified="2025/11/27", cutoff=CUTOFF,
+                )
+                self.assertFalse(result["found"])
+                self.assertFalse(result["revalidated"])
+                self.assertEqual(result["reason"], reason)
+        for arguments in self.execute.call_args_list:
+            self.assertEqual(arguments.args[1], invitations.PREPARE_LIST_JS)
+
     def test_invalid_fixed_target_stops_before_any_transport(self) -> None:
         for fields in ({"invitation_id": ""}, {"expected_last_modified": "unknown"},
                        {"expected_last_modified": "2026/06/05"}, {"execute": "true"}):
@@ -423,6 +524,18 @@ class CancellationEvidenceTests(OfflineTestCase):
                 self.assertEqual(result["status"], "skipped")
                 self.assertFalse(result["write_attempted"])
         self.execute.assert_not_called()
+
+    def test_unknown_total_or_partial_page_never_dispatches_write(self) -> None:
+        for total, reason in (("", "page-total-unverified"), ("2", "page-rows-incomplete")):
+            with self.subTest(total=total):
+                self.extract.return_value = make_page(total=total)
+                result = self.cancel(execute=True)
+                self.assertEqual(result["status"], "skipped")
+                self.assertFalse(result["write_attempted"])
+                self.assertEqual(result["reason"], reason)
+        self.execute.assert_not_called()
+        self.restore.assert_not_called()
+        self.readback.assert_not_called()
 
     def test_confirmed_and_same_page_gone_is_submitted_not_platform_success(self) -> None:
         raw = {"ok": True, "invitation_id": "old", "clickedCancel": True, "confirmed": True, "write_attempted": True}
@@ -493,6 +606,12 @@ class CancellationEvidenceTests(OfflineTestCase):
         self.assertTrue(self.original_readback("store-two", "old", make_page()))
         self.extract.return_value = make_page()
         self.assertFalse(self.original_readback("store-two", "old", make_page()))
+
+    def test_readback_does_not_infer_absence_from_unknown_total_or_partial_rows(self) -> None:
+        for total in ("", "2"):
+            with self.subTest(total=total):
+                self.extract.return_value = make_page(rows=[make_row("other")], total=total)
+                self.assertIsNone(self.original_readback("store-two", "old", make_page()))
 
     def test_id_template_markers_are_rendered_once_as_data_not_code(self) -> None:
         invitation_id = 'fixed-%EXPECTED_HREF%-%DO_CANCEL%-"'

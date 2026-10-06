@@ -567,12 +567,14 @@ def _page_problem(data: Mapping[str, Any], context: tuple[str, str, str] | None)
         return "page-size-unverified"
     if len(data["rows"]) > PAGE_SIZE:
         return "page-size-exceeded"
-    total_text = str(data.get("total") or "")
-    if total_text.isdigit():
-        page_number = _page_number(data)
-        expected_count = min(PAGE_SIZE, max(0, int(total_text) - (page_number - 1) * PAGE_SIZE))
-        if len(data["rows"]) != expected_count:
-            return "page-rows-incomplete"
+    total_text = str(data.get("total", ""))
+    # Pagination controls alone do not prove that every virtual row is mounted.
+    if not re.fullmatch(r"[0-9]+", total_text):
+        return "page-total-unverified"
+    page_number = _page_number(data)
+    expected_count = min(PAGE_SIZE, max(0, int(total_text) - (page_number - 1) * PAGE_SIZE))
+    if len(data["rows"]) != expected_count:
+        return "page-rows-incomplete"
     invitation_ids = [str(row.get("invitation_id") or "") for row in data["rows"]]
     known_ids = [invitation_id for invitation_id in invitation_ids if invitation_id]
     if len(known_ids) != len(set(known_ids)):

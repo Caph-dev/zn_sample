@@ -22,7 +22,9 @@ from assistant.database.engine import create_database_engine
 from assistant.database.models import Base, Job, TargetCleanupBatch, TargetCleanupItem
 from assistant.services import target_cleanup_service as service
 from assistant.services.release_lifecycle import LifecycleCoordinator, ServiceStopping
+from lib import target_invitation_dom as invitations
 from lib import target_plan_cleanup as core
+from tests.test_target_invitation_dom import make_page, make_row
 
 PAGE_STATE = {
     "ok": True, "href": "https://seller.us.tiktokshopglobalselling.com/homepage",
@@ -230,6 +232,92 @@ class TargetCleanupServiceTests(unittest.TestCase):
                 self.assertFalse(payload["can_execute"])
                 self.assertEqual(payload["preview_status"], "completed" if complete else "incomplete")
 
+    def test_actual_unknown_total_scan_retains_reports_without_execution_admission(self):
+        preview = service.create_preview(self.session_factory, 4, "unknown-total-preview")
+        self._job_status(preview["job_id"], "running")
+        request = service.begin_script(self.session_factory, preview["batch_id"], preview["job_id"], "preview")
+        cutoff = datetime.fromisoformat(request["frozen"]["cutoff"]).date()
+        href = "https://affiliate.tiktokshopglobalselling.com/affiliate/collaboration/target-invitation?shop_id=shop-1&shop_region=US"
+        pages = [
+            make_page(2, [make_row(f"old-{row_index}", (cutoff - timedelta(days=1)).isoformat())
+                          for row_index in range(20)], total="", href=href),
+            make_page(1, [make_row(f"boundary-{row_index}", cutoff.isoformat()) for row_index in range(20)],
+                      total="", href=href, next_disabled=False),
+        ]
+        with patch.object(invitations, "restore_ongoing_list", return_value={"nav": {"ok": True}}), \
+                patch.object(invitations, "extract_page", side_effect=pages) as extract, \
+                patch.object(invitations, "zclaw_exec", return_value={"ok": True}) as transport, \
+                patch.object(invitations.time, "sleep"), \
+                patch.object(invitations, "cancel_invitation_by_id") as cancel:
+            scan = invitations.scan_older_invitations(request["store_id"], cutoff=cutoff)
+            snapshot = core.create_snapshot(request["frozen"], scan)
+            digest = core.persist_preview(snapshot, Path(request["paths"]["snapshot"]).parent)
+            service.finish_preview(self.session_factory, preview["batch_id"], snapshot)
+            self._job_status(preview["job_id"], "succeeded")
+            self.running_mock.reset_mock()
+            self.page_mock.reset_mock()
+            payload = service.batch_payload(self.session_factory, preview["batch_id"])
+            self.assertFalse(payload["scan_complete"])
+            self.assertFalse(payload["can_execute"])
+            self.assertEqual(payload["preview_status"], "incomplete")
+            self.assertEqual(payload["stop_reason"], "page-total-unverified")
+            self.assertEqual(payload["scan_count"], 20)
+            self.assertEqual(payload["candidate_count"], 20)
+            self.assertEqual(payload["snapshot_sha256"], digest)
+            self.assert_code("preview-not-completed", service.create_execution, self.session_factory,
+                             preview["batch_id"], "y", "unknown-total-execute")
+            paths = service.artifact_paths(preview["batch_id"])
+            for report_name in ("scan_csv", "candidates_csv"):
+                self.assertIn(report_name, payload["downloads"])
+                self.assertIn(b"old-19", paths[report_name].read_bytes())
+            self.assertFalse(paths["execute_envelope"].exists())
+            self.assertFalse(paths["backup_json"].exists())
+            extract.assert_called_once_with("store-1")
+            transport.assert_called_once_with("store-1", invitations.PREPARE_LIST_JS)
+            cancel.assert_not_called()
+            self.running_mock.assert_not_called()
+            self.page_mock.assert_not_called()
+        with self.session_factory() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Job)), 1)
+            self.assertEqual(session.scalar(select(func.count()).select_from(Job).where(
+                Job.job_type == service.EXECUTE_JOB_TYPE)), 0)
+            self.assertIsNone(session.get(TargetCleanupBatch, preview["batch_id"]).execute_job_id)
+
+    def test_fresh_v1_preview_is_rejected_without_resigning_or_platform_probe(self):
+        with patch.object(core, "IMPLEMENTATION_VERSION", "target-cleanup-v1"):
+            preview, snapshot = self._preview()
+        paths = service.artifact_paths(preview["batch_id"])
+        original_files = {path: path.read_bytes() for path in paths.values() if path.exists()}
+        self.assertEqual(core.payload_digest(snapshot), service.batch_payload(
+            self.session_factory, preview["batch_id"])["snapshot_sha256"])
+        self.assertGreater(core.parse_timestamp(snapshot["expires_at"]), datetime.now(timezone.utc))
+        self.running_mock.reset_mock()
+        self.page_mock.reset_mock()
+        self.assert_code("invalid-snapshot", service.create_execution, self.session_factory,
+                         preview["batch_id"], "y", "new-execute")
+        self.assertEqual({path: path.read_bytes() for path in paths.values() if path.exists()}, original_files)
+        self.running_mock.assert_not_called()
+        self.page_mock.assert_not_called()
+        with self.session_factory() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Job)), 1)
+            batch = session.get(TargetCleanupBatch, preview["batch_id"])
+            self.assertEqual(batch.execute_status, "unclaimed")
+            self.assertIsNone(batch.execute_idempotency_key)
+
+    def test_v1_execution_queued_before_upgrade_is_rejected_at_worker_start(self):
+        with patch.object(core, "IMPLEMENTATION_VERSION", "target-cleanup-v1"):
+            preview, _snapshot = self._preview()
+            execution = self._execution(preview, begin=False)
+        self._job_status(execution["job_id"], "running")
+        self.running_mock.reset_mock()
+        self.page_mock.reset_mock()
+        self.assert_code("invalid-snapshot", service.begin_script, self.session_factory,
+                         preview["batch_id"], execution["job_id"], "execute")
+        self.assertEqual(service.batch_payload(self.session_factory, preview["batch_id"])["execute_status"], "queued")
+        self.assertFalse(service.artifact_paths(preview["batch_id"])["backup_json"].exists())
+        self.running_mock.assert_not_called()
+        self.page_mock.assert_not_called()
+
     def test_confirmation_only_y_and_global_phase_key_conflicts(self):
         preview, _snapshot = self._preview()
         for answer in ("yes", "", "n", True):
@@ -417,6 +505,43 @@ class TargetCleanupServiceTests(unittest.TestCase):
                 self.assertEqual(service.batch_payload(self.session_factory, second["batch_id"])["execute_status"], "unclaimed")
                 recovered = service.batch_payload(self.session_factory, first["batch_id"])
                 self.assertEqual(recovered["items"][0]["status"], "submitted" if status == "submitted" else "uncertain")
+
+    def test_v1_write_history_recovers_and_blocks_v2_without_changing_original_artifacts(self):
+        for history_count, status in enumerate(("submitted", "uncertain", "attempting"), start=1):
+            with self.subTest(status=status):
+                invitation_id = "legacy-" + status
+                with patch.object(core, "IMPLEMENTATION_VERSION", "target-cleanup-v1"):
+                    first, snapshot = self._preview(key=status, identifiers=(invitation_id,))
+                    execution = self._execution(first, key=status + "-execute")
+                    results = self._write_results(first["batch_id"], [status])
+                    paths = service.artifact_paths(first["batch_id"])
+                    core.atomic_write_json(paths["backup_json"], snapshot, immutable=True)
+                    core.write_csv_report(paths["backup_csv"], results["items"], results=True, immutable=True)
+                original_files = {path: path.read_bytes() for path in paths.values() if path.exists()}
+                self._job_status(execution["job_id"], "interrupted")
+                second, current_snapshot = self._preview(key=status + "-v2", identifiers=(invitation_id,))
+                self.assertEqual(current_snapshot["implementation_version"], "target-cleanup-v2")
+                self.assert_code("historical-write-requires-review", service.create_execution,
+                                 self.session_factory, second["batch_id"], "y", status + "-v2-execute")
+                service.recover_batch(self.other_session_factory, first["batch_id"])
+                recovered = service.batch_payload(self.session_factory, first["batch_id"])
+                expected_status = "submitted" if status == "submitted" else "uncertain"
+                self.assertEqual(recovered["items"][0]["status"], expected_status)
+                self.assertEqual(recovered["execute_status"], "completed" if status == "submitted" else "needs_review")
+                self.assertEqual(recovered["frozen"]["implementation_version"], "target-cleanup-v1")
+                self.assertEqual(recovered["error_code"], "execution-incomplete")
+                self.assertIn("results_csv", recovered["downloads"])
+                self.assertIn(expected_status.encode(), paths["results_csv"].read_bytes())
+                self.assertEqual(core.read_execution_results(paths["results_json"], snapshot,
+                                                            core.payload_digest(snapshot))[0]["status"], status)
+                for path, original_bytes in original_files.items():
+                    self.assertEqual(path.read_bytes(), original_bytes)
+                current = service.batch_payload(self.session_factory, second["batch_id"])
+                self.assertFalse(current["can_execute"])
+                self.assertEqual(current["execute_status"], "unclaimed")
+                with self.session_factory() as session:
+                    self.assertEqual(session.scalar(select(func.count()).select_from(Job).where(
+                        Job.job_type == service.EXECUTE_JOB_TYPE)), history_count)
 
     def test_get_uses_cached_database_state_bounded_items_and_only_csv_links(self):
         preview, _snapshot = self._preview(identifiers=tuple("invite-" + str(index) for index in range(105)))

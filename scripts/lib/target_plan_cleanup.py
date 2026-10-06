@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
-IMPLEMENTATION_VERSION = "target-cleanup-v1"
+IMPLEMENTATION_VERSION = "target-cleanup-v2"
 PREVIEW_VALIDITY_SECONDS = 30 * 60
 MAX_SCAN_ROWS = 5000
 ROW_FIELDS = (
@@ -212,6 +212,7 @@ def validate_snapshot(snapshot: Any) -> dict[str, Any]:
 
 def validate_freshness(snapshot: dict[str, Any], *, now: datetime | None = None,
                        local_date: date | None = None) -> None:
+    validate_snapshot(snapshot)
     current_time = now or datetime.now(timezone.utc)
     current_date = local_date or datetime.now().astimezone().date()
     if not snapshot["scan_complete"]:
