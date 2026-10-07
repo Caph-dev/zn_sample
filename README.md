@@ -72,6 +72,18 @@ uv run python -m pytest tests -q
 
 同机升级只替换已停止的安装目录，不删除用户目录和原历史证据。**不要同时使用旧源码启动器、直接业务脚本和发布包**：新入口无法替旧程序补上全部互斥；源码启动器默认重启行为仍与下面说明一致。当前仅完成本机 Mac 离线内测证明；Windows 10/11 x64、干净 Mac、最低系统版本和签名/公证仍需后续原生验收。
 
+### GitHub Actions：构建 Windows 内测 ZIP（技术人员）
+
+工作流为 [`.github/workflows/windows-bundle.yml`](.github/workflows/windows-bundle.yml)，只允许手动触发，不在 push/PR 时自动构建，也不自动创建 GitHub Release。首次使用需将工作流及相关源码提交、推送到 GitHub **默认分支**，且仓库已启用 Actions；提交前确认不包含密钥、真实配置、数据库或业务导出。`release/` 和 `build/` 是本地产物目录，不提交。
+
+1. 打开仓库 **Actions → Windows bundle (internal test) → Run workflow**，选择要构建的可信分支。不要选择包含未经审查代码的分支；构建会运行所选源码。
+2. 先在 Linux 执行现有发布离线回归，再在 `windows-2022` x64 runner 上准备 MSYS2/MinGW、按锁文件构建私有 Python/Node/FFmpeg 与两个网页。CI 不运行业务安装脚本，不安装或授权紫鸟 CLI，不需要配置任何飞书/紫鸟/LLM 业务 Secrets。
+3. Windows 任务依次检查 manifest、私有 Python/Node、原生 DLL 依赖和隔离的离线 bundle smoke。任一步失败都不上传交付 ZIP；保留已生成的脱敏报告供排查，不能为出包跳过检查。
+4. 成功后，在该次运行的 **Artifacts** 下载 `zn-sample-windows-x64-<run_id>-<run_attempt>`。GitHub 下载的是外层 Artifact ZIP，解压后取出内层 `zn-sample-<版本>-windows-x64.zip`、同名 `.sha256` 与 `release-info.json`；内层 ZIP 解压后顶层是完整 `bundle/`。如需存到本机，将它们放进项目 `release/` 即可；Actions 不会自动写回你的 Mac。
+5. `release-info.json` 记录构建源码 commit、成品 SHA-256 与“内测”标识。报告 Artifact 与回归 XML 单独下载，默认保留 14 天；在过期前保存所需成品与报告。私有仓库的构建用量和存储按 GitHub 账户额度计费。
+
+**首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。
+
 ### 源码模式（开发/维护）
 
 ```bash

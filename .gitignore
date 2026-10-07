@@ -9,6 +9,9 @@ config/config.toml
 node_modules/
 build/
 
+# Local distributable archives; CI publishes these as artifacts, not source.
+/release/
+
 # 自动审批 / 操作台前端构建产物（构建后由静态目录提供，不提交）
 assistant/web/static/auto-approval/
 assistant/web/static/console/

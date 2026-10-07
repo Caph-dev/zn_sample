@@ -1,0 +1,207 @@
+name: Windows bundle (internal test)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Do not interrupt an in-progress build when a second run is requested.
+concurrency:
+  group: windows-bundle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-tests:
+    name: Offline release regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read application runtime policy
+        id: policy
+        shell: bash
+        run: |
+          python3 -B - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          from setup.install_deps import PINNED_PYTHON, RELEASE_NODE_VERSION
+          print(f"python-version={PINNED_PYTHON}")
+          print(f"node-version={RELEASE_NODE_VERSION}")
+          PYTHON
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.23"
+          python-version: ${{ steps.policy.outputs.python-version }}
+          enable-cache: false
+
+      - name: Set up build-only Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ steps.policy.outputs.node-version }}
+
+      - name: Install locked dependencies and build both pages
+        shell: bash
+        run: |
+          uv sync --frozen --dev
+          npm ci --ignore-scripts
+          npm run build:web
+
+      - name: Run offline release regressions
+        shell: bash
+        run: uv run --frozen python -B -m pytest tests/release -q --junitxml=build/release-tests.xml
+
+      - name: Upload regression report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/release-tests.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  windows-bundle:
+    name: Build and check Windows x64 bundle
+    needs: release-tests
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read application Python policy
+        id: policy
+        run: |
+          python -B -c "from setup.install_deps import PINNED_PYTHON; print(f'python-version={PINNED_PYTHON}')" >> $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Set up uv
+        id: uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.12.23"
+          python-version: ${{ steps.policy.outputs.python-version }}
+          enable-cache: false
+
+      - name: Prepare build interpreter and report directory
+        run: |
+          uv sync --frozen --dev
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path release -ErrorAction Stop | Out-Null
+
+      # This is an isolated CI compiler environment, not an operator launcher.
+      # Never use setup/install_deps.py here: it also installs the external CLI.
+      - name: Prepare native FFmpeg toolchain
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: MINGW64
+          path-type: minimal
+          update: true
+          cache: false
+          install: >-
+            make
+            diffutils
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+
+      - name: Build complete bundle with private runtimes
+        shell: msys2 {0}
+        env:
+          UV_BUILD_EXECUTABLE: ${{ steps.uv.outputs.uv-path }}
+        run: |
+          set -euo pipefail
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          .venv/Scripts/python.exe -B setup/release/build_bundle.py bundle \
+            --target windows-x64 \
+            --uv "$(cygpath -m "$UV_BUILD_EXECUTABLE")" \
+            --ffmpeg-shell "$(cygpath -m "$(command -v sh)")" \
+            --ffmpeg-cc "$(cygpath -m "$(command -v gcc)")" \
+            --ffmpeg-make "$(cygpath -m "$(command -v make)")" \
+            > release/build-report.json
+
+      - name: Audit native runtime dependencies
+        run: |
+          @'
+          import json
+          from pathlib import Path
+          from setup.release import build_bundle, runtime_artifacts
+
+          bundle_root = Path("build/release/windows-x64/bundle").resolve()
+          target = runtime_artifacts.get_target("windows-x64")
+          runtime_artifacts.require_native_host(target)
+          manifest = build_bundle.verify_manifest(bundle_root, "windows-x64")
+          python_report = build_bundle.run_checked(
+              [str(bundle_root / target["python_executable"]), "-I", "-B", "-c",
+               build_bundle.PYTHON_PROBE, build_bundle.policy.RELEASE_PYTHON_VERSION],
+              cwd=bundle_root, label="ci-private-python-probe",
+          )
+          node_version = build_bundle.run_checked(
+              [str(bundle_root / target["node_executable"]), "--version"],
+              cwd=bundle_root, label="ci-private-node-probe",
+          ).stdout.strip()
+          if node_version != "v" + build_bundle.policy.RELEASE_NODE_VERSION:
+              raise runtime_artifacts.RuntimeBlocked("node-version-mismatch")
+          report = {
+              "target": manifest["target"],
+              "python": json.loads(python_report.stdout),
+              "node_version": node_version,
+              "dependency_audit": runtime_artifacts.audit_windows_dependencies(bundle_root),
+              "business_operations_exercised": False,
+          }
+          Path("release/runtime-audit.json").write_text(
+              json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="utf-8",
+          )
+          '@ | & .venv/Scripts/python.exe -B -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run offline smoke with the bundle interpreter
+        run: |
+          & .venv/Scripts/python.exe -B setup/release/smoke_bundle.py --bundle build/release/windows-x64/bundle --offline > release/smoke-report.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Create and verify distributable ZIP
+        env:
+          BUILD_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          & .venv/Scripts/python.exe -B setup/release/package_windows_bundle.py --bundle build/release/windows-x64/bundle --output-directory release --source-revision $env:BUILD_SOURCE_REVISION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # No ZIP is uploaded on failure; reports are separate from the deliverable.
+      - name: Upload verified internal-test ZIP
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zn-sample-windows-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/*.zip
+            release/*.zip.sha256
+            release/release-info.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload redacted build reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-bundle-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/build-report.json
+            release/runtime-audit.json
+            release/smoke-report.json
+          if-no-files-found: ignore
+          retention-days: 14
