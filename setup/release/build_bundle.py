@@ -313,8 +313,9 @@ def build_ffmpeg(staging_root: Path, cache_root: Path, target: dict, arguments) 
         timeout=180,
         ffmpeg_diagnostics_dir=getattr(arguments, "ffmpeg_diagnostics_dir", None),
     )
+    executable_name = "ffmpeg.exe" if target["system"] == "Windows" else "ffmpeg"
     run_checked(
-        [make_path, "-j", str(min(os.cpu_count() or 1, 8)), "ffmpeg"],
+        [make_path, "-j", str(min(os.cpu_count() or 1, 8)), executable_name],
         cwd=source_directory,
         label="ffmpeg-compile",
         timeout=1200,
@@ -322,7 +323,6 @@ def build_ffmpeg(staging_root: Path, cache_root: Path, target: dict, arguments) 
     )
     runtime_directory = staging_root / "runtime" / "ffmpeg"
     runtime_directory.mkdir()
-    executable_name = "ffmpeg.exe" if target["system"] == "Windows" else "ffmpeg"
     shutil.copy2(
         source_directory / executable_name, runtime_directory / executable_name
     )
