@@ -279,7 +279,14 @@ def resolve_bundle_python(bundle_root: Path) -> tuple[Path, dict]:
 def isolated_environment(sandbox: Path, port: int, parent: dict[str, str] | None = None) -> dict[str, str]:
     """Allowlist OS essentials; exclude secrets, proxy settings and dev runtimes."""
     source = os.environ if parent is None else parent
-    environment = {name: source[name] for name in ("SystemRoot", "WINDIR", "COMSPEC") if name in source}
+    # Windows os.environ uppercases keys; dict(os.environ) no longer provides
+    # case-insensitive lookup. Preserve SystemRoot across every child hop so
+    # Winsock can load its providers, without inheriting PATH or other values.
+    essential_names = {name.upper(): name for name in ("SystemRoot", "WINDIR", "COMSPEC")}
+    environment = {
+        essential_names[name.upper()]: value
+        for name, value in source.items() if name.upper() in essential_names
+    }
     directories = {
         "HOME": "home", "USERPROFILE": "home", "APPDATA": "roaming",
         "LOCALAPPDATA": "local", "XDG_CONFIG_HOME": "xdg/config",

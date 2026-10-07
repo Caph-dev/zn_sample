@@ -39,6 +39,34 @@ def make_windows_event(arguments, keywords):
     )
 
 
+@pytest.mark.parametrize("essential_names", [
+    ("SystemRoot", "WINDIR", "COMSPEC"),
+    ("SYSTEMROOT", "WINDIR", "COMSPEC"),
+    ("systemroot", "windir", "comspec"),
+])
+def test_windows_system_environment_survives_nested_child_filtering(
+    windows_audit, essential_names,
+):
+    audit, launcher = windows_audit
+    essential_values = ("C:/Windows", "C:/Windows", "C:/Windows/System32/cmd.exe")
+    parent = dict(zip(essential_names, essential_values))
+    parent.update(PATH="C:/developer/tools", LLM_API_KEY="synthetic-secret", PYTHONPATH="C:/source")
+    for child_generation in range(3):
+        original_parent = dict(parent)
+        keywords = {"cwd": audit.sandbox, "env": parent}
+        audit.prepare_child([str(audit.python_path), "-I", "-B", str(launcher), "diagnose"], keywords)
+        assert parent == original_parent
+        environment = keywords["env"]
+        assert environment["SystemRoot"] == essential_values[0], child_generation
+        assert environment["WINDIR"] == essential_values[1]
+        assert environment["COMSPEC"] == essential_values[2]
+        assert environment["PATH"] == ""
+        assert "LLM_API_KEY" not in environment and "PYTHONPATH" not in environment
+        assert Path(environment["LOCALAPPDATA"]).is_relative_to(audit.sandbox)
+        # Model Windows os.environ -> dict(os.environ) at the next hop.
+        parent = {name.upper(): value for name, value in environment.items()}
+
+
 @pytest.mark.parametrize("program", ["python", "ffmpeg"])
 def test_only_prepared_exact_windows_event_is_accepted_once(windows_audit, program):
     audit, launcher = windows_audit
@@ -173,8 +201,16 @@ def test_native_popen_audit_event_with_unicode_spaced_paths(tmp_path: Path):
     launcher.write_text("# fixture only; never executed\n", encoding="utf-8")
     helper = sandbox / "guard fixture.py"
     helper.write_text(
-        "import json, sys\n"
-        "print(json.dumps({'isolated': sys.flags.isolated, 'utf8': sys.flags.utf8_mode, 'arguments': sys.argv[1:]}))\n",
+        "import asyncio, json, os, socket, sys\n"
+        "with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:\n"
+        "    listener.bind(('127.0.0.1', 0))\n"
+        "    listener.listen(1)\n"
+        "event_loop = asyncio.new_event_loop()\n"
+        "event_loop.close()\n"
+        "print(json.dumps({'isolated': sys.flags.isolated, 'utf8': sys.flags.utf8_mode,\n"
+        "                  'arguments': sys.argv[1:], 'socket_ready': True,\n"
+        "                  'system_root_present': bool(os.environ.get('SystemRoot')),\n"
+        "                  'path_empty': os.environ.get('PATH') == ''}))\n",
         encoding="utf-8",
     )
     program = f"""
@@ -196,7 +232,9 @@ print(result.stdout.strip())
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["isolated"] == 1
+    assert report["socket_ready"] is True and report["path_empty"] is True
     if sys.platform == "win32":
         assert report["utf8"] == 1
+        assert report["system_root_present"] is True
     assert report["arguments"] == ["--guarded-launch", str(bundle), str(sandbox), str(launcher), "serve"]
     assert not (sandbox / "audit-violations.jsonl").exists()
