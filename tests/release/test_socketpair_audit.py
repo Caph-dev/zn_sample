@@ -11,20 +11,43 @@ from setup.release import smoke_bundle as smoke
 
 
 @pytest.mark.parametrize("allow_internal_pair", [False, True])
-def test_asyncio_tcp_socketpair_has_no_general_loopback_permission(tmp_path: Path, allow_internal_pair: bool):
+@pytest.mark.parametrize("fallback_layout", ["private-helper", "public-only"])
+def test_asyncio_tcp_socketpair_has_no_general_loopback_permission(
+    tmp_path: Path, allow_internal_pair: bool, fallback_layout: str,
+):
     sandbox = tmp_path / "socketpair sandbox"
     sandbox.mkdir()
     program = f"""
-import asyncio, pathlib, socket, sys
+import ast, asyncio, pathlib, socket, sys
 from types import SimpleNamespace
 sys.path.insert(0, {str(Path(smoke.__file__).resolve().parents[2])!r})
 from setup.release import smoke_bundle as smoke
 sandbox = pathlib.Path({str(sandbox)!r})
-# Force the actual CPython Windows fallback on every host. This is not a
-# synthetic socket implementation; bind/connect/accept and audit are real.
-socket.socketpair = socket._fallback_socketpair
+# On Unix some stdlib versions only define the TCP fallback in the inactive
+# Windows branch. Compile that function from this interpreter's own socket.py,
+# without copying its implementation or executing unrelated module code.
+socket_source = pathlib.Path(socket.__file__).read_text(encoding='utf-8')
+socket_syntax = ast.parse(socket_source)
+fallback_definitions = [
+    definition for definition in ast.walk(socket_syntax)
+    if isinstance(definition, ast.FunctionDef)
+    and definition.name in {{'_fallback_socketpair', 'socketpair'}}
+    and any(isinstance(node, ast.Name) and node.id == 'csock' for node in ast.walk(definition))
+]
+assert len(fallback_definitions) == 1, 'stdlib TCP socketpair contract changed'
+definition = fallback_definitions[0]
+definition.name = '_fallback_socketpair' if {fallback_layout!r} == 'private-helper' else 'socketpair'
+fallback_namespace = dict(vars(socket))
+exec(compile(ast.Module(body=[definition], type_ignores=[]), socket.__file__, 'exec'), fallback_namespace)
+socket.socketpair = fallback_namespace[definition.name]
+if {fallback_layout!r} == 'private-helper':
+    socket._fallback_socketpair = socket.socketpair
+elif hasattr(socket, '_fallback_socketpair'):
+    del socket._fallback_socketpair
+assert hasattr(socket, '_fallback_socketpair') == ({fallback_layout!r} == 'private-helper')
 smoke.sys = SimpleNamespace(platform='win32', _getframe=sys._getframe, addaudithook=sys.addaudithook)
 audit = smoke.OfflineAudit(sandbox / 'bundle', sandbox, pathlib.Path(sys.executable))
+assert audit.socketpair_code is socket.socketpair.__code__
 if not {allow_internal_pair!r}:
     audit.socketpair_code = None
 audit.install()

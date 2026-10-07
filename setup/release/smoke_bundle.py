@@ -331,7 +331,9 @@ class OfflineAudit:
         self.child_processes: list[subprocess.Popen] = []
         self.original_popen = subprocess.Popen
         self.pending_windows_launch = threading.local()
-        fallback_socketpair = getattr(socket, "_fallback_socketpair", None)
+        # Some 3.12 builds define the TCP fallback directly as socketpair;
+        # others expose it separately as _fallback_socketpair.
+        fallback_socketpair = getattr(socket, "_fallback_socketpair", socket.socketpair)
         self.socketpair_code = getattr(fallback_socketpair, "__code__", None)
 
     def block(self, code: str, *, path_category: str = "", resource_name: str = "") -> None:
