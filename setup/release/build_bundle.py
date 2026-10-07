@@ -32,6 +32,92 @@ ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 policy = artifacts.policy
 RuntimeBlocked = artifacts.RuntimeBlocked
+FFMPEG_DIAGNOSTIC_LIMIT = 256 * 1024
+FFMPEG_DIAGNOSTIC_LABELS = frozenset({"ffmpeg-configure", "ffmpeg-compile"})
+
+
+def redact_ffmpeg_diagnostic(value: bytes | str | None, command: list[str], cwd: Path) -> str:
+    """Keep compiler errors, not inherited credentials or build-machine paths."""
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+    secret_names = re.compile(r"secret|token|password|credential|cookie|api.?key|authorization", re.I)
+    secret_values = {
+        content for name, content in os.environ.items() if content and secret_names.search(name)
+    }
+    for secret_value in sorted(secret_values, key=len, reverse=True):
+        text = text.replace(secret_value, "[redacted]")
+    text = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [redacted]", text)
+    text = re.sub(
+        r'''(?ix)(\b[\w.-]*(?:secret|token|password|credential|cookie|api[_-]?key|authorization)[\w.-]*["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;]+)''',
+        lambda match: match.group(1) + "[redacted]", text,
+    )
+    text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", text)
+    # Match native, forward-slash, and MSYS drive spellings of known roots.
+    path_roots = {
+        str(ROOT), str(cwd), str(cwd.parent), str(Path.home()), str(Path(command[0]).parent),
+    }
+    for argument in command:
+        if argument.startswith(("--cc=", "--host-cc=")):
+            path_roots.add(str(Path(argument.partition("=")[2]).parent))
+    path_variants = set()
+    for path_root in path_roots:
+        normalized_root = path_root.replace("\\", "/").rstrip("/")
+        if not normalized_root or normalized_root == ".":
+            continue
+        path_variants.update((normalized_root, normalized_root.replace("/", "\\")))
+        if re.match(r"^[A-Za-z]:/", normalized_root):
+            drive_letter = normalized_root[0].lower()
+            path_variants.add("/" + drive_letter + normalized_root[2:])
+            path_variants.add("/cygdrive/" + drive_letter + normalized_root[2:])
+    for path_variant in sorted(path_variants, key=len, reverse=True):
+        text = re.sub(re.escape(path_variant), "[build-path]", text, flags=re.I)
+    text = re.sub(
+        r'''(?i)(?<![\w:/\\])(?:[a-z]:[/\\]|/(?:usr|opt|home|Users|tmp|private|mingw64|ucrt64|cygdrive|[a-z])/)\S+''',
+        "[absolute-path]", text,
+    )
+    # Remove terminal control sequences before displaying archived diagnostics.
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = "".join(character for character in text if character in "\n\t" or ord(character) >= 32)
+    if len(text) > FFMPEG_DIAGNOSTIC_LIMIT:
+        text = "[earlier output omitted]\n" + text[-FFMPEG_DIAGNOSTIC_LIMIT:]
+    return text
+
+
+def save_ffmpeg_failure_diagnostics(
+    directory: Path | None, *, command: list[str], cwd: Path, label: str,
+    reason: str, stdout: bytes | str | None, stderr: bytes | str | None,
+) -> None:
+    """Publish only fixed, redacted FFmpeg failure files outside the payload."""
+    if directory is None or label not in FFMPEG_DIAGNOSTIC_LABELS:
+        return
+    try:
+        destination_root = directory.resolve()
+        if destination_root.is_relative_to(cwd.parent.resolve()):
+            raise RuntimeBlocked("ffmpeg-diagnostics-inside-build-tree")
+        destination_root.mkdir(parents=True, exist_ok=True)
+        config_log = cwd / "ffbuild/config.log"
+        config_output = b""
+        if config_log.is_file() and not config_log.is_symlink():
+            with config_log.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                log_size = stream.tell()
+                stream.seek(max(0, log_size - FFMPEG_DIAGNOSTIC_LIMIT))
+                config_output = stream.read(FFMPEG_DIAGNOSTIC_LIMIT)
+            if log_size > FFMPEG_DIAGNOSTIC_LIMIT:
+                # Do not publish a partial first line with its credential key cut off.
+                config_output = config_output.partition(b"\n")[2]
+        for suffix, content in (
+            ("stdout.log", stdout), ("stderr.log", stderr), ("config.log", config_output),
+        ):
+            with (destination_root / f"{label}-{suffix}").open("x", encoding="utf-8") as stream:
+                stream.write(redact_ffmpeg_diagnostic(content, command, cwd))
+        with (destination_root / f"{label}-failure.json").open("x", encoding="utf-8") as stream:
+            json.dump({"stage": label, "reason": reason, "redacted": True}, stream)
+            stream.write("\n")
+        logger.warning("FFmpeg failure diagnostics saved for %s (redacted)", label)
+    except (OSError, RuntimeBlocked):
+        # Diagnostic I/O must never mask the original compiler failure.
+        logger.warning("FFmpeg failure diagnostics unavailable for %s", label)
+
 
 PYTHON_PROBE = r"""
 import ctypes, hashlib, importlib, importlib.metadata, json, pathlib
@@ -95,6 +181,7 @@ def run_checked(
     timeout: int = 120,
     environment: dict | None = None,
     binary: bool = False,
+    ffmpeg_diagnostics_dir: Path | None = None,
 ) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
@@ -108,8 +195,17 @@ def run_checked(
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
+        save_ffmpeg_failure_diagnostics(
+            ffmpeg_diagnostics_dir, command=command, cwd=cwd, label=label,
+            reason="timeout" if isinstance(error, subprocess.TimeoutExpired) else "unavailable",
+            stdout=getattr(error, "stdout", None), stderr=getattr(error, "stderr", None),
+        )
         raise RuntimeBlocked(f"{label}-unavailable-or-timeout") from error
     if result.returncode:
+        save_ffmpeg_failure_diagnostics(
+            ffmpeg_diagnostics_dir, command=command, cwd=cwd, label=label,
+            reason=f"exit-{result.returncode}", stdout=result.stdout, stderr=result.stderr,
+        )
         # Do not echo external CLI output, inherited configuration, or local paths.
         raise RuntimeBlocked(f"{label}-exit-{result.returncode}")
     if not binary:
@@ -215,12 +311,14 @@ def build_ffmpeg(staging_root: Path, cache_root: Path, target: dict, arguments) 
         cwd=source_directory,
         label="ffmpeg-configure",
         timeout=180,
+        ffmpeg_diagnostics_dir=getattr(arguments, "ffmpeg_diagnostics_dir", None),
     )
     run_checked(
         [make_path, "-j", str(min(os.cpu_count() or 1, 8)), "ffmpeg"],
         cwd=source_directory,
         label="ffmpeg-compile",
         timeout=1200,
+        ffmpeg_diagnostics_dir=getattr(arguments, "ffmpeg_diagnostics_dir", None),
     )
     runtime_directory = staging_root / "runtime" / "ffmpeg"
     runtime_directory.mkdir()
@@ -872,6 +970,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--ffmpeg-make", help="Build-only absolute native make executable"
+    )
+    parser.add_argument(
+        "--ffmpeg-diagnostics-dir", type=Path,
+        help="Optional directory outside the build payload for redacted FFmpeg failure logs",
     )
     arguments = parser.parse_args()
     if arguments.rebuild and arguments.command not in {"probe", "bundle"}:

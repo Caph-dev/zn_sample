@@ -132,6 +132,7 @@ jobs:
             --ffmpeg-shell "$(cygpath -m "$(command -v sh)")" \
             --ffmpeg-cc "$(cygpath -m "$(command -v gcc)")" \
             --ffmpeg-make "$(cygpath -m "$(command -v make)")" \
+            --ffmpeg-diagnostics-dir "$(cygpath -m "$GITHUB_WORKSPACE")/release/ffmpeg-diagnostics" \
             > release/build-report.json
 
       - name: Audit native runtime dependencies
@@ -203,5 +204,7 @@ jobs:
             release/build-report.json
             release/runtime-audit.json
             release/smoke-report.json
+            release/ffmpeg-diagnostics/ffmpeg-*.log
+            release/ffmpeg-diagnostics/ffmpeg-*-failure.json
           if-no-files-found: ignore
           retention-days: 14

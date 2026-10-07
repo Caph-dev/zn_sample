@@ -82,6 +82,8 @@ uv run python -m pytest tests -q
 4. 成功后，在该次运行的 **Artifacts** 下载 `zn-sample-windows-x64-<run_id>-<run_attempt>`。GitHub 下载的是外层 Artifact ZIP，解压后取出内层 `zn-sample-<版本>-windows-x64.zip`、同名 `.sha256` 与 `release-info.json`；内层 ZIP 解压后顶层是完整 `bundle/`。如需存到本机，将它们放进项目 `release/` 即可；Actions 不会自动写回你的 Mac。
 5. `release-info.json` 记录构建源码 commit、成品 SHA-256 与“内测”标识。报告 Artifact 与回归 XML 单独下载，默认保留 14 天；在过期前保存所需成品与报告。私有仓库的构建用量和存储按 GitHub 账户额度计费。
 
+**FFmpeg 构建失败排查**：下载该次运行的 `windows-bundle-reports-<run_id>-<run_attempt>`，查看 `ffmpeg-diagnostics/` 下对应 `ffmpeg-configure` 或 `ffmpeg-compile` 的 `stdout.log`、`stderr.log`、`config.log` 与 `failure.json`（文件名前有阶段前缀）。这些文件在临时源码被清理前保存，凭据和构建机路径脱敏，长输出只保留有界末段；不复制整个构建目录或环境变量。保存诊断失败仍保留原失败码，不放行 ZIP。补改后的日志只在新运行中产生：**旧运行的 Re-run 仍使用旧 commit，需选择含日志补改的分支重新 Run workflow**。本地技术构建可显式加 `--ffmpeg-diagnostics-dir` 指定包外目录，默认不落盘诊断；诊断不进入交付 ZIP。
+
 **首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。
 
 ### 源码模式（开发/维护）
