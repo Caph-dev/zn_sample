@@ -331,6 +331,8 @@ class OfflineAudit:
         self.child_processes: list[subprocess.Popen] = []
         self.original_popen = subprocess.Popen
         self.pending_windows_launch = threading.local()
+        fallback_socketpair = getattr(socket, "_fallback_socketpair", None)
+        self.socketpair_code = getattr(fallback_socketpair, "__code__", None)
 
     def block(self, code: str, *, path_category: str = "", resource_name: str = "") -> None:
         self.violations.append(code)
@@ -425,6 +427,10 @@ class OfflineAudit:
             if not isinstance(address, tuple) or len(address) < 2 or address[0] != "127.0.0.1":
                 self.block("audit-non-loopback-network")
             if event != "socket.bind" and int(address[1]) not in self.allowed_ports:
+                if event == "socket.connect" and self.is_internal_socketpair_connection(
+                    arguments[0], address, sys._getframe(1),
+                ):
+                    return
                 state_path = sandbox_user_data_dir(self.sandbox) / "runtime/state.json"
                 try:
                     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -461,6 +467,30 @@ class OfflineAudit:
                 self.block("audit-external-interpreter")
         elif event in {"os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty"}:
             self.block("audit-unwrapped-process")
+
+    def is_internal_socketpair_connection(self, client, address: tuple, caller) -> bool:
+        """Allow only CPython's Windows socketpair self-pipe, not its port."""
+        if sys.platform != "win32" or self.socketpair_code is None or caller.f_code is not self.socketpair_code:
+            return False
+        # The pinned stdlib fallback creates both sockets and connects directly
+        # in this frame. A matching function name or a local port is not proof.
+        if caller.f_locals.get("csock") is not client:
+            return False
+        listener = caller.f_locals.get("lsock")
+        if not isinstance(client, socket.socket) or not isinstance(listener, socket.socket):
+            return False
+        if listener is client:
+            return False
+        if any(endpoint.family != socket.AF_INET or endpoint.type != socket.SOCK_STREAM
+               for endpoint in (client, listener)):
+            return False
+        try:
+            return (
+                listener.getsockname() == address
+                and address[0] == "127.0.0.1" and 0 < address[1] <= 65535
+            )
+        except OSError:
+            return False
 
     def install(self) -> None:
         sys.addaudithook(self)
