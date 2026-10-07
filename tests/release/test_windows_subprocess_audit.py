@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -65,6 +65,75 @@ def test_windows_system_environment_survives_nested_child_filtering(
         assert Path(environment["LOCALAPPDATA"]).is_relative_to(audit.sandbox)
         # Model Windows os.environ -> dict(os.environ) at the next hop.
         parent = {name.upper(): value for name, value in environment.items()}
+
+
+@pytest.mark.parametrize("database_uri,expected_path", [
+    ("file:///D:/smoke%20sandbox/local/assistant.sqlite3?mode=ro", "D:/smoke sandbox/local/assistant.sqlite3"),
+    ("file:///c:/smoke/%E6%B5%8B%E8%AF%95.sqlite3?mode=ro", "c:/smoke/\u6d4b\u8bd5.sqlite3"),
+    ("file:D:/smoke/assistant.sqlite3?mode=ro", "D:/smoke/assistant.sqlite3"),
+    ("file:relative.sqlite3?mode=ro", "relative.sqlite3"),
+])
+def test_windows_sqlite_uri_audit_restores_native_path(windows_audit, monkeypatch, database_uri, expected_path):
+    audit, _launcher = windows_audit
+    checked_paths = []
+    monkeypatch.setattr(audit, "check_path", lambda value, *, write=False: checked_paths.append((value, write)))
+    audit("sqlite3.connect", (database_uri,))
+    assert checked_paths == [(expected_path, True)]
+    assert PureWindowsPath(checked_paths[0][0]) == PureWindowsPath(expected_path)
+
+
+@pytest.mark.parametrize("database_uri", [
+    "file://remote.invalid/D:/fixture.sqlite3?mode=ro",
+    "file:////remote.invalid/share/fixture.sqlite3?mode=ro",
+    "file:%5C%5Cremote.invalid%5Cshare%5Cfixture.sqlite3?mode=ro",
+])
+def test_sqlite_remote_uri_rejected_before_path_resolution(windows_audit, monkeypatch, database_uri):
+    audit, _launcher = windows_audit
+
+    def unexpected_path_resolution(*arguments, **options):
+        pytest.fail("Remote SQLite URI reached filesystem resolution")
+
+    monkeypatch.setattr(audit, "check_path", unexpected_path_resolution)
+    with pytest.raises(smoke.SmokeBlocked, match="^audit-sqlite-uri-authority$"):
+        audit("sqlite3.connect", (database_uri,))
+
+
+def test_native_sqlite_uri_sandbox_readonly_and_external_rejection(tmp_path: Path):
+    sandbox = tmp_path / "\u6d4b\u8bd5 sqlite sandbox with spaces"
+    sandbox.mkdir()
+    program = f"""
+import pathlib, sqlite3, sys
+sys.path.insert(0, {str(Path(smoke.__file__).resolve().parents[2])!r})
+from setup.release.smoke_bundle import OfflineAudit, SmokeBlocked
+sandbox = pathlib.Path({str(sandbox)!r})
+database = sandbox / 'fixture.sqlite3'
+with sqlite3.connect(database) as connection:
+    connection.execute('CREATE TABLE sentinel (value TEXT)')
+    connection.execute("INSERT INTO sentinel VALUES ('preserved')")
+before = database.read_bytes()
+outside = sandbox.parent / 'outside.sqlite3'
+audit = OfflineAudit(sandbox / 'bundle', sandbox, pathlib.Path(sys.executable))
+audit.install()
+with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as connection:
+    assert connection.execute('SELECT value FROM sentinel').fetchone() == ('preserved',)
+assert database.read_bytes() == before
+outside_uris = [outside.as_uri(), sandbox.as_uri() + '/%2e%2e/outside.sqlite3']
+for database_uri in outside_uris:
+    try:
+        sqlite3.connect(database_uri + '?mode=ro', uri=True)
+    except SmokeBlocked as error:
+        assert str(error) == 'audit-external-write'
+    else:
+        raise AssertionError('external database URI was not blocked')
+assert not outside.exists()
+print('sandbox-readonly-and-external-blocked')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program], cwd=sandbox,
+        capture_output=True, text=True, encoding="utf-8", timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "sandbox-readonly-and-external-blocked"
 
 
 @pytest.mark.parametrize("program", ["python", "ffmpeg"])

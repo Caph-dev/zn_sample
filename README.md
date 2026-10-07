@@ -88,6 +88,8 @@ uv run python -m pytest tests -q
 
 **Windows smoke 系统环境**：每层子进程只对白名单 `SystemRoot` / `WINDIR` / `COMSPEC` 做大小写无关匹配，避免 Windows 的 `dict(os.environ)` 将键名转大写后丢失系统目录。`smoke-local-os-error-10106` 是 Winsock 初始化错误，先核查这一传递链，不当成缺配置或依赖审计通过后的可忽略错误；不修改系统 PATH、不放宽网络审计。原生子进程回归同时验证隔离环境下的 loopback socket 与 asyncio 事件循环初始化，完整 bundle smoke 仍须通过。
 
+**Windows smoke SQLite URI**：启动前的旧任务检查使用 `Path.as_uri()` + `mode=ro`。审计必须先将 `file:///D:/...` 正确还原成 `D:/...`，再按既有沙箱包含关系校验；不能直接把 `/D:/...` 交给 Windows 路径解析，也不能因 `mode=ro` 跳过审计。`diagnose` 成功、配置后的 `start` 报 `audit-external-write-external` 时先核查这条转换链，不给整盘或外部目录开白名单。带主机名或 Windows UNC 的 URI 直接拒绝，外部路径和编码后的越界路径仍拦截。原生回归验证沙箱数据库只读读取且字节不变，以及外部数据库 URI 在连接前被拒绝。
+
 **完整 smoke 失败排查**：报告 Artifact 中的 `smoke-diagnostics/` 保存失败控制进程的 `controller-result.json`、`controller-stdout.log`、`controller-stderr.log`，以及已调用的启动器模式对应文件（如 `launcher-diagnose-result.json` / `launcher-diagnose-stdout.log` / `launcher-diagnose-stderr.log`）。JSON 记录阶段、模式、实际退出码、是否预期成功和超时/启动异常类型；尚未取得退出码时为 null，不猜测。启动器捕获的异常保留安全的类型、诊断码和 errno，不打印异常原文或配置值。先看失败阶段的 stderr；例如 `launcher-diagnose-unexpected-exit` 要看 diagnose 的 stderr，不能当成“缺配置可忽略”。这些诊断在沙箱清理前导出，凭据与路径脱敏、输出有界；不会上传数据库、配置或整个用户目录，不进入交付 ZIP，也不会覆盖已保留的首个失败。保存失败不改变原失败结论。CLI 的 `--diagnostics-dir` 仅指定包外诊断目录，默认不导出；成功运行也不导出失败诊断。更改须在新的 Run workflow 中验证，旧运行不会补生诊断文件。
 
 **首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。

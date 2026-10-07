@@ -406,7 +406,17 @@ class OfflineAudit:
             database_name = os.fsdecode(arguments[0])
             if database_name != ":memory:":
                 if database_name.startswith("file:"):
-                    database_name = urllib.parse.unquote(urllib.parse.urlsplit(database_name).path)
+                    database_uri = urllib.parse.urlsplit(database_name)
+                    if database_uri.netloc:
+                        self.block("audit-sqlite-uri-authority")
+                    database_name = urllib.parse.unquote(database_uri.path)
+                    if sys.platform == "win32":
+                        if PureWindowsPath(database_name).drive.startswith("\\\\"):
+                            self.block("audit-sqlite-uri-authority")
+                        # Path.as_uri() emits /D:/...; Windows Path.resolve()
+                        # does not interpret that as the native D:/... path.
+                        if re.match(r"^/[A-Za-z]:/", database_name):
+                            database_name = database_name[1:]
                 self.check_path(database_name, write=True)
         elif event == "ctypes.dlopen" and arguments[0]:
             self.check_path(arguments[0])
