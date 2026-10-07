@@ -39,6 +39,13 @@ def make_windows_event(arguments, keywords):
     )
 
 
+def test_windows_signal_zero_is_rejected_before_console_delivery(windows_audit):
+    audit, _launcher = windows_audit
+    with pytest.raises(smoke.SmokeBlocked, match="^audit-windows-signal-zero$"):
+        audit("os.kill", (12345, 0))
+    assert audit.violations == ["audit-windows-signal-zero"]
+
+
 @pytest.mark.parametrize("essential_names", [
     ("SystemRoot", "WINDIR", "COMSPEC"),
     ("SYSTEMROOT", "WINDIR", "COMSPEC"),

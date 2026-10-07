@@ -172,7 +172,7 @@ jobs:
 
       - name: Check Windows subprocess audit contract
         run: |
-          & .venv/Scripts/python.exe -B -m pytest tests/release/test_windows_subprocess_audit.py -q --junitxml=release/windows-subprocess-tests.xml
+          & .venv/Scripts/python.exe -B -m pytest tests/release/test_windows_subprocess_audit.py tests/release/test_windows_process_liveness.py -q --junitxml=release/windows-subprocess-tests.xml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run offline smoke with the bundle interpreter

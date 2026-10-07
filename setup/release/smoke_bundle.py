@@ -104,7 +104,7 @@ def record_smoke_process(
 ) -> None:
     """Keep the last launcher result and controller failure within the sandbox."""
     require(stage in SMOKE_DIAGNOSTIC_STAGES, "smoke-diagnostic-stage-invalid")
-    require(mode in {"inside", "start", "stop", "diagnose"}, "smoke-diagnostic-mode-invalid")
+    require(mode in {"inside", "start", "stop", "diagnose", "operator"}, "smoke-diagnostic-mode-invalid")
     try:
         directory = sandbox / "smoke-diagnostics"
         directory.mkdir(exist_ok=True)
@@ -145,7 +145,7 @@ def export_smoke_failure_diagnostics(sandbox: Path, destination: Path | None) ->
         source_directory = sandbox / "smoke-diagnostics"
         if source_directory.is_symlink():
             raise SmokeBlocked("smoke-diagnostics-source-symlink")
-        for stage in ("controller", "launcher-diagnose", "launcher-start", "launcher-stop"):
+        for stage in ("controller", "launcher-diagnose", "launcher-start", "launcher-stop", "launcher-operator"):
             for suffix in ("stdout.log", "stderr.log", "result.json"):
                 filename = f"{stage}-{suffix}"
                 source = source_directory / filename
@@ -159,6 +159,20 @@ def export_smoke_failure_diagnostics(sandbox: Path, destination: Path | None) ->
                     stream.write(redact_smoke_output(content, sandbox))
     except (OSError, SmokeBlocked):
         logger.warning("Smoke failure diagnostic export unavailable")
+
+
+def record_outer_smoke_checkpoint(destination: Path | None, stage: str, returncode: int | None = None) -> None:
+    """Keep fixed phase metadata even if native code terminates the controller."""
+    if destination is None:
+        return
+    require(stage in {"started", "returned", "cleaned", "validated"}, "smoke-checkpoint-stage-invalid")
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        with (destination / f"outer-{stage}-result.json").open("x", encoding="utf-8") as stream:
+            json.dump({"stage": stage, "returncode": returncode, "redacted": True}, stream)
+            stream.write("\n")
+    except OSError:
+        logger.warning("Smoke outer checkpoint unavailable for %s", stage)
 
 
 def run_smoke_launcher(
@@ -198,6 +212,10 @@ def run_smoke_controller(
     command: list[str], *, cwd: Path, environment: dict, process_options: dict,
     sandbox: Path, bundle_root: Path, timeout: float, diagnostics_dir: Path | None,
 ) -> subprocess.CompletedProcess:
+    if diagnostics_dir is not None:
+        require(not diagnostics_dir.resolve().is_relative_to(sandbox.resolve()),
+                "smoke-diagnostics-inside-sandbox")
+    record_outer_smoke_checkpoint(diagnostics_dir, "started")
     try:
         controller = subprocess.Popen(
             command, cwd=cwd, env=environment, stdout=subprocess.PIPE,
@@ -225,6 +243,7 @@ def run_smoke_controller(
         finally:
             export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
         raise SmokeBlocked("smoke-outer-timeout-process-group-cleaned") from None
+    record_outer_smoke_checkpoint(diagnostics_dir, "returned", controller.returncode)
     if controller.returncode:
         record_smoke_process(
             sandbox, stage="controller", mode="inside", returncode=controller.returncode,
@@ -241,6 +260,7 @@ def run_smoke_controller(
         )
         export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
         raise
+    record_outer_smoke_checkpoint(diagnostics_dir, "cleaned", controller.returncode)
     return subprocess.CompletedProcess(
         command, controller.returncode, stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
@@ -469,6 +489,8 @@ class OfflineAudit:
                 self.block("audit-external-interpreter")
         elif event in {"os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty"}:
             self.block("audit-unwrapped-process")
+        elif event == "os.kill" and sys.platform == "win32" and arguments[1] == 0:
+            self.block("audit-windows-signal-zero")
 
     def is_internal_socketpair_connection(self, client, address: tuple, caller) -> bool:
         """Allow only CPython's Windows socketpair self-pipe, not its port."""
@@ -811,7 +833,7 @@ def restore_bundle_write_permissions(bundle_root: Path) -> None:
     bundle_root.chmod(stat.S_IMODE(bundle_root.stat().st_mode) | stat.S_IWUSR | stat.S_IXUSR)
 
 
-def register_smoke_server_child(sandbox: Path, process_id: int) -> bool:
+def register_smoke_server_child(sandbox: Path, bundle_root: Path, process_id: int) -> bool:
     marker_path = sandbox / "children" / f"{process_id}.json"
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1328,6 +1350,7 @@ def main(arguments: list[str] | None = None) -> int:
                 "relocated-readonly-bundle-not-proven")
         require(dict(os.environ) == original_environment, "smoke-parent-environment-changed")
         report["parent_environment_unchanged"] = True
+        record_outer_smoke_checkpoint(options.diagnostics_dir, "validated", 0)
         print(json.dumps(report, ensure_ascii=True, indent=2))
     return 0
 

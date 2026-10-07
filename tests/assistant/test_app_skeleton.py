@@ -357,10 +357,10 @@ class ApplicationSkeletonTests(unittest.TestCase):
                     is_alive.assert_not_called()
                 self.assertTrue(lock_path.exists())
 
-    def test_process_liveness_fails_closed_on_permission_error(self) -> None:
-        with patch(
-            "assistant.lifecycle.os.kill",
-            side_effect=PermissionError,
+    def test_posix_process_liveness_fails_closed_on_permission_error(self) -> None:
+        with (
+            patch("assistant.lifecycle.sys.platform", "darwin"),
+            patch("assistant.lifecycle.os.kill", side_effect=PermissionError),
         ):
             self.assertIsNone(_is_process_alive(987654))
 

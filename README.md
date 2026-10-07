@@ -92,7 +92,11 @@ uv run python -m pytest tests -q
 
 **Windows smoke asyncio 自唤醒连接**：Windows 的 CPython `socketpair()` 回退用 loopback TCP 创建内部 socket 对，服务初始化事件循环时可能被误报为 `audit-unregistered-loopback-network`。仅当 connect 来自已加载标准库 TCP 回退函数的同一代码对象、client 对应该帧的 csock，且目标为该帧 lsock 实际绑定的 IPv4 loopback 地址时接受；不登记这个临时端口，不允许普通连接借用它，也不放行其它 localhost 服务。部分 Python 构建暴露 `_fallback_socketpair`，另一些直接定义 `socketpair`，审计兼容两种名称但不靠名字放行。`test_socketpair_audit.py` 从当前解释器自带的 socket.py 提取 TCP 回退函数（Unix 上可能位于未加载的分支），在两种命名布局下执行真实审计、复现旧拦截并验证 asyncio 初始化及其它网络仍拒绝；不因缺少私有名称跳过测试。Windows 原生 stub 自身也安装审计，不只在父进程审计启动动作。回归不替代完整 bundle smoke。
 
+**Windows 进程存活检查**：发布启动器健康核对和共享生命周期只用进程句柄 `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject(..., 0)` 查询；存活 / 已退出 / 未知分别保留为 True / False / None，权限不足或查询失败仍拒绝确认实例。禁止用 `os.kill(pid, 0)` 在 Windows 上探活：0 是 `CTRL_C_EVENT`，可能触发共享控制台中断，并不是 POSIX 的只读检测。smoke 会在信号投递前拦截该调用；Windows 前置回归额外验证反复查询不会终止父进程或 fixture 子进程。不改重启/停止授权，不为未确认 PID 删除锁。
+
 **完整 smoke 失败排查**：报告 Artifact 中的 `smoke-diagnostics/` 保存失败控制进程的 `controller-result.json`、`controller-stdout.log`、`controller-stderr.log`，以及已调用的启动器模式对应文件（如 `launcher-diagnose-result.json` / `launcher-diagnose-stdout.log` / `launcher-diagnose-stderr.log`）。JSON 记录阶段、模式、实际退出码、是否预期成功和超时/启动异常类型；尚未取得退出码时为 null，不猜测。启动器捕获的异常保留安全的类型、诊断码和 errno，不打印异常原文或配置值。先看失败阶段的 stderr；例如 `launcher-diagnose-unexpected-exit` 要看 diagnose 的 stderr，不能当成“缺配置可忽略”。这些诊断在沙箱清理前导出，凭据与路径脱敏、输出有界；不会上传数据库、配置或整个用户目录，不进入交付 ZIP，也不会覆盖已保留的首个失败。保存失败不改变原失败结论。CLI 的 `--diagnostics-dir` 仅指定包外诊断目录，默认不导出；成功运行也不导出失败诊断。更改须在新的 Run workflow 中验证，旧运行不会补生诊断文件。
+
+**smoke 突然退出、没有 stderr**：指定诊断目录后，外层在启动控制进程前先写 `outer-started-result.json`，取得退出码、清理返回、通过报告校验后分别写 `outer-returned-result.json` / `outer-cleaned-result.json` / `outer-validated-result.json`。这些固定阶段元数据成功时也保留，但不是独立放行依据；缺失下一阶段只定位中断边界，不能猜成某个具体异常或验收成功。`operator` 的忙碌拒绝检查也纳入诊断模式白名单，诊断不能自己把合法检查拦掉；它仍只验证四个固定入口被忙碌门闩拒绝，不执行业务任务。阶段文件随原报告 Artifact 上传，不进入 ZIP。
 
 **首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。
 

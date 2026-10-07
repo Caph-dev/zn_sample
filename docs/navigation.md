@@ -80,7 +80,7 @@
 - 先读：[README.md](../README.md)「内测目录包」「同机发布配置导入」；源码默认重启与发布版安全启停分开核对。
 - 实现：[构建与运行时](../setup/release/)、[包内入口](../scripts/release_launcher.py)、[发布生命周期](../assistant/services/release_lifecycle.py)、[双模式路径](../assistant/paths.py)、[配置 / 历史导入](../assistant/services/local_state_import.py)。
 - Windows 云构建：[手动 Actions 工作流](../.github/workflows/windows-bundle.yml)、[Windows ZIP 与校验摘要](../setup/release/package_windows_bundle.py)；操作与下载见 README「GitHub Actions」。工作流不接入业务密钥，不自动发布正式版。
-- 验证：[发布测试目录](../tests/release/)，重点为 `test_bundle_smoke.py`、`test_smoke_diagnostics.py`、`test_windows_subprocess_audit.py`、`test_socketpair_audit.py`、`test_release_lifecycle.py`、`test_state_import.py`、`test_package_windows_bundle.py`。离线测试不等于原生环境验收或真实导入授权。
+- 验证：[发布测试目录](../tests/release/)，重点为 `test_bundle_smoke.py`、`test_smoke_diagnostics.py`、`test_windows_subprocess_audit.py`、`test_windows_process_liveness.py`、`test_socketpair_audit.py`、`test_release_lifecycle.py`、`test_state_import.py`、`test_package_windows_bundle.py`。离线测试不等于原生环境验收或真实导入授权。
 
 ## 本地计划编号（可选背景，不是维护前置）
 

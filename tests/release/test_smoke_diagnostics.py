@@ -50,6 +50,8 @@ def test_controller_exports_failure_only_and_preserves_cleanup(tmp_path: Path, m
         returncode = 0 if outcome == "success" else 2
 
         def __init__(self, *arguments, **options):
+            checkpoint = json.loads((destination / "outer-started-result.json").read_text())
+            assert checkpoint["stage"] == "started" and checkpoint["returncode"] is None
             if outcome == "unavailable":
                 raise FileNotFoundError("synthetic-secret must not be persisted")
 
@@ -82,7 +84,10 @@ def test_controller_exports_failure_only_and_preserves_cleanup(tmp_path: Path, m
         assert result.returncode == (0 if outcome == "success" else 2)
         assert events == ["group-cleanup"]
     if outcome == "success":
-        assert not destination.exists()
+        assert {path.name for path in destination.iterdir()} == {
+            "outer-started-result.json", "outer-returned-result.json", "outer-cleaned-result.json",
+        }
+        assert json.loads((destination / "outer-returned-result.json").read_text())["returncode"] == 0
     else:
         metadata = json.loads((destination / "controller-result.json").read_text())
         assert metadata["stage"] == "controller" and metadata["mode"] == "inside"
@@ -166,3 +171,81 @@ def test_cli_rejects_diagnostic_output_inside_bundle_before_runtime_access(tmp_p
     bundle = tmp_path / "bundle"
     with pytest.raises(smoke.SmokeBlocked, match="smoke-diagnostics-inside-bundle"):
         smoke.main(["--bundle", str(bundle), "--offline", "--diagnostics-dir", str(bundle / "diagnostics")])
+
+
+@pytest.mark.parametrize("operator_mode", ["prepare", "screen", "pipeline", "tracking"])
+def test_busy_operator_rejection_can_be_recorded_without_changing_gate(tmp_path: Path, monkeypatch, operator_mode):
+    captured_commands = []
+
+    def reject_busy_operator(command, **options):
+        captured_commands.append(command)
+        return subprocess.CompletedProcess(command, 2, "", "instance-busy-or-unknown")
+
+    monkeypatch.setattr(smoke.subprocess, "run", reject_busy_operator)
+    result = smoke.run_smoke_launcher(
+        Path("fixture-python"), Path("fixture-launcher"), tmp_path, ("operator", operator_mode),
+        timeout=10, expected_success=False,
+    )
+    assert result.returncode == 2
+    assert captured_commands[0][-2:] == ["operator", operator_mode]
+    destination = tmp_path.parent / (tmp_path.name + "-reports")
+    smoke.export_smoke_failure_diagnostics(tmp_path, destination)
+    metadata = json.loads((destination / "launcher-operator-result.json").read_text())
+    assert metadata["mode"] == "operator" and metadata["expected_success"] is False
+    assert (destination / "launcher-operator-stderr.log").read_text() == "instance-busy-or-unknown"
+
+
+def test_outer_checkpoint_survives_abrupt_child_exit_without_claiming_success(tmp_path: Path, monkeypatch):
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    destination = tmp_path / "reports"
+    monkeypatch.setattr(smoke, "terminate_smoke_process_group", lambda process: None)
+    result = smoke.run_smoke_controller(
+        [sys.executable, "-I", "-B", "-c", "import os; os._exit(1)"],
+        cwd=sandbox, environment={}, process_options={}, sandbox=sandbox,
+        bundle_root=sandbox / "bundle", timeout=10, diagnostics_dir=destination,
+    )
+    assert result.returncode == 1 and not result.stdout and not result.stderr
+    assert json.loads((destination / "outer-returned-result.json").read_text())["returncode"] == 1
+    assert json.loads((destination / "controller-result.json").read_text())["returncode"] == 1
+
+
+def test_outer_checkpoint_failure_is_nonfatal_and_existing_evidence_is_preserved(tmp_path: Path):
+    destination = tmp_path / "not-a-directory"
+    destination.write_text("original fixture evidence")
+    smoke.record_outer_smoke_checkpoint(destination, "started")
+    assert destination.read_text() == "original fixture evidence"
+    smoke.record_outer_smoke_checkpoint(tmp_path, "started", 1)
+    smoke.record_outer_smoke_checkpoint(tmp_path, "started", 0)
+    assert json.loads((tmp_path / "outer-started-result.json").read_text())["returncode"] == 1
+
+
+@pytest.mark.parametrize("identity_error", [None, "marker-pid", "marker-role", "marker-script", "health"])
+def test_cleanup_fallback_only_signals_bound_healthy_smoke_child(tmp_path: Path, monkeypatch, identity_error):
+    sandbox = tmp_path / "sandbox"
+    bundle = sandbox / "bundle"
+    state_path = smoke.sandbox_user_data_dir(sandbox) / "runtime/state.json"
+    state_path.parent.mkdir(parents=True)
+    state = {"pid": 12345, "port": 32001, "instance_id": "synthetic-instance", "version": "0.1.0", "target": "test"}
+    state_path.write_text(json.dumps(state))
+    marker_directory = sandbox / "children"
+    marker_directory.mkdir()
+    marker = {"pid": 12345, "role": "release-server", "script": str(bundle / "app/scripts/release_launcher.py")}
+    if identity_error == "marker-pid":
+        marker["pid"] = 54321
+    elif identity_error == "marker-role":
+        marker["role"] = "smoke-helper"
+    elif identity_error == "marker-script":
+        marker["script"] = str(tmp_path / "unrelated-script.py")
+    (marker_directory / "12345.json").write_text(json.dumps(marker))
+    health = {**state, "instance_id": "different-instance"} if identity_error == "health" else state
+    monkeypatch.setattr(smoke, "request_local", lambda *arguments: (200, json.dumps(health).encode(), {}))
+    signals = []
+
+    def signal_fixture(process_id, signal_value):
+        signals.append((process_id, signal_value))
+        state_path.unlink()
+
+    monkeypatch.setattr(smoke.os, "kill", signal_fixture)
+    assert smoke.stop_registered_smoke_server(sandbox, bundle, timeout=0.1) is (identity_error is None)
+    assert signals == ([(12345, smoke.signal.SIGTERM)] if identity_error is None else [])

@@ -52,6 +52,10 @@ def _read_windows_lock_pid(lock_path: Path) -> int | None:
 
 def _is_process_alive(process_id: int) -> bool | None:
     """Return false only when the operating system confirms the PID is gone."""
+    if type(process_id) is not int or process_id <= 0:
+        return None
+    if sys.platform == "win32":
+        return _query_windows_process_alive(process_id)
     try:
         os.kill(process_id, 0)
     except ProcessLookupError:
@@ -65,6 +69,31 @@ def _is_process_alive(process_id: int) -> bool | None:
             return False
         return None
     return True
+
+
+def _query_windows_process_alive(process_id: int) -> bool | None:
+    """Query without signaling: os.kill(pid, 0) sends CTRL_C_EVENT on Windows."""
+    import _winapi
+
+    synchronize_access = 0x00100000
+    try:
+        process_handle = _winapi.OpenProcess(synchronize_access, False, process_id)
+    except OSError as error:
+        # ERROR_INVALID_PARAMETER confirms that a valid positive PID is gone.
+        return False if getattr(error, "winerror", None) == 87 and process_id <= 0xFFFFFFFF else None
+    except (ValueError, OverflowError):
+        return None
+    try:
+        wait_result = _winapi.WaitForSingleObject(process_handle, 0)
+        if wait_result == _winapi.WAIT_OBJECT_0:
+            return False
+        if wait_result == _winapi.WAIT_TIMEOUT:
+            return True
+        return None
+    except OSError:
+        return None
+    finally:
+        _winapi.CloseHandle(process_handle)
 
 
 class InstanceLock:
