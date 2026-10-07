@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -131,6 +132,7 @@ class OfflineAudit:
         self.violations: list[str] = []
         self.child_processes: list[subprocess.Popen] = []
         self.original_popen = subprocess.Popen
+        self.pending_windows_launch = threading.local()
 
     def block(self, code: str, *, path_category: str = "", resource_name: str = "") -> None:
         self.violations.append(code)
@@ -228,6 +230,14 @@ class OfflineAudit:
                 self.block("audit-remote-dns")
         elif event == "subprocess.Popen":
             executable, command = arguments[:2]
+            if sys.platform == "win32" and isinstance(command, str):
+                # CPython converts argv with list2cmdline before the Windows
+                # audit event. Accept only the current wrapper's exact launch.
+                expected = getattr(self.pending_windows_launch, "event", None)
+                if expected is None or arguments != expected:
+                    self.block("audit-external-interpreter")
+                self.pending_windows_launch.event = None
+                return
             if executable is None:
                 if not isinstance(command, (list, tuple)) or not command:
                     self.block("audit-external-interpreter")
@@ -255,7 +265,20 @@ class OfflineAudit:
         class GuardedPopen(original_process_type):
             def __init__(self, arguments, *positional, **keywords):
                 wrapped_arguments, child_script, child_role = audit.prepare_child(arguments, keywords)
-                super().__init__(wrapped_arguments, *positional, **keywords)
+                if sys.platform == "win32":
+                    if getattr(audit.pending_windows_launch, "event", None) is not None:
+                        audit.block("audit-nested-process-launch")
+                    working_directory = keywords.get("cwd")
+                    audit.pending_windows_launch.event = (
+                        None, subprocess.list2cmdline(wrapped_arguments),
+                        os.fsdecode(working_directory) if working_directory is not None else None,
+                        dict(keywords["env"]),
+                    )
+                try:
+                    super().__init__(wrapped_arguments, *positional, **keywords)
+                finally:
+                    if sys.platform == "win32":
+                        audit.pending_windows_launch.event = None
                 audit.child_processes.append(self)
                 audit.record_child(self.pid, child_script, child_role)
 
@@ -285,8 +308,13 @@ class OfflineAudit:
         if executable_path != self.python_path:
             self.block("audit-external-interpreter")
         remaining = command[1:]
-        while remaining and remaining[0] in {"-I", "-B", "-u"}:
-            remaining.pop(0)
+        while remaining:
+            if remaining[0] in {"-I", "-B", "-u"}:
+                remaining.pop(0)
+            elif sys.platform == "win32" and remaining[:2] == ["-X", "utf8"]:
+                remaining = remaining[2:]
+            else:
+                break
         if not remaining or remaining[0].startswith("-"):
             self.block("audit-unwrapped-python-command")
         script = Path(remaining[0]).resolve()
@@ -297,7 +325,8 @@ class OfflineAudit:
             self.check_path(script)
             if not script.is_relative_to(self.bundle_root / "app"):
                 self.block("audit-child-script-outside-application")
-            wrapped = [str(self.python_path), "-I", "-B", str(self.source), "--guarded-launch",
+            interpreter_flags = ["-I", "-B", "-X", "utf8"] if sys.platform == "win32" else ["-I", "-B"]
+            wrapped = [str(self.python_path), *interpreter_flags, str(self.source), "--guarded-launch",
                        str(self.bundle_root), str(self.sandbox), str(script), *remaining[1:]]
         keywords["env"] = isolated_environment(
             self.sandbox, int(os.environ["ZN_ASSISTANT_PORT"]),

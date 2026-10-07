@@ -84,6 +84,8 @@ uv run python -m pytest tests -q
 
 **FFmpeg 构建失败排查**：下载该次运行的 `windows-bundle-reports-<run_id>-<run_attempt>`，查看 `ffmpeg-diagnostics/` 下对应 `ffmpeg-configure` 或 `ffmpeg-compile` 的 `stdout.log`、`stderr.log`、`config.log` 与 `failure.json`（文件名前有阶段前缀）。这些文件在临时源码被清理前保存，凭据和构建机路径脱敏，长输出只保留有界末段；不复制整个构建目录或环境变量。保存诊断失败仍保留原失败码，不放行 ZIP。补改后的日志只在新运行中产生：**旧运行的 Re-run 仍使用旧 commit，需选择含日志补改的分支重新 Run workflow**。本地技术构建可显式加 `--ffmpeg-diagnostics-dir` 指定包外目录，默认不落盘诊断；诊断不进入交付 ZIP。
 
+**Windows smoke 子进程审计**：Python 在 Windows 上把参数列表转换成命令行字符串后才触发审计事件；smoke 只接纳当前线程包装层刚核验的单次调用，严格匹配命令、工作目录和隔离环境，仍拒绝原始命令字符串、shell、外部解释器与未批准的 FFmpeg 命令。Windows 子进程保留 `-I -B -X utf8`；不能通过关闭审计或改用系统 Python 来解决 `audit-external-interpreter`。工作流先跑子进程契约回归（含原生无业务 stub），报告为 `windows-subprocess-tests.xml`，再跑包内解释器的完整 smoke；前者通过不替代后者。
+
 **首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。
 
 ### 源码模式（开发/维护）
