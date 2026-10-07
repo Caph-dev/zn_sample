@@ -177,7 +177,7 @@ jobs:
 
       - name: Run offline smoke with the bundle interpreter
         run: |
-          & .venv/Scripts/python.exe -B setup/release/smoke_bundle.py --bundle build/release/windows-x64/bundle --offline > release/smoke-report.json
+          & .venv/Scripts/python.exe -B setup/release/smoke_bundle.py --bundle build/release/windows-x64/bundle --offline --diagnostics-dir release/smoke-diagnostics > release/smoke-report.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create and verify distributable ZIP
@@ -210,6 +210,8 @@ jobs:
             release/runtime-audit.json
             release/smoke-report.json
             release/windows-subprocess-tests.xml
+            release/smoke-diagnostics/*.log
+            release/smoke-diagnostics/*-result.json
             release/ffmpeg-diagnostics/ffmpeg-*.log
             release/ffmpeg-diagnostics/ffmpeg-*-failure.json
           if-no-files-found: ignore

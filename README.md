@@ -86,6 +86,8 @@ uv run python -m pytest tests -q
 
 **Windows smoke 子进程审计**：Python 在 Windows 上把参数列表转换成命令行字符串后才触发审计事件；smoke 只接纳当前线程包装层刚核验的单次调用，严格匹配命令、工作目录和隔离环境，仍拒绝原始命令字符串、shell、外部解释器与未批准的 FFmpeg 命令。Windows 子进程保留 `-I -B -X utf8`；不能通过关闭审计或改用系统 Python 来解决 `audit-external-interpreter`。工作流先跑子进程契约回归（含原生无业务 stub），报告为 `windows-subprocess-tests.xml`，再跑包内解释器的完整 smoke；前者通过不替代后者。
 
+**完整 smoke 失败排查**：报告 Artifact 中的 `smoke-diagnostics/` 保存失败控制进程的 `controller-result.json`、`controller-stdout.log`、`controller-stderr.log`，以及已调用的启动器模式对应文件（如 `launcher-diagnose-result.json` / `launcher-diagnose-stdout.log` / `launcher-diagnose-stderr.log`）。JSON 记录阶段、模式、实际退出码、是否预期成功和超时/启动异常类型；尚未取得退出码时为 null，不猜测。启动器捕获的异常保留安全的类型、诊断码和 errno，不打印异常原文或配置值。先看失败阶段的 stderr；例如 `launcher-diagnose-unexpected-exit` 要看 diagnose 的 stderr，不能当成“缺配置可忽略”。这些诊断在沙箱清理前导出，凭据与路径脱敏、输出有界；不会上传数据库、配置或整个用户目录，不进入交付 ZIP，也不会覆盖已保留的首个失败。保存失败不改变原失败结论。CLI 的 `--diagnostics-dir` 仅指定包外诊断目录，默认不导出；成功运行也不导出失败诊断。更改须在新的 Run workflow 中验证，旧运行不会补生诊断文件。
+
 **首次 Windows 云构建仍需跑通，配置工作流不等于验收通过。** runner 为 Windows Server 环境；即使 CI 全绿，也仅证明该环境的原生构建与离线检查。交付前仍须在同事的 Windows 10/11 x64 上完成解压、双击启动、重复启动、安全停止，以及授权后的实店只读验收。新电脑紫鸟安装/授权、用户配置与 `external-cli.json` 初配仍按 [快速开始第 10 节](快速开始.md#10-同机切换发布包技术人员初配顺序) 办理，不能把开发机密钥或历史数据库打入 ZIP。
 
 ### 源码模式（开发/维护）

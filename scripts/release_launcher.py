@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from assistant.lifecycle import InstanceLock, _is_process_alive
 from assistant.paths import (
-    _release_manifest, assert_private_interpreter, bundled_tool_path,
+    ReleasePathError, _release_manifest, assert_private_interpreter, bundled_tool_path,
     configuration_dir, database_path, ensure_user_dirs, python_subprocess_environment,
     runtime_dir, user_data_dir,
 )
@@ -338,8 +338,11 @@ def main(argv: list[str] | None = None) -> int:
             return operator(arguments.operator_mode)
         return {"start": start, "serve": serve, "stop": stop}[arguments.mode]()
     except (ReleaseLifecycleError, OSError, ValueError, RuntimeError) as error:
-        code = error.code if isinstance(error, ReleaseLifecycleError) else "release-operation-failed"
-        logger.error("%s; logs: %s", code, user_data_dir() / "logs" / "release-service.log")
+        code = error.code if isinstance(error, (ReleaseLifecycleError, ReleasePathError)) else "release-operation-failed"
+        error_number = error.errno if isinstance(error, OSError) else None
+        # Keep a safe type/code, not str(error), traceback locals, or config values.
+        logger.error("%s; exception=%s; errno=%s; logs: %s", code, type(error).__name__,
+                     error_number, user_data_dir() / "logs" / "release-service.log")
         return 2
 
 

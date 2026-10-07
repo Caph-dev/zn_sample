@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import re
 import runpy
 import shutil
 import signal
@@ -45,6 +46,8 @@ SAFE_SYSTEM_READ_LABELS = {
     Path("/private/etc/apache/mime.types"): "system-mime-database",
 }
 SAFE_SYSTEM_READS = frozenset(SAFE_SYSTEM_READ_LABELS)
+SMOKE_DIAGNOSTIC_LIMIT = 64 * 1024
+SMOKE_DIAGNOSTIC_STAGES = frozenset({"controller", "launcher"})
 
 
 class SmokeBlocked(RuntimeError):
@@ -54,6 +57,194 @@ class SmokeBlocked(RuntimeError):
 def require(condition: object, code: str) -> None:
     if not condition:
         raise SmokeBlocked(code)
+
+
+def redact_smoke_output(value: bytes | str | None, sandbox: Path) -> str:
+    """Retain bounded diagnostic output, not credentials or machine paths."""
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+    secret_pattern = r"secret|token|password|credential|cookie|api[_-]?key|authorization"
+    secret_values = {
+        content for name, content in os.environ.items()
+        if content and re.search(secret_pattern, name, re.I)
+    }
+    for secret in sorted(secret_values, key=len, reverse=True):
+        text = text.replace(secret, "[redacted]")
+    text = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [redacted]", text)
+    text = re.sub(
+        rf'''(?ix)(\b[\w.-]*(?:{secret_pattern})[\w.-]*["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)''',
+        lambda match: match.group(1) + "[redacted]", text,
+    )
+    text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", text)
+    # Structured paths and traceback filenames can contain spaces or escaped
+    # Windows separators. Remove the whole value, not just its first word.
+    text = re.sub(r'''(?i)(File\s+)["'][^\n]*?["'](?=, line \d+)''', r'\1"[path]"', text)
+    text = re.sub(
+        r'''(?i)(["'](?:\w*_path|cwd|executable)["']\s*:\s*)("(?:\\.|[^"\\])*"|'[^'\n]*')''',
+        lambda match: match.group(1) + '"[path]"', text,
+    )
+    for path in sorted({str(sandbox), str(sandbox.parent), str(SMOKE_SOURCE.parent), str(Path.home())}, key=len, reverse=True):
+        for variant in {path, path.replace("\\", "/"), path.replace("\\", "\\\\")}:
+            text = text.replace(variant, "[path]")
+    text = re.sub(r'''["'](?:[A-Za-z]:[/\\]|/)[^\n]*?["']''', '"[path]"', text)
+    text = re.sub(
+        r'''(?i)(?<![\w:/\\])(?:[a-z]:[/\\]|/(?:usr|opt|home|Users|tmp|private|mingw64|ucrt64|cygdrive|[a-z])/)\S+''',
+        "[path]", text,
+    )
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = "".join(character for character in text if character in "\n\t" or ord(character) >= 32)
+    if len(text) > SMOKE_DIAGNOSTIC_LIMIT:
+        text = "[earlier output omitted]\n" + text[-SMOKE_DIAGNOSTIC_LIMIT:]
+    return text
+
+
+def record_smoke_process(
+    sandbox: Path, *, stage: str, mode: str, returncode: int | None,
+    expected_success: bool, stdout: bytes | str | None, stderr: bytes | str | None,
+    failure_type: str | None = None,
+) -> None:
+    """Keep the last launcher result and controller failure within the sandbox."""
+    require(stage in SMOKE_DIAGNOSTIC_STAGES, "smoke-diagnostic-stage-invalid")
+    require(mode in {"inside", "start", "stop", "diagnose"}, "smoke-diagnostic-mode-invalid")
+    try:
+        directory = sandbox / "smoke-diagnostics"
+        directory.mkdir(exist_ok=True)
+        prefix = f"launcher-{mode}" if stage == "launcher" else stage
+        metadata_path = directory / f"{prefix}-result.json"
+        if metadata_path.is_file():
+            previous = json.loads(metadata_path.read_text(encoding="utf-8"))
+            previous_failed = previous["failure_type"] is not None or (
+                (previous["returncode"] == 0) != previous["expected_success"]
+            )
+            if previous_failed:
+                return  # Cleanup must not overwrite the first failure evidence.
+        for stream_name, content in (("stdout", stdout), ("stderr", stderr)):
+            (directory / f"{prefix}-{stream_name}.log").write_text(
+                redact_smoke_output(content, sandbox), encoding="utf-8",
+            )
+        metadata = {
+            "stage": stage, "mode": mode, "returncode": returncode,
+            "expected_success": expected_success, "redacted": True,
+            "failure_type": failure_type,
+        }
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=True, indent=2) + "\n", encoding="utf-8",
+        )
+    except (OSError, ValueError, KeyError):
+        logger.warning("Smoke process diagnostics unavailable for %s", stage)
+
+
+def export_smoke_failure_diagnostics(sandbox: Path, destination: Path | None) -> None:
+    """Export fixed diagnostic files only, never a user directory or database."""
+    if destination is None:
+        return
+    try:
+        destination = destination.resolve()
+        if destination.is_relative_to(sandbox.resolve()):
+            raise SmokeBlocked("smoke-diagnostics-inside-sandbox")
+        destination.mkdir(parents=True, exist_ok=True)
+        source_directory = sandbox / "smoke-diagnostics"
+        if source_directory.is_symlink():
+            raise SmokeBlocked("smoke-diagnostics-source-symlink")
+        for stage in ("controller", "launcher-diagnose", "launcher-start", "launcher-stop"):
+            for suffix in ("stdout.log", "stderr.log", "result.json"):
+                filename = f"{stage}-{suffix}"
+                source = source_directory / filename
+                if source.is_symlink() or not source.is_file():
+                    continue
+                # Sanitize again in the outer process, which knows parent
+                # credential values excluded from the child environment.
+                with source.open("r", encoding="utf-8") as stream:
+                    content = stream.read(SMOKE_DIAGNOSTIC_LIMIT + 1024)
+                with (destination / filename).open("x", encoding="utf-8") as stream:
+                    stream.write(redact_smoke_output(content, sandbox))
+    except (OSError, SmokeBlocked):
+        logger.warning("Smoke failure diagnostic export unavailable")
+
+
+def run_smoke_launcher(
+    python_path: Path, launcher: Path, sandbox: Path, arguments: tuple[str, ...],
+    *, timeout: float, expected_success: bool = True,
+) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(
+            [str(python_path), "-I", "-B", str(launcher), *arguments],
+            cwd=sandbox, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        record_smoke_process(
+            sandbox, stage="launcher", mode=arguments[0], returncode=None,
+            expected_success=expected_success, stdout=getattr(error, "stdout", None),
+            stderr=getattr(error, "stderr", None), failure_type=type(error).__name__,
+        )
+        raise
+    record_smoke_process(
+        sandbox, stage="launcher", mode=arguments[0], returncode=result.returncode,
+        expected_success=expected_success, stdout=result.stdout, stderr=result.stderr,
+    )
+    violations_path = sandbox / "audit-violations.jsonl"
+    if violations_path.exists():
+        violations = [json.loads(line) for line in violations_path.read_text(encoding="utf-8").splitlines()]
+        last_violation = violations[-1]
+        suffix = last_violation.get("path_category") or ""
+        resource_name = last_violation.get("resource_name") or ""
+        if resource_name and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in resource_name):
+            suffix += "-" + resource_name.lower()
+        raise SmokeBlocked(last_violation["code"] + ("-" + suffix if suffix else ""))
+    require((result.returncode == 0) == expected_success, "launcher-" + arguments[0] + "-unexpected-exit")
+    return result
+
+
+def run_smoke_controller(
+    command: list[str], *, cwd: Path, environment: dict, process_options: dict,
+    sandbox: Path, bundle_root: Path, timeout: float, diagnostics_dir: Path | None,
+) -> subprocess.CompletedProcess:
+    try:
+        controller = subprocess.Popen(
+            command, cwd=cwd, env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, **process_options,
+        )
+    except OSError as error:
+        record_smoke_process(
+            sandbox, stage="controller", mode="inside", returncode=None,
+            expected_success=True, stdout=None, stderr=None, failure_type=type(error).__name__,
+        )
+        export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
+        raise
+    try:
+        stdout, stderr = controller.communicate(timeout=timeout * 12)
+    except subprocess.TimeoutExpired as error:
+        record_smoke_process(
+            sandbox, stage="controller", mode="inside", returncode=None,
+            expected_success=True, stdout=error.stdout, stderr=error.stderr,
+            failure_type=type(error).__name__,
+        )
+        try:
+            stop_registered_smoke_server(sandbox, bundle_root)
+            terminate_smoke_process_group(controller)
+            controller.communicate(timeout=5)
+        finally:
+            export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
+        raise SmokeBlocked("smoke-outer-timeout-process-group-cleaned") from None
+    if controller.returncode:
+        record_smoke_process(
+            sandbox, stage="controller", mode="inside", returncode=controller.returncode,
+            expected_success=True, stdout=stdout, stderr=stderr,
+        )
+        export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
+    # Preserve the existing cleanup boundary even on early child failures.
+    try:
+        terminate_smoke_process_group(controller)
+    except (OSError, SmokeBlocked, subprocess.TimeoutExpired) as error:
+        record_smoke_process(
+            sandbox, stage="controller", mode="inside", returncode=controller.returncode,
+            expected_success=True, stdout=stdout, stderr=stderr, failure_type=type(error).__name__,
+        )
+        export_smoke_failure_diagnostics(sandbox, diagnostics_dir)
+        raise
+    return subprocess.CompletedProcess(
+        command, controller.returncode, stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def contained_path(root: Path, value: object) -> Path:
@@ -830,19 +1021,10 @@ def run_smoke(bundle_root: Path, sandbox: Path, timeout: float) -> dict:
     checks.extend(["read-only-relocated-bundle", "native-ffmpeg-version-license-decode"])
 
     def launch(*arguments: str, expected_success: bool = True) -> subprocess.CompletedProcess:
-        result = subprocess.run([str(python_path), "-I", "-B", str(launcher), *arguments],
-                                cwd=sandbox, capture_output=True, text=True, encoding="utf-8", timeout=timeout)
-        violations_path = sandbox / "audit-violations.jsonl"
-        if violations_path.exists():
-            violations = [json.loads(line) for line in violations_path.read_text(encoding="utf-8").splitlines()]
-            last_violation = violations[-1]
-            suffix = last_violation.get("path_category") or ""
-            resource_name = last_violation.get("resource_name") or ""
-            if resource_name and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in resource_name):
-                suffix += "-" + resource_name.lower()
-            raise SmokeBlocked(last_violation["code"] + ("-" + suffix if suffix else ""))
-        require((result.returncode == 0) == expected_success, "launcher-" + arguments[0] + "-unexpected-exit")
-        return result
+        return run_smoke_launcher(
+            python_path, launcher, sandbox, arguments,
+            timeout=timeout, expected_success=expected_success,
+        )
 
     def healthy_state():
         if not state_path.exists():
@@ -1041,10 +1223,15 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--offline", action="store_true", required=True,
                         help="require the offline-only acceptance mode")
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument("--diagnostics-dir", type=Path,
+                        help="Optional package-external directory for redacted smoke failure reports")
     options = parser.parse_args(arguments)
     require(5 <= options.timeout <= 180, "smoke-timeout-invalid")
     original_environment = dict(os.environ)
     bundle_root = options.bundle.resolve()
+    if options.diagnostics_dir is not None:
+        require(not options.diagnostics_dir.resolve().is_relative_to(bundle_root),
+                "smoke-diagnostics-inside-bundle")
     _source_python_path, _source_manifest = resolve_bundle_python(bundle_root)
     with tempfile.TemporaryDirectory(prefix="offline smoke ") as temporary:
         temporary_root = Path(temporary).resolve()
@@ -1062,22 +1249,11 @@ def main(arguments: list[str] | None = None) -> int:
         controller_options = {"start_new_session": True} if os.name != "nt" else {
             "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         }
-        controller = subprocess.Popen(controller_command, cwd=cwd, env=environment,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, **controller_options)
-        try:
-            stdout, stderr = controller.communicate(timeout=options.timeout * 12)
-        except subprocess.TimeoutExpired:
-            stop_registered_smoke_server(sandbox, relocated_bundle)
-            terminate_smoke_process_group(controller)
-            stdout, stderr = controller.communicate(timeout=5)
-            raise SmokeBlocked("smoke-outer-timeout-process-group-cleaned") from None
-        # The controller's group is smoke-owned and isolated. Even an early
-        # nonzero exit can leave a pre-state startup child; reap that group
-        # before TemporaryDirectory removes the sandbox it may still be using.
-        terminate_smoke_process_group(controller)
-        result = subprocess.CompletedProcess(controller_command, controller.returncode,
-                                             stdout.decode("utf-8", errors="replace"),
-                                             stderr.decode("utf-8", errors="replace"))
+        result = run_smoke_controller(
+            controller_command, cwd=cwd, environment=environment,
+            process_options=controller_options, sandbox=sandbox, bundle_root=relocated_bundle,
+            timeout=options.timeout, diagnostics_dir=options.diagnostics_dir,
+        )
         if result.returncode:
             # Only report fixed codes; subprocess output can contain config data.
             for captured_output in (result.stderr, result.stdout):

@@ -949,3 +949,33 @@ def test_health_handshake_rejects_version_drift_without_killing(monkeypatch):
     monkeypatch.setattr(launcher.urllib.request, "build_opener", lambda *arguments: opener)
     monkeypatch.setattr(launcher, "_is_process_alive", lambda process_id: True)
     assert launcher.verified_health(state) is None
+
+
+@pytest.mark.parametrize("failure_kind,expected_code", [
+    ("value", "release-operation-failed"),
+    ("os", "release-operation-failed"),
+    ("path", "release-resource-missing"),
+    ("lifecycle", "complete-release-bundle-required"),
+])
+def test_launcher_reports_safe_exception_type_without_exception_values(
+    isolated_home, monkeypatch, caplog, failure_kind, expected_code,
+):
+    secret_message = "synthetic-credential-must-not-appear"
+    errors = {
+        "value": ValueError(secret_message),
+        "os": OSError(13, secret_message),
+        "path": paths.ReleasePathError("release-resource-missing", secret_message),
+        "lifecycle": release.ReleaseLifecycleError("complete-release-bundle-required"),
+    }
+    error = errors[failure_kind]
+
+    def fail_resource_check():
+        raise error
+
+    monkeypatch.setattr(launcher, "check_release_resources", fail_resource_check)
+    assert launcher.main(["diagnose"]) == 2
+    assert expected_code in caplog.text
+    assert "exception=" + type(error).__name__ in caplog.text
+    assert secret_message not in caplog.text
+    if failure_kind == "os":
+        assert "errno=13" in caplog.text
