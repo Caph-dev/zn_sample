@@ -890,6 +890,24 @@ class JobApiTests(JobTestCase):
         )
         self.assertFalse(is_cancellation_requested(job_id))
 
+    def test_unfulfilled_write_pending_cancel_is_safe_but_running_cancel_is_denied(self) -> None:
+        from assistant.jobs.handlers.unfulfilled import run_unfulfilled_write
+        from assistant.jobs.registry import WRITE_JOB_TYPES, ZINIAO_JOB_TYPES, get_handler
+
+        job_type = "followup_unfulfilled_write"
+        self.assertIs(get_handler(job_type), run_unfulfilled_write)
+        self.assertIn(job_type, WRITE_JOB_TYPES)
+        self.assertNotIn(job_type, ZINIAO_JOB_TYPES)
+        pending_id = self.add_job(job_type=job_type)
+        self.assertTrue(self.client.get(f"/api/jobs/{pending_id}").json()["can_cancel"])
+        self.assertEqual(self.post(f"/api/jobs/{pending_id}/cancel").status_code, 200)
+        self.assertIsNone(worker_loop_once(self.session_factory))
+        running_id = self.add_job(job_type=job_type, status="running")
+        self.assertFalse(self.client.get(f"/api/jobs/{running_id}").json()["can_cancel"])
+        self.assertEqual(self.post(f"/api/jobs/{running_id}/cancel").status_code, 409)
+        self.assertFalse(is_cancellation_requested(running_id))
+        self.assertEqual(self.get_job(running_id).status, "running")
+
     def test_cleanup_pending_cancel_prevents_claim_but_running_cancel_is_denied(self) -> None:
         for job_type in ("target_cleanup_preview", "target_cleanup_execute"):
             with self.subTest(job_type=job_type):

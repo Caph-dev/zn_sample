@@ -194,8 +194,38 @@ export interface FollowupFilterOption {
   label: string;
 }
 
+export interface UnfulfilledCandidate {
+  task_id: number;
+  store_id: string;
+  store_name: string;
+  creator_name: string;
+  sample_product: string;
+  record_id: string;
+  delivered_on: string;
+  days_since_delivery: number;
+  scheduled_for: string;
+  send_result: string;
+  feishu_cooperation_status: string;
+}
+
+export interface UnfulfilledJobScope {
+  job_id: string;
+  task_ids: number[];
+  store_id: string;
+  execute_limit: number;
+  count: number;
+  deduplicated: boolean;
+  status: string;
+}
+
+export interface UnfulfilledData {
+  candidates: UnfulfilledCandidate[];
+  jobs: UnfulfilledJobScope[];
+}
+
 export interface FollowupsData {
   rows: FollowupRow[];
+  unfulfilled: UnfulfilledData;
   operator_groups: OperatorGroup[];
   filters: {
     stage: string;

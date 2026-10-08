@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Sequence
 
@@ -47,6 +48,7 @@ JOB_TYPE_LABELS = {
     "shipment_sync": "物流同步",
     "creator_enrich": "补齐达人资料",
     "followup_generate": "跟进待办生成",
+    "followup_unfulfilled_write": "D+15 · 写飞书未发布",
     "content_thanks_preview": "预演已完成感谢私信",
     "daily_refresh": "今日更新",
     "environment_check": "店铺连接检查",
@@ -274,9 +276,11 @@ def followups_data(
     *,
     filters: dict,
     filter_options: dict[str, list[tuple[str, str]]],
+    unfulfilled: dict | None = None,
 ) -> dict:
     return {
         "rows": [_followup_row(task, sample_case) for task, sample_case in rows],
+        "unfulfilled": unfulfilled or {"candidates": [], "jobs": []},
         "filters": filters,
         "operator_groups": operator_groups("followups"),
         "filter_options": {
@@ -293,6 +297,33 @@ def followups_data(
             ],
         },
     }
+
+
+def unfulfilled_data(candidates: Iterable[dict], jobs: Iterable[Any]) -> dict:
+    """Serialize only local candidate evidence and the server-frozen job scope."""
+    candidate_rows = [
+        {**candidate, "delivered_on": _display(candidate.get("delivered_on")),
+         "scheduled_for": _display(candidate.get("scheduled_for"))}
+        for candidate in candidates
+    ]
+    job_rows = []
+    for job in jobs:
+        try:
+            summary = json.loads(job.result_summary or "{}")
+        except (TypeError, ValueError):
+            summary = {}
+        if not isinstance(summary, dict):
+            summary = {}
+        job_rows.append({
+            "job_id": job.id,
+            "status": job.status,
+            "task_ids": summary.get("task_ids", []),
+            "store_id": str(summary.get("store_id") or ""),
+            "execute_limit": summary.get("execute_limit", 1),
+            "count": len(summary.get("task_ids", [])),
+            "deduplicated": False,
+        })
+    return {"candidates": candidate_rows, "jobs": job_rows}
 
 
 def _followup_send_ready(task: Any, sample_case: Any, shipment: Any | None) -> bool:

@@ -488,6 +488,84 @@ def test_failed_subprocess_spawn_removes_marker(isolated_home, monkeypatch):
     assert subprocess.Popen is FailedProcess
 
 
+def test_unfulfilled_write_keeps_release_busy_until_child_exit(database, isolated_home, monkeypatch):
+    import launch_assistant
+    from assistant.jobs import worker as job_worker
+    from assistant.jobs.handlers import unfulfilled
+    from assistant.jobs.registry import ZINIAO_JOB_TYPES, get_handler
+
+    sqlite_path, _, session_factory = database
+    job_type = "followup_unfulfilled_write"
+    assert get_handler(job_type) is unfulfilled.run_unfulfilled_write
+    assert job_type in WRITE_JOB_TYPES
+    assert job_type in launch_assistant.PROTECTED_JOB_TYPES
+    assert job_type not in ZINIAO_JOB_TYPES
+    request_payload = {"task_ids": [15], "store_id": "local-store", "execute_limit": 1}
+    job_id, _ = create_or_get_pending_job(
+        session_factory, job_type=job_type, store_id="local-store",
+        result_summary=json.dumps(request_payload),
+    )
+    coordinator = session_factory.release_coordinator
+    registry = release.SubprocessRegistry(isolated_home / "runtime" / "children")
+    registry.coordinator = coordinator
+    coordinator.subprocess_registry = registry
+    child_entered = threading.Event()
+    allow_exit = threading.Event()
+    processes = []
+
+    class ControlledWriteProcess:
+        def __init__(self, arguments, **options):
+            self.pid = 23456
+            self.kill = Mock(side_effect=forbidden_boundary)
+            self.terminate = Mock(side_effect=forbidden_boundary)
+            processes.append(self)
+            report_path = unfulfilled.unfulfilled_report_path(job_id)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps({
+                **request_payload, "json_path": str(report_path),
+                "mode": job_type, "stopped_reason": "",
+                "csv_path": "", "backup_path": "",
+                "rows": [{"task_id": 15, "result": "waiting-business-update"}],
+                "counts": {"waiting-business-update": 1},
+            }), encoding="utf-8")
+
+        def poll(self):
+            child_entered.set()
+            return 0 if allow_exit.is_set() else None
+
+        def wait(self, timeout=None):
+            child_entered.set()
+            assert allow_exit.wait(WAIT_SECONDS)
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", ControlledWriteProcess)
+    monkeypatch.setattr(unfulfilled, "ensure_user_dirs", lambda: isolated_home)
+    monkeypatch.setattr(unfulfilled, "assert_private_interpreter", lambda: None)
+    monkeypatch.setattr(unfulfilled, "python_subprocess_environment", lambda: {"PYTHONUTF8": "1"})
+    monkeypatch.setattr(job_worker, "append_event", Mock())
+
+    with registry.track():
+        worker_thread = ThreadResult("unfulfilled-write-worker", lambda: job_worker.worker_loop_once(session_factory))
+        try:
+            assert child_entered.wait(WAIT_SECONDS)
+            assert registry.has_active_children()
+            assert coordinator.request_idle_stop(session_factory) == "service-busy"
+            assert not worker_thread.done.is_set()
+            with pytest.raises(release.ReleaseLifecycleError, match="^residual-subprocess-requires-review$"):
+                release.check_residual_jobs(sqlite_path)
+        finally:
+            allow_exit.set()
+            assert worker_thread.join() == job_id
+    assert not registry.has_active_children()
+    assert coordinator.request_idle_stop(session_factory) == "accepted"
+    with session_factory() as session:
+        job = session.get(Job, job_id)
+        assert job.status == "succeeded"
+        assert json.loads(job.result_summary)["task_ids"] == [15]
+    processes[0].kill.assert_not_called()
+    processes[0].terminate.assert_not_called()
+
+
 def test_registered_cleanup_execution_protects_source_restart_and_release_child_lifetime(cleanup_environment, monkeypatch):
     import launch_assistant
     from assistant.jobs import worker as job_worker

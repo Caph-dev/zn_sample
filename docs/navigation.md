@@ -51,6 +51,12 @@
 - 实现：[日历与窗口](../assistant/domain/followup_stage.py)、[话术模板](../assistant/domain/message_templates.py)、[待办服务](../assistant/services/followup_service.py)、[内容感谢](../assistant/services/content_thanks_service.py)、[发送脚本](../scripts/send_followup_message.py)、[聊天导航与消息时间解析](../scripts/lib/im_dom.py)。
 - 验证：[日历](../tests/assistant/test_followup_stage.py)、[话术](../tests/assistant/test_message_templates.py)、[生成待办](../tests/assistant/test_followup_generate.py)、[单条发送](../tests/test_send_followup_message.py)、[聊天 DOM](../tests/test_im_dom.py)。
 
+### D+15 批量未履约（仅合作状态写飞书）
+
+- 先读：[README 操作](../README.md#d15-未履约批量写飞书未发布)、[AGENTS.md](../AGENTS.md)「D+15 批量未履约」。本地名单默认不读写远端；真写三开关 + 默认限额 1，待发货仍 pending 等业务更新，未知结果不重试。
+- 实现：[候选/单条复核与认领](../assistant/services/followup_service.py)、[批量脚本与逐行工件](../scripts/mark_unfulfilled_followups.py)、[固定 POST](../assistant/api/jobs.py)、[固定 handler](../assistant/jobs/handlers/unfulfilled.py)、[达人跟进页](../frontend/src/console/pages/FollowupsPage.tsx)。本任务不占紫鸟页面，不发送私信、不启动物流或生成待办。
+- 验证：[脚本门闩/限额/工件](../tests/test_mark_unfulfilled_followups.py)、[单条写入/刷新保护](../tests/assistant/test_followup_generate.py)、[固定任务与 API](../tests/assistant/test_unfulfilled_job.py)、[前端契约](../frontend/tests/unfulfilled.test.mjs)、[发布资源](../tests/release/test_bundle_resources.py)。离线通过不等于真实飞书或 Windows 原生验收。
+
 ### 计划清理（定向合作进行中）
 
 - 先读：[README.md](../README.md)「计划清理」与 [AGENTS.md](../AGENTS.md)「独立定向邀请取消链」。这是 2/4 自然月的固定快照取消业务，不是样品批准、飞书或私信；真实执行须另行确认名单，不与旧项目脚本并跑。

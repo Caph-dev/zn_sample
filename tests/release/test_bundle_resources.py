@@ -25,6 +25,10 @@ TARGET_CLEANUP_RESOURCES = (
     "scripts/lib/target_invitation_navigation.py",
     "scripts/lib/target_plan_cleanup.py",
 )
+UNFULFILLED_RESOURCES = (
+    "scripts/mark_unfulfilled_followups.py",
+    "assistant/jobs/handlers/unfulfilled.py",
+)
 
 
 def test_checkout_has_the_complete_registered_resource_contract():
@@ -46,6 +50,13 @@ def test_target_cleanup_resources_are_explicitly_registered():
     } <= set(resources.SCRIPT_LIBRARIES)
     assert set(TARGET_CLEANUP_RESOURCES) <= set(resources.FIXED_RESOURCES)
     assert set(TARGET_CLEANUP_RESOURCES) <= set(resources.collect_application_resources(PROJECT_ROOT))
+
+
+def test_unfulfilled_write_resources_are_explicitly_registered():
+    assert "mark_unfulfilled_followups" in resources.SCRIPT_ENTRIES
+    assert "jobs/handlers/unfulfilled" in resources.ASSISTANT_MODULES
+    assert set(UNFULFILLED_RESOURCES) <= set(resources.FIXED_RESOURCES)
+    assert set(UNFULFILLED_RESOURCES) <= set(resources.collect_application_resources(PROJECT_ROOT))
 
 
 def write_resource(root: Path, relative_path: str, content: str = "resource\n") -> Path:
@@ -124,6 +135,7 @@ def test_sensitive_and_development_files_are_not_copied(source_root: Path, tmp_p
     "assistant/web/static/auto-approval/assets/index.js", "assistant/web/static/auto-approval/assets/index.css",
     "setup/release/runtime_artifacts.py", "setup/install_deps.py", resources.BUSINESS_ATTACHMENT,
     *TARGET_CLEANUP_RESOURCES,
+    *UNFULFILLED_RESOURCES,
 ])
 def test_missing_required_resources_fail_before_copy(source_root: Path, tmp_path: Path, required_path: str):
     (source_root / required_path).unlink()

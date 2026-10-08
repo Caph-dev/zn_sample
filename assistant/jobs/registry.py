@@ -41,6 +41,7 @@ REGISTERED_JOB_TYPES = frozenset(
         "operator_pipeline",
         "operator_tracking",
         "operator_followup_send",
+        "followup_unfulfilled_write",
         "auto_approval_preview",
         "auto_approval_execute",
         "auto_approval_reconcile",
@@ -49,12 +50,13 @@ REGISTERED_JOB_TYPES = frozenset(
         "target_cleanup_execute",
     }
 )
-# 运行中不可取消的任务：写操作不可撤销，且占用紫鸟通道。
+# 写操作不可撤销；并非所有写任务都占用紫鸟通道。
 WRITE_JOB_TYPES = frozenset(
     {
         "operator_pipeline",
         "operator_tracking",
         "operator_followup_send",
+        "followup_unfulfilled_write",
         "auto_approval_execute",
         "auto_approval_reconcile",
         "auto_approval_order_backfill",
@@ -141,6 +143,9 @@ def get_handler(job_type: str) -> JobHandler | None:
     if job_type == "operator_followup_send":
         from assistant.jobs.handlers.followup_send import run_followup_send
         return run_followup_send
+    if job_type == "followup_unfulfilled_write":
+        from assistant.jobs.handlers.unfulfilled import run_unfulfilled_write
+        return run_unfulfilled_write
     if job_type in {
         "auto_approval_preview",
         "auto_approval_execute",

@@ -3,12 +3,14 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -16,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from assistant.database.engine import create_database_engine
-from assistant.database.models import Base, FollowupTask, SampleCase, Shipment, Store
+from assistant.database.models import Base, ContentEvidence, FollowupTask, SampleCase, Shipment, Store
 from assistant.services.followup_service import FollowupService
 from assistant.app import create_app
 from tests.assistant.console_payload import console_data
@@ -464,11 +466,12 @@ class FollowupGenerateTests(unittest.TestCase):
                 return_value={"status": "written"},
             ) as write_status,
         ):
-            FollowupService(self.session_factory).mark_unfulfilled(task_id, write_feishu=True)
+            result = FollowupService(self.session_factory).mark_unfulfilled(task_id, write_feishu=True)
         resolve_record.assert_called_once()
         self.assertEqual(resolve_record.call_args.kwargs["creator_handle"], "alice")
         self.assertEqual(resolve_record.call_args.kwargs["sample_product"], "B005")
         self.assertEqual(write_status.call_args.args[1], "rec-found")
+        self.assertEqual(result["record_id"], "rec-found")
         with self.session_factory() as session:
             sample_case = session.scalar(select(SampleCase))
             self.assertEqual(sample_case.feishu_record_id, "rec-found")
@@ -1035,3 +1038,493 @@ class EnrichResultMessageTests(unittest.TestCase):
         message = _format_enrich_result({"missing": None, "type_filled": "bad"})
         self.assertIn("缺失 0", message)
         self.assertIn("类型补齐 0", message)
+
+
+class UnfulfilledServiceTests(unittest.TestCase):
+    TODAY = date(2026, 10, 8)
+    NOW = datetime(2026, 10, 8, 4, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.engine = create_database_engine(Path(self.temporary_directory.name) / "unfulfilled.sqlite3")
+        Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self.service = FollowupService(self.session_factory)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        self.temporary_directory.cleanup()
+
+    def add_task(self, *, store_id="ziniao-first", delivered_at=None, **task_values) -> int:
+        with self.session_factory() as session:
+            store = session.scalar(select(Store).where(Store.ziniao_store_id == store_id))
+            if store is None:
+                store = Store(ziniao_store_id=store_id, store_name=f"Name {store_id}")
+                session.add(store)
+                session.flush()
+            sample_case = SampleCase(
+                store_id=store.id, creator_id=f"creator-{session.query(SampleCase).count()}",
+                creator_name="alice", apply_id="application", product_id="other-hero",
+                sample_product_option="B006", platform_status="processing", language="en",
+            )
+            session.add(sample_case)
+            session.flush()
+            session.add(Shipment(
+                sample_case_id=sample_case.id,
+                delivered_at=delivered_at or datetime(2026, 9, 23, 4, tzinfo=timezone.utc),
+            ))
+            values = {"stage": "unfulfilled", "scheduled_for": self.TODAY, "status": "pending"}
+            values.update(task_values)
+            task = FollowupTask(sample_case_id=sample_case.id, **values)
+            session.add(task)
+            session.commit()
+            return task.id
+
+    def test_candidates_use_beijing_days_ziniao_ids_and_local_evidence_only(self) -> None:
+        too_young = self.add_task(delivered_at=datetime(2026, 9, 23, 16, tzinfo=timezone.utc))
+        eligible = self.add_task(
+            status="needs_review", review_reason="missing_creator_type",
+            requires_manual_confirmation=True,
+        )
+        older = self.add_task(
+            store_id="ziniao-second", scheduled_for=date(2026, 10, 7),
+            delivered_at=datetime(2026, 9, 22, 4, tzinfo=timezone.utc),
+        )
+        with patch.object(self.service, "_write_cooperation_status") as remote:
+            candidates = self.service.list_unfulfilled_candidates(None, today=self.TODAY)
+            selected = self.service.list_unfulfilled_candidates("ziniao-first", today=self.TODAY)
+            self.assertEqual(
+                self.service.list_unfulfilled_candidates("1", today=self.TODAY), [],
+            )
+            self.assertEqual(
+                self.service.list_unfulfilled_candidates("ziniao-second", today=self.TODAY, task_id=eligible), [],
+            )
+        remote.assert_not_called()
+        self.assertEqual([row["task_id"] for row in candidates], [older, eligible])
+        self.assertEqual([row["task_id"] for row in selected], [eligible])
+        self.assertNotIn(too_young, [row["task_id"] for row in candidates])
+        self.assertEqual([row["days_since_delivery"] for row in candidates], [16, 15])
+        self.assertEqual(selected[0], {
+            "task_id": eligible, "store_id": "ziniao-first", "store_name": "Name ziniao-first",
+            "creator_name": "alice", "sample_product": "B006", "record_id": "",
+            "delivered_on": "2026-09-23", "days_since_delivery": 15,
+            "scheduled_for": "2026-10-08", "send_result": "", "feishu_cooperation_status": "",
+        })
+
+    def test_non_candidates_are_excluded_from_preview_and_execution(self) -> None:
+        task_states = [
+            {"status": "skipped"}, {"status": "suppressed"},
+            {"send_result": "unfulfilled-written"}, {"sent_at": self.NOW},
+            {"send_result": "unfulfilled-writing"}, {"send_result": "unfulfilled-write-unknown"},
+            {"status": "needs_review", "review_reason": "feishu_write_failed"},
+            {"status": "needs_review", "review_reason": "missing_language"},
+            {"status": "needs_review", "review_reason": ""},
+        ]
+        excluded = [self.add_task(**values) for values in task_states]
+        for category in ("stale", "shipped", "missing-delivery", "unconfirmed-delivery", "confirmed-content"):
+            task_id = self.add_task()
+            excluded.append(task_id)
+            with self.session_factory() as session:
+                task = session.get(FollowupTask, task_id)
+                sample_case = session.get(SampleCase, task.sample_case_id)
+                shipment = session.scalar(select(Shipment).where(Shipment.sample_case_id == sample_case.id))
+                if category == "stale":
+                    sample_case.platform_status_stale = True
+                elif category == "shipped":
+                    sample_case.platform_status = "shipped"
+                elif category == "missing-delivery":
+                    shipment.delivered_at = None
+                elif category == "unconfirmed-delivery":
+                    shipment.needs_delivery_time_confirmation = True
+                else:
+                    session.add(ContentEvidence(sample_case_id=sample_case.id, content_type="live", content_status="confirmed"))
+                session.commit()
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+            patch.object(self.service, "_write_cooperation_status") as remote,
+        ):
+            self.assertEqual(self.service.list_unfulfilled_candidates(None, today=self.TODAY), [])
+            for task_id in excluded:
+                result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+                self.assertEqual(result["result"], "skipped")
+                self.assertFalse(result["attempted"])
+        remote.assert_not_called()
+
+    def test_current_clock_is_rechecked_and_readonly_never_claims(self) -> None:
+        task_id = self.add_task()
+        self.assertEqual(len(self.service.list_unfulfilled_candidates(None, today=self.TODAY)), 1)
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=datetime(2026, 10, 7, 4, tzinfo=timezone.utc)),
+            patch.object(self.service, "_write_cooperation_status") as remote,
+        ):
+            result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+        self.assertEqual(result["reason"], "not-current-unfulfilled-stage")
+        remote.assert_not_called()
+        with patch("assistant.services.followup_service.beijing_now", return_value=self.NOW):
+            planned = self.service.mark_unfulfilled(task_id)
+        self.assertEqual(planned["result"], "planned")
+        self.assertFalse(planned["attempted"])
+        with self.session_factory() as session:
+            self.assertEqual(session.get(FollowupTask, task_id).send_result, "")
+
+    def test_written_and_unchanged_are_completed_and_cannot_write_twice(self) -> None:
+        for remote_status in ("written", "unchanged"):
+            task_id = self.add_task(status="needs_review", review_reason="ambiguous_creator_type")
+            with (
+                patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                patch.object(self.service, "_write_cooperation_status", return_value={"status": remote_status}) as remote,
+            ):
+                first = self.service.mark_unfulfilled(
+                    task_id, write_feishu=True, expected_store_id="ziniao-first",
+                )
+                second = self.service.mark_unfulfilled(task_id, write_feishu=True)
+            self.assertEqual(first["result"], remote_status)
+            self.assertTrue(first["attempted"])
+            self.assertEqual(second["result"], "skipped")
+            self.assertEqual(second["reason"], "already-completed")
+            self.assertFalse(second["attempted"])
+            remote.assert_called_once()
+            with self.session_factory() as session:
+                task = session.get(FollowupTask, task_id)
+                self.assertEqual(task.send_result, "unfulfilled-written")
+                self.assertEqual(task.status, "pending")
+                self.assertFalse(task.requires_manual_confirmation)
+
+    def test_exact_waiting_status_stays_pending_other_refusals_need_review(self) -> None:
+        for current_status in ("待发货", "待发货 ", "已发布", "已完成"):
+            with self.subTest(current_status=current_status):
+                task_id = self.add_task(status="needs_review", review_reason="missing_creator_type")
+                with (
+                    patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                    patch.object(self.service, "_write_cooperation_status", return_value={
+                        "status": "blocked-unexpected-status", "current_status": current_status,
+                    }),
+                ):
+                    result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+                with self.session_factory() as session:
+                    task = session.get(FollowupTask, task_id)
+                    waiting = current_status == "待发货"
+                    self.assertEqual(result["result"], "waiting-business-update" if waiting else "needs-review")
+                    self.assertTrue(result["attempted"])
+                    self.assertEqual(task.status, "pending" if waiting else "needs_review")
+                    self.assertEqual(task.review_reason, "" if waiting else "feishu_write_failed")
+                    self.assertEqual(task.requires_manual_confirmation, not waiting)
+                    self.assertEqual(task.send_result, "")
+
+    def test_unclassified_and_uncertain_remote_results_are_not_retryable(self) -> None:
+        for remote_effect in (
+            RuntimeError("response lost"),
+            {"status": "write-uncertain", "verification_error": "readback failed"},
+        ):
+            task_id = self.add_task()
+            with (
+                patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                patch.object(self.service, "_write_cooperation_status") as remote,
+            ):
+                if isinstance(remote_effect, Exception):
+                    remote.side_effect = remote_effect
+                else:
+                    remote.return_value = remote_effect
+                result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+                repeated = self.service.mark_unfulfilled(task_id, write_feishu=True)
+                readonly = self.service.mark_unfulfilled(task_id)
+            self.assertEqual(result["result"], "write-unknown")
+            self.assertTrue(result["attempted"])
+            self.assertFalse(result["ok"])
+            self.assertIn(result["reason"], {"response lost", "readback failed"})
+            self.assertEqual(repeated["result"], "skipped")
+            self.assertFalse(readonly["attempted"])
+            remote.assert_called_once()
+            with self.session_factory() as session:
+                task = session.get(FollowupTask, task_id)
+                self.assertEqual(task.send_result, "unfulfilled-write-unknown")
+                self.assertEqual(task.review_reason, "feishu_write_failed")
+                self.assertTrue(task.last_error)
+
+    def test_writer_classifies_generic_errors_only_for_unfulfilled_path(self) -> None:
+        task_id = self.add_task()
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            sample_case = session.get(SampleCase, task.sample_case_id)
+            session.expunge(sample_case)
+        with (
+            patch("lib.app_config.load_bitable_settings", return_value={"app_id": "app", "app_secret": "test"}),
+            patch("lib.feishu_bitable.get_bitable_access_token", side_effect=RuntimeError("unclassified")),
+        ):
+            ordinary = self.service._write_cooperation_status(sample_case, "已完成", evidence_id="content")
+            unfulfilled = self.service._write_cooperation_status(
+                sample_case, "未发布", evidence_id="unfulfilled", unclassified_as_unknown=True,
+            )
+        self.assertEqual(ordinary["status"], "error")
+        self.assertEqual(unfulfilled["status"], "write-uncertain")
+
+    def test_remote_span_has_no_session_or_sqlite_write_lock(self) -> None:
+        task_id = self.add_task()
+
+        def write_remote(sample_case, target_status, **options):
+            self.assertTrue(inspect(sample_case).detached)
+            with self.session_factory() as other_session:
+                other_session.execute(text("PRAGMA busy_timeout=100"))
+                task = other_session.get(FollowupTask, task_id)
+                self.assertEqual(task.send_result, "unfulfilled-writing")
+                store = other_session.get(Store, sample_case.store_id)
+                store.store_name = "Concurrent local write"
+                other_session.commit()
+            sample_case.feishu_record_id = "matched-record"
+            return {"status": "written"}
+
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+            patch.object(self.service, "_write_cooperation_status", side_effect=write_remote),
+        ):
+            result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+        self.assertEqual(result["result"], "written")
+        with self.session_factory() as session:
+            self.assertEqual(session.scalar(select(Store.store_name)), "Concurrent local write")
+            self.assertEqual(session.scalar(select(SampleCase.feishu_record_id)), "matched-record")
+
+    def test_two_concurrent_eligible_calls_only_one_wins_the_claim(self) -> None:
+        task_id = self.add_task()
+        barrier = Barrier(2)
+        original_check = self.service._unfulfilled_skip_reason
+
+        def synchronize_checks(*arguments, **options):
+            reason = original_check(*arguments, **options)
+            barrier.wait(timeout=5)
+            return reason
+
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+            patch.object(self.service, "_unfulfilled_skip_reason", side_effect=synchronize_checks),
+            patch.object(self.service, "_write_cooperation_status", return_value={"status": "written"}) as remote,
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            futures = [executor.submit(self.service.mark_unfulfilled, task_id, write_feishu=True) for _index in range(2)]
+            results = [future.result(timeout=10) for future in futures]
+        remote.assert_called_once()
+        self.assertEqual(sorted(result["result"] for result in results), ["skipped", "written"])
+        self.assertEqual(sum(result["attempted"] for result in results), 1)
+
+    def test_claim_rechecks_changed_case_shipment_and_content_evidence(self) -> None:
+        original_check = self.service._unfulfilled_skip_reason
+        for changed_evidence in ("case", "shipment", "content"):
+            task_id = self.add_task()
+
+            def change_after_check(session, task, sample_case, shipment, *, today):
+                reason = original_check(session, task, sample_case, shipment, today=today)
+                with self.session_factory() as other_session:
+                    if changed_evidence == "case":
+                        current_case = other_session.get(SampleCase, sample_case.id)
+                        current_case.platform_status_stale = True
+                    elif changed_evidence == "shipment":
+                        current_shipment = other_session.get(Shipment, shipment.id)
+                        current_shipment.delivered_at = self.NOW
+                    else:
+                        other_session.add(ContentEvidence(
+                            sample_case_id=sample_case.id,
+                            content_type="video", content_status="confirmed",
+                        ))
+                    other_session.commit()
+                return reason
+
+            with (
+                patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                patch.object(self.service, "_unfulfilled_skip_reason", side_effect=change_after_check),
+                patch.object(self.service, "_write_cooperation_status") as remote,
+            ):
+                result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+            remote.assert_not_called()
+            self.assertEqual(result["reason"], "claim-not-acquired")
+            self.assertFalse(result["attempted"])
+            with self.session_factory() as session:
+                self.assertEqual(session.get(FollowupTask, task_id).send_result, "")
+
+    def test_frozen_store_binding_rejects_case_moved_before_execution(self) -> None:
+        task_id = self.add_task()
+        candidates = self.service.list_unfulfilled_candidates("ziniao-first", today=self.TODAY)
+        frozen_store_id = candidates[0]["store_id"]
+        with self.session_factory() as session:
+            second_store = Store(ziniao_store_id="ziniao-second", store_name="Second store")
+            session.add(second_store)
+            session.flush()
+            task = session.get(FollowupTask, task_id)
+            session.get(SampleCase, task.sample_case_id).store_id = second_store.id
+            session.commit()
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+            patch.object(self.service, "_write_cooperation_status") as remote,
+        ):
+            result = self.service.mark_unfulfilled(
+                task_id, write_feishu=True, expected_store_id=frozen_store_id,
+            )
+        remote.assert_not_called()
+        self.assertEqual(result["result"], "skipped")
+        self.assertEqual(result["reason"], "store-mismatch")
+        self.assertFalse(result["attempted"])
+        with self.session_factory() as session:
+            self.assertEqual(session.get(FollowupTask, task_id).send_result, "")
+
+    def test_atomic_claim_rechecks_task_case_and_store_associations(self) -> None:
+        original_check = self.service._unfulfilled_skip_reason
+        for moved_relation in ("case-store", "task-case", "store-ziniao-id"):
+            with self.subTest(moved_relation=moved_relation):
+                task_id = self.add_task(store_id=f"source-{moved_relation}")
+                other_task_id = self.add_task(
+                    store_id=f"target-{moved_relation}", scheduled_for=date(2026, 10, 7),
+                )
+
+                def move_after_check(session, task, sample_case, shipment, *, today):
+                    reason = original_check(session, task, sample_case, shipment, today=today)
+                    with self.session_factory() as other_session:
+                        other_task = other_session.get(FollowupTask, other_task_id)
+                        other_case = other_session.get(SampleCase, other_task.sample_case_id)
+                        if moved_relation == "case-store":
+                            other_session.get(SampleCase, sample_case.id).store_id = other_case.store_id
+                        elif moved_relation == "task-case":
+                            other_session.get(FollowupTask, task.id).sample_case_id = other_case.id
+                        else:
+                            store = other_session.get(Store, sample_case.store_id)
+                            store.ziniao_store_id = f"renamed-{moved_relation}"
+                        other_session.commit()
+                    return reason
+
+                with (
+                    patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                    patch.object(self.service, "_unfulfilled_skip_reason", side_effect=move_after_check),
+                    patch.object(self.service, "_write_cooperation_status") as remote,
+                ):
+                    result = self.service.mark_unfulfilled(
+                        task_id, write_feishu=True, expected_store_id=f"source-{moved_relation}",
+                    )
+                remote.assert_not_called()
+                self.assertEqual(result["result"], "skipped")
+                self.assertIn(result["reason"], {"store-mismatch", "claim-not-acquired"})
+                self.assertFalse(result["attempted"])
+                with self.session_factory() as session:
+                    self.assertEqual(session.get(FollowupTask, task_id).send_result, "")
+
+    def test_corrected_delivery_replacement_honors_case_write_protection(self) -> None:
+        for send_result, review_reason in (
+            ("unfulfilled-writing", ""), ("unfulfilled-write-unknown", ""),
+            ("", "feishu_write_failed"),
+        ):
+            with self.subTest(send_result=send_result, review_reason=review_reason):
+                original_id = self.add_task(
+                    send_result=send_result, review_reason=review_reason,
+                    status="needs_review", requires_manual_confirmation=True,
+                    last_error="original evidence",
+                )
+                with self.session_factory() as session:
+                    original = session.get(FollowupTask, original_id)
+                    shipment = session.scalar(select(Shipment).where(
+                        Shipment.sample_case_id == original.sample_case_id,
+                    ))
+                    shipment.delivered_at = datetime(2026, 9, 22, 4, tzinfo=timezone.utc)
+                    session.commit()
+                    sample_case_id = original.sample_case_id
+                self.service.generate(self.NOW, enrich_missing_language=False)
+                with self.session_factory() as session:
+                    replacement = session.scalar(select(FollowupTask).where(
+                        FollowupTask.sample_case_id == sample_case_id,
+                        FollowupTask.stage == "unfulfilled",
+                        FollowupTask.scheduled_for == date(2026, 10, 7),
+                    ))
+                    self.assertIsNotNone(replacement)
+                    self.assertNotEqual(replacement.id, original_id)
+                    replacement_id = replacement.id
+                with (
+                    patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                    patch.object(self.service, "_write_cooperation_status") as remote,
+                ):
+                    candidates = self.service.list_unfulfilled_candidates(None, today=self.TODAY)
+                    result = self.service.mark_unfulfilled(
+                        replacement_id, write_feishu=True, expected_store_id="ziniao-first",
+                    )
+                remote.assert_not_called()
+                self.assertNotIn(replacement_id, [candidate["task_id"] for candidate in candidates])
+                self.assertEqual(result["result"], "skipped")
+                self.assertEqual(result["reason"], "case-unfulfilled-write-protected")
+                self.assertFalse(result["attempted"])
+                with self.session_factory() as session:
+                    original = session.get(FollowupTask, original_id)
+                    self.assertEqual(original.send_result, send_result)
+                    self.assertEqual(original.review_reason, review_reason)
+                    self.assertEqual(original.status, "needs_review")
+                    self.assertTrue(original.requires_manual_confirmation)
+                    self.assertEqual(original.last_error, "original evidence")
+                    self.assertEqual(session.get(FollowupTask, replacement_id).send_result, "")
+
+    def test_atomic_claim_rechecks_new_case_protection_after_candidate_check(self) -> None:
+        original_check = self.service._unfulfilled_skip_reason
+        for send_result, review_reason in (
+            ("unfulfilled-writing", ""), ("unfulfilled-write-unknown", ""),
+            ("", "feishu_write_failed"),
+        ):
+            with self.subTest(send_result=send_result, review_reason=review_reason):
+                task_id = self.add_task()
+
+                def protect_after_check(session, task, sample_case, shipment, *, today):
+                    reason = original_check(session, task, sample_case, shipment, today=today)
+                    with self.session_factory() as other_session:
+                        other_session.add(FollowupTask(
+                            sample_case_id=sample_case.id, stage="unfulfilled",
+                            scheduled_for=date(2026, 10, 7), status="suppressed",
+                            send_result=send_result, review_reason=review_reason,
+                        ))
+                        other_session.commit()
+                    return reason
+
+                with (
+                    patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+                    patch.object(self.service, "_unfulfilled_skip_reason", side_effect=protect_after_check),
+                    patch.object(self.service, "_write_cooperation_status") as remote,
+                ):
+                    result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+                remote.assert_not_called()
+                self.assertEqual(result["reason"], "claim-not-acquired")
+                self.assertFalse(result["attempted"])
+                with self.session_factory() as session:
+                    self.assertEqual(session.get(FollowupTask, task_id).send_result, "")
+
+    def test_completed_history_does_not_expand_case_protection(self) -> None:
+        task_id = self.add_task()
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            session.add(FollowupTask(
+                sample_case_id=task.sample_case_id, stage="unfulfilled",
+                scheduled_for=date(2026, 10, 7), send_result="unfulfilled-written",
+            ))
+            session.commit()
+        with (
+            patch("assistant.services.followup_service.beijing_now", return_value=self.NOW),
+            patch.object(self.service, "_write_cooperation_status", return_value={"status": "unchanged"}) as remote,
+        ):
+            candidates = self.service.list_unfulfilled_candidates(None, today=self.TODAY)
+            result = self.service.mark_unfulfilled(task_id, write_feishu=True)
+        self.assertEqual([candidate["task_id"] for candidate in candidates], [task_id])
+        self.assertEqual(result["result"], "unchanged")
+        remote.assert_called_once()
+
+    def test_generation_and_refresh_preserve_write_protection_even_after_content_confirmation(self) -> None:
+        for send_result, review_reason in (
+            ("unfulfilled-writing", ""), ("unfulfilled-write-unknown", "feishu_write_failed"),
+            ("", "feishu_write_failed"),
+        ):
+            task_id = self.add_task(
+                send_result=send_result, review_reason=review_reason,
+                status="needs_review", requires_manual_confirmation=True, last_error="original evidence",
+            )
+            self.service.refresh_task(task_id)
+            self.service.generate(self.NOW, enrich_missing_language=False)
+            with self.session_factory() as session:
+                task = session.get(FollowupTask, task_id)
+                session.add(ContentEvidence(sample_case_id=task.sample_case_id, content_type="video", content_status="confirmed"))
+                session.commit()
+            self.service.generate(self.NOW, enrich_missing_language=False)
+            with self.session_factory() as session:
+                task = session.get(FollowupTask, task_id)
+                self.assertEqual(task.send_result, send_result)
+                self.assertEqual(task.review_reason, review_reason)
+                self.assertEqual(task.status, "needs_review")
+                self.assertTrue(task.requires_manual_confirmation)
+                self.assertEqual(task.last_error, "original evidence")

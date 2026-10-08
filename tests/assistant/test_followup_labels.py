@@ -4,6 +4,9 @@ import unittest
 from datetime import datetime, timezone
 
 from assistant.domain.followup_labels import (
+    UNFULFILLED_WRITING_RESULT,
+    UNFULFILLED_WRITE_UNKNOWN_RESULT,
+    followup_action_completed,
     followup_action_display,
     followup_action_tone,
     followup_language_label,
@@ -132,6 +135,18 @@ class FollowupLabelTests(unittest.TestCase):
         )
         self.assertEqual(followup_language_label("en"), "英语")
         self.assertEqual(followup_language_label("es"), "西班牙语")
+
+    def test_unfulfilled_uncertain_states_require_review_not_completion(self) -> None:
+        for result in (UNFULFILLED_WRITING_RESULT, UNFULFILLED_WRITE_UNKNOWN_RESULT):
+            with self.subTest(result=result):
+                self.assertFalse(followup_action_completed(send_result=result))
+                self.assertIn("人工核对", followup_send_result_label(result))
+                self.assertIn("勿重复写入", followup_send_result_label(result))
+                self.assertNotEqual(
+                    followup_action_tone("mark_unfulfilled", send_result=result),
+                    "success",
+                )
+        self.assertTrue(followup_action_completed(send_result="unfulfilled-written"))
 
 
 if __name__ == "__main__":

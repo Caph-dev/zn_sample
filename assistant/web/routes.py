@@ -30,6 +30,8 @@ from assistant.domain.followup_labels import (
 from assistant.jobs.locks import request_safe_store_summary
 from assistant.paths import database_path, user_data_dir
 from assistant.security.secret_redaction import redact_text
+from assistant.services.followup_service import FollowupService
+from assistant.domain.timeutil import beijing_now
 from assistant.web import console_pages
 
 
@@ -303,15 +305,48 @@ def _followup_stage_order_expression():
     )
 
 
-@router.get("/followups", response_class=HTMLResponse)
-def followups_page(
+def _local_unfulfilled_data(request: Request) -> dict:
+    session_factory = request.app.state.session_factory
+    candidates = FollowupService(session_factory).list_unfulfilled_candidates(
+        None, today=beijing_now().date(),
+    )
+    with session_factory() as session:
+        jobs = session.scalars(
+            select(Job)
+            .where(Job.job_type == "followup_unfulfilled_write")
+            .order_by(
+                case((Job.status.in_(("pending", "running")), 0), else_=1),
+                Job.created_at.desc(),
+            )
+            .limit(20)
+        ).all()
+    return console_pages.unfulfilled_data(candidates, jobs)
+
+
+@router.get("/followups/unfulfilled/data")
+def unfulfilled_local_data(
     request: Request,
     stage: str = "",
     status: str = "",
     language: str = "",
     platform_status: str = "",
     curr_status: int | None = None,
-) -> HTMLResponse:
+) -> dict:
+    """Refresh local evidence only; never probe a store or call Feishu."""
+    return _local_followups_page_data(
+        request, stage=stage, status=status, language=language,
+        platform_status=platform_status, curr_status=curr_status,
+    )
+
+
+def _local_followups_page_data(
+    request: Request,
+    stage: str = "",
+    status: str = "",
+    language: str = "",
+    platform_status: str = "",
+    curr_status: int | None = None,
+) -> dict:
     with request.app.state.session_factory() as session:
         query = (
             select(FollowupTask, SampleCase).join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
@@ -345,10 +380,26 @@ def followups_page(
         "curr_status": curr_status,
         "include_superseded": bool(status),
     }
-    data = console_pages.followups_data(
+    return console_pages.followups_data(
         rows,
         filters=filters,
         filter_options=_followup_filter_options(),
+        unfulfilled=_local_unfulfilled_data(request),
+    )
+
+
+@router.get("/followups", response_class=HTMLResponse)
+def followups_page(
+    request: Request,
+    stage: str = "",
+    status: str = "",
+    language: str = "",
+    platform_status: str = "",
+    curr_status: int | None = None,
+) -> HTMLResponse:
+    data = _local_followups_page_data(
+        request, stage=stage, status=status, language=language,
+        platform_status=platform_status, curr_status=curr_status,
     )
     return _console_response(request, page="followups", page_title="跟进待办", data=data)
 

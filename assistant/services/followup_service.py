@@ -5,7 +5,7 @@ import csv
 import json
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from assistant.database.models import ContentEvidence, FollowupTask, SampleCase, Shipment, Store
 from assistant.domain.followup_stage import (
@@ -20,12 +20,15 @@ from assistant.domain.followup_stage import (
     action_kind_for_stage,
     days_since_delivery,
     followup_task_completed,
+    latest_due_unpublished_stage,
     plan_followup_mutation,
 )
 from assistant.domain.followup_labels import (
     LISTED_RESULT,
     MARKED_SENT_RESULT,
     UNFULFILLED_WRITTEN_RESULT,
+    UNFULFILLED_WRITING_RESULT,
+    UNFULFILLED_WRITE_UNKNOWN_RESULT,
     followup_review_label,
 )
 from assistant.domain.message_templates import TEMPLATE_VERSION, choose_template_key, render_followup_message
@@ -310,7 +313,143 @@ class FollowupService:
                 "feishu": feishu_result,
             }
 
-    def mark_unfulfilled(self, task_id: int, *, write_feishu: bool = False) -> dict:
+    def list_unfulfilled_candidates(
+        self,
+        store_id: str | None,
+        *,
+        today: date,
+        task_id: int | None = None,
+    ) -> list[dict]:
+        """Read local D+15 candidates; store IDs are Ziniao IDs, never DB keys."""
+        with self.session_factory() as session:
+            query = (
+                select(FollowupTask, SampleCase, Shipment, Store)
+                .join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
+                .join(Shipment, Shipment.sample_case_id == SampleCase.id)
+                .join(Store, SampleCase.store_id == Store.id)
+                .where(FollowupTask.stage == "unfulfilled")
+                .order_by(FollowupTask.scheduled_for, FollowupTask.id)
+            )
+            if store_id is not None:
+                query = query.where(Store.ziniao_store_id == str(store_id))
+            if task_id is not None:
+                query = query.where(FollowupTask.id == task_id)
+            candidates = []
+            for task, sample_case, shipment, store in session.execute(query):
+                if not store.ziniao_store_id or self._unfulfilled_skip_reason(
+                    session, task, sample_case, shipment, today=today,
+                ):
+                    continue
+                candidates.append({
+                    "task_id": task.id,
+                    "store_id": store.ziniao_store_id,
+                    "store_name": store.store_name,
+                    "creator_name": sample_case.creator_name,
+                    "sample_product": sample_case.sample_product_option,
+                    "record_id": sample_case.feishu_record_id,
+                    "delivered_on": beijing_date(shipment.delivered_at).isoformat(),
+                    "days_since_delivery": days_since_delivery(shipment.delivered_at, today=today),
+                    "scheduled_for": task.scheduled_for.isoformat() if task.scheduled_for else None,
+                    "send_result": task.send_result,
+                    "feishu_cooperation_status": sample_case.feishu_cooperation_status,
+                })
+            return candidates
+
+    @staticmethod
+    def _unfulfilled_write_protected(task: FollowupTask) -> bool:
+        return task.stage == "unfulfilled" and (
+            task.send_result in {UNFULFILLED_WRITING_RESULT, UNFULFILLED_WRITE_UNKNOWN_RESULT}
+            or task.review_reason == "feishu_write_failed"
+        )
+
+    @staticmethod
+    def _protected_unfulfilled_history_exists(*, task_id: int, sample_case_id: int):
+        protected_task = FollowupTask.__table__.alias("protected_unfulfilled_task")
+        return select(protected_task.c.id).where(
+            protected_task.c.id != task_id,
+            protected_task.c.sample_case_id == sample_case_id,
+            protected_task.c.stage == "unfulfilled",
+            or_(
+                protected_task.c.send_result.in_(
+                    {UNFULFILLED_WRITING_RESULT, UNFULFILLED_WRITE_UNKNOWN_RESULT}
+                ),
+                protected_task.c.review_reason == "feishu_write_failed",
+            ),
+        ).exists()
+
+    def _unfulfilled_skip_reason(
+        self,
+        session,
+        task: FollowupTask,
+        sample_case: SampleCase,
+        shipment: Shipment | None,
+        *,
+        today: date,
+    ) -> str:
+        if followup_task_completed({"sent_at": task.sent_at, "send_result": task.send_result}):
+            return "already-completed"
+        if self._unfulfilled_write_protected(task):
+            return task.send_result or "feishu_write_failed"
+        if session.scalar(select(self._protected_unfulfilled_history_exists(
+            task_id=task.id, sample_case_id=sample_case.id,
+        ))):
+            return "case-unfulfilled-write-protected"
+        if task.status not in ACTIVE_TASK_STATUSES:
+            return "task-not-active"
+        if task.review_reason and task.review_reason not in {
+            "missing_creator_type", "ambiguous_creator_type",
+        }:
+            return "task-needs-review"
+        if task.status == "needs_review" and task.review_reason not in {
+            "missing_creator_type", "ambiguous_creator_type",
+        }:
+            return "task-needs-review"
+        if not is_processing_followup_case(
+            platform_status=sample_case.platform_status or "",
+            stale=bool(sample_case.platform_status_stale),
+        ):
+            return "case-not-processing"
+        if (
+            shipment is None
+            or shipment.delivered_at is None
+            or shipment.needs_delivery_time_confirmation
+        ):
+            return "missing-delivery-time"
+        latest_stage = latest_due_unpublished_stage(
+            days_since_delivery(shipment.delivered_at, today=today)
+        )
+        if latest_stage is None or latest_stage[0] != "unfulfilled":
+            return "not-current-unfulfilled-stage"
+        if self._latest_confirmed_content(session, sample_case.id) is not None:
+            return "content-already-confirmed"
+        return ""
+
+    @staticmethod
+    def _unfulfilled_result(
+        result: str,
+        reason: str,
+        *,
+        attempted: bool = False,
+        feishu: dict | None = None,
+        record_id: str = "",
+    ) -> dict:
+        return {
+            "ok": result not in {"needs-review", "write-unknown"},
+            "feishu": feishu if feishu is not None else {"status": "not-requested"},
+            "result": result,
+            "reason": reason,
+            "attempted": attempted,
+            "record_id": record_id,
+        }
+
+    def mark_unfulfilled(
+        self,
+        task_id: int,
+        *,
+        write_feishu: bool = False,
+        expected_store_id: str | None = None,
+    ) -> dict:
+        """Claim locally, release SQLite, then write and finalize in a short session."""
         with self.session_factory() as session:
             task = session.get(FollowupTask, task_id)
             if task is None:
@@ -318,31 +457,122 @@ class FollowupService:
             if task.stage != "unfulfilled":
                 raise ValueError("not-unfulfilled-task")
             sample_case = session.get(SampleCase, task.sample_case_id)
-            if self._latest_confirmed_content(session, sample_case.id) is not None:
-                raise ValueError("content-already-confirmed")
-            feishu_result = {"status": "not-requested"}
-            if write_feishu:
-                feishu_result = self._write_cooperation_status(
-                    sample_case,
-                    COOPERATION_STATUS_UNPUBLISHED,
-                    evidence_id="unfulfilled",
-                )
-                if feishu_result.get("status") in {"written", "unchanged"}:
-                    sample_case.feishu_cooperation_status = COOPERATION_STATUS_UNPUBLISHED
-                    # 写完就结掉这条待办：否则列表一直显示「标记未履约」可点，
-                    # 重复点击只会得到 unchanged，操作员会以为没写成功。
-                    task.send_result = UNFULFILLED_WRITTEN_RESULT
-                    task.last_error = ""
-                else:
-                    task.status = "needs_review"
-                    task.review_reason = "feishu_write_failed"
-                    task.requires_manual_confirmation = True
-                    task.last_error = str(
-                        feishu_result.get("error")
-                        or f"飞书合作状态未写成（{feishu_result.get('status')}）"
-                    )
+            shipment = session.scalar(
+                select(Shipment).where(Shipment.sample_case_id == sample_case.id)
+            )
+            reason = self._unfulfilled_skip_reason(
+                session, task, sample_case, shipment, today=beijing_date(beijing_now()),
+            )
+            store = session.get(Store, sample_case.store_id)
+            record_id = str(sample_case.feishu_record_id or "").strip()
+            if reason:
+                return self._unfulfilled_result("skipped", reason, record_id=record_id)
+            if store is None or not store.ziniao_store_id:
+                return self._unfulfilled_result("skipped", "missing-store", record_id=record_id)
+            if expected_store_id is not None and store.ziniao_store_id != str(expected_store_id):
+                return self._unfulfilled_result("skipped", "store-mismatch", record_id=record_id)
+            claim_store_id = store.ziniao_store_id
+            if not write_feishu:
+                return self._unfulfilled_result("planned", "", record_id=record_id)
+
+            # Recheck mutable local evidence in the same statement that wins the claim.
+            claim = session.execute(
+                update(FollowupTask).where(
+                    FollowupTask.id == task.id,
+                    FollowupTask.sample_case_id == sample_case.id,
+                    FollowupTask.stage == "unfulfilled",
+                    FollowupTask.status == task.status,
+                    FollowupTask.review_reason == task.review_reason,
+                    FollowupTask.send_result == task.send_result,
+                    FollowupTask.sent_at.is_(None),
+                    ~self._protected_unfulfilled_history_exists(
+                        task_id=task.id, sample_case_id=sample_case.id,
+                    ),
+                    select(SampleCase.id).join(Store, SampleCase.store_id == Store.id).where(
+                        SampleCase.id == sample_case.id,
+                        Store.ziniao_store_id == claim_store_id,
+                        SampleCase.platform_status == "processing",
+                        SampleCase.platform_status_stale.is_(False),
+                    ).exists(),
+                    select(Shipment.id).where(
+                        Shipment.sample_case_id == task.sample_case_id,
+                        Shipment.delivered_at == shipment.delivered_at,
+                        Shipment.needs_delivery_time_confirmation.is_(False),
+                    ).exists(),
+                    ~select(ContentEvidence.id).where(
+                        ContentEvidence.sample_case_id == task.sample_case_id,
+                        ContentEvidence.content_status == "confirmed",
+                    ).exists(),
+                ).values(send_result=UNFULFILLED_WRITING_RESULT),
+                execution_options={"synchronize_session": False},
+            )
+            if claim.rowcount != 1:
+                session.rollback()
+                return self._unfulfilled_result("skipped", "claim-not-acquired", record_id=record_id)
+            session.expunge(sample_case)
             session.commit()
-            return {"ok": True, "feishu": feishu_result}
+
+        try:
+            feishu_result = self._write_cooperation_status(
+                sample_case, COOPERATION_STATUS_UNPUBLISHED,
+                evidence_id="unfulfilled", unclassified_as_unknown=True,
+            )
+        except Exception as error:
+            feishu_result = {"status": "write-uncertain", "error": str(error)}
+        record_id = str(sample_case.feishu_record_id or "").strip()
+        feishu_status = str(feishu_result.get("status") or "")
+        waiting_for_business = (
+            feishu_status == "blocked-unexpected-status"
+            and feishu_result.get("current_status") == "待发货"
+        )
+        reason = str(
+            feishu_result.get("error")
+            or feishu_result.get("verification_error")
+            or feishu_status
+        )
+        with self.session_factory() as session:
+            task = session.get(FollowupTask, task_id)
+            current_case = session.get(SampleCase, sample_case.id)
+            if task is None or task.send_result != UNFULFILLED_WRITING_RESULT:
+                return self._unfulfilled_result(
+                    "write-unknown", "claim-changed", attempted=True, feishu=feishu_result,
+                    record_id=record_id,
+                )
+            if sample_case.feishu_record_id and not current_case.feishu_record_id:
+                current_case.feishu_record_id = sample_case.feishu_record_id
+            if feishu_status in {"written", "unchanged"}:
+                current_case.feishu_cooperation_status = COOPERATION_STATUS_UNPUBLISHED
+                task.send_result = UNFULFILLED_WRITTEN_RESULT
+                task.status = "pending"
+                task.review_reason = ""
+                task.requires_manual_confirmation = False
+                task.last_error = ""
+                result = feishu_status
+                reason = ""
+            elif waiting_for_business:
+                task.send_result = ""
+                task.status = "pending"
+                task.review_reason = ""
+                task.requires_manual_confirmation = False
+                task.last_error = ""
+                current_case.feishu_cooperation_status = "待发货"
+                result = "waiting-business-update"
+                reason = "waiting-business-update"
+            else:
+                task.send_result = (
+                    UNFULFILLED_WRITE_UNKNOWN_RESULT
+                    if feishu_status == "write-uncertain"
+                    else ""
+                )
+                task.status = "needs_review"
+                task.review_reason = "feishu_write_failed"
+                task.requires_manual_confirmation = True
+                task.last_error = reason
+                result = "write-unknown" if feishu_status == "write-uncertain" else "needs-review"
+            session.commit()
+        return self._unfulfilled_result(
+            result, reason, attempted=True, feishu=feishu_result, record_id=record_id,
+        )
 
     def preview_followup_message(self, task_id: int) -> dict:
         """Open the IM thread and fill/inspect SOP copy. Never sends."""
@@ -489,6 +719,7 @@ class FollowupService:
         target_status: str,
         *,
         evidence_id: str,
+        unclassified_as_unknown: bool = False,
     ) -> dict:
         from lib.app_config import load_bitable_settings
         from lib.feishu_bitable import (
@@ -539,7 +770,10 @@ class FollowupService:
         except FeishuBitableError as error:
             return {"status": "error", "error": str(error)}
         except Exception as error:
-            return {"status": "error", "error": str(error)}
+            return {
+                "status": "write-uncertain" if unclassified_as_unknown else "error",
+                "error": str(error),
+            }
 
     def _latest_confirmed_content(self, session, sample_case_id: int) -> ContentEvidence | None:
         return session.scalar(
@@ -606,6 +840,8 @@ class FollowupService:
             query = query.where(FollowupTask.scheduled_for == scheduled_for)
         task = session.scalar(query)
         if task is not None and task.status in ACTIVE_TASK_STATUSES:
+            if self._unfulfilled_write_protected(task):
+                return
             task.status = "suppressed"
             task.suppressed_reason = reason
             task.requires_manual_confirmation = False
@@ -676,6 +912,8 @@ class FollowupService:
         content_url: str = "",
         language: dict | None = None,
     ) -> None:
+        if self._unfulfilled_write_protected(task):
+            return
         if task.status in {"skipped", "suppressed"}:
             return
         if followup_task_completed(

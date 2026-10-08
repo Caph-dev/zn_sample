@@ -37,7 +37,7 @@ ASSISTANT_MODULES = (
     "jobs/handlers/daily_refresh", "jobs/handlers/environment_check",
     "jobs/handlers/followup_generate", "jobs/handlers/followup_send",
     "jobs/handlers/operator", "jobs/handlers/report_export", "jobs/handlers/shipment_sync",
-    "jobs/handlers/target_cleanup",
+    "jobs/handlers/target_cleanup", "jobs/handlers/unfulfilled",
     "security/__init__", "security/csrf", "security/secret_redaction",
     "services/auto_approval_reconciliation", "services/auto_approval_recovery",
     "services/auto_approval_service", "services/content_thanks_service",
@@ -49,7 +49,7 @@ ASSISTANT_MODULES = (
 )
 SCRIPT_ENTRIES = (
     "auto_approval", "check_creator_content_review", "cleanup_target_plans",
-    "launch_assistant", "launch_sample",
+    "launch_assistant", "launch_sample", "mark_unfulfilled_followups",
     "open_sample_store", "release_launcher", "screen_sample_requests",
     "send_followup_message", "send_sample_intro", "sync_shipped_tracking",
 )

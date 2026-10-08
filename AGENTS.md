@@ -25,6 +25,7 @@
    仍受 `--execute --yes`、同一执行限额、去重、备份与核对保护，且只接受服务器生成的自定义快照。
    独立取消例外：「计划清理」只处理服务器生成的 2/4 自然月定向邀请快照，网页确认 `y` 后仍须 `--execute --yes`。确认的是该快照全部候选，不提供任意范围/限额；这不改变样品批准和私信的默认限额 1。取消不可脚本撤销，测试不执行真实取消。
    达人跟进详情页的「发送这条跟进私信 / 发送感谢私信」是同一个门闩的网页入口：固定单条 `task_id`、每次最多 1 条、任务运行中不可取消，底层仍走 `send_followup_message.py --execute --yes` 与原子认领。
+   独立 D+15 例外：「达人跟进」批量写飞书未发布只接受同一本地店的当前候选 `task_ids`、正整数 `execute_limit`（默认 1）及严格 `y` 确认。固定 `followup_unfulfilled_write` Job 调 `mark_unfulfilled_followups.py --execute --yes --write-feishu`，用户明确上调上限，不接受 0=不限量。不碰紫鸟/私信、不要求 running 店，运行中不可取消/重启；不将参数权限推广至旧入口。
    同页「预演跟进私信 / 预演感谢私信」不是写操作（只打开会话核对身份，不发送），但同样占用店铺页面：
    与 0/1/2/3 及发送任务共用同一互斥（`assistant/services/page_lock.py`），有页面任务在跑时返回 409 `store-busy`，不得并发点击。
    预演与真发共用同一套重复/保留检查（会话指纹、阶段窗口内已有我方消息、感谢话术保留），预演只报告不写平台。
@@ -222,6 +223,10 @@
 **跟进写飞书（2026-09-10 加）：** 合作状态只走 `FollowupService._write_cooperation_status`（未履约 `未发布` / 内容确认 `已完成`），转换守卫只允许 `待发布 → 未发布/已完成`，`未发布/已完成/已发布` 是保护值、其它状态一律拒绝——**不要为了让守卫放行去改判定，也不要替业务补数据**。飞书当前还是「待发货」的 D+15 行（业务没把状态补到「待发布」）**保持 pending 等业务改**，不要去点它把本地任务推成人工、更不要放宽守卫（2026-09-10 业务口径）。2 号店样例本地没有 `feishu_record_id`（实测 0/268）：写入前若为空，按 **红人ID（=达人名）+寄样产品** 查行（`resolve_relation_record_id`，`fetch_all` 翻页），**只有唯一命中才写并回填 case**；多行 → `ambiguous-record`、无行 → `no-record`，都转 needs_review `feishu_write_failed`，不新建、不猜。未履约写成功后写 `send_result=unfulfilled-written`（进 `COMPLETED_RESULTS`）结掉待办；写不成（守卫拒绝/多行/无行/接口错）同样转 needs_review，不自动重试。
 
 **跟进语言：** 先读飞书「使用语言」（英语/西班牙语）；无值再 `detect_creator_lang(详情简介)`（`scripts/lib/detect_lang.py`）。有简介时走 LLM JSON 的 `lang`（不看 `confidence`；`.env`：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_ID`，默认 DeepSeek `deepseek-v4-flash`）；空简介、识别失败或非法 lang 默认英语。`sync_shipped_tracking.py` 已是这个优先级。
+
+**D+15 批量未履约（2026-10-08）：** 候选与单条真写共用 `FollowupService`，实际送达至少 15 个北京自然日、当前 unfulfilled、processing 非 stale、无已确认内容且未完成。只有类型缺失/歧义的 needs_review 可作为非私信候选，不放行其它人工原因；语言/类型不新增写状态门槛。原子条件更新 `unfulfilled-writing` 后 commit，远端调用不持 SQLite 写事务；成功/unchanged 记 `unfulfilled-written`。飞书精确「待发货」返回 waiting-business-update 并恢复 pending 等业务更新；其他明确拒绝转 feishu_write_failed。未知写/未分类异常记 `unfulfilled-write-unknown`、needs_review 并止批，崩溃 writing 不自动释放；生成/刷新待办不得清除 writing/unknown/feishu_write_failed。冻结排序名单按限額截取，拒绝也消耗预算，不补挑；每行前复核当前北京时间。写前备份及初始 JSON/CSV 失败不写，每行结果原子保存失败不继续。工件在用户 `exports/followup_unfulfilled/`，默认 CLI 仅本地预览；脚本显式店 ID，无默认回落/探店/迁移/worker。网页请求冻结范围入 Job，同类型同店 pending/running 复用原范围，失败保留逐行报告，不自动重试；发布资源登记脚本/handler。真实飞书验收另行授权，不与人工批量/旧脚本并跑。
+
+同一 case 的旧 D+15 writing/unknown/feishu_write_failed 也阻断更正送达日后的新排期任务：候选、单条复核与原子认领共用历史保护，不能靠重新生成任务绕过。写后工件失败时保留最新 DB 逐行结果，清空过期 JSON/CSV 下载指针；handler 不以旧文件覆盖该失败摘要。
 
 **提醒话术问候语（2026-09-10 修）：** D+3/D+7 统一成 `Hi {名}! ❤️`／`Hola {名}! ❤️`。原来 D+3 英文是 `Hi{名} ! ❤️`、西语 `Hola{名}! ❤️`（实测渲染成 `Himaideediaz ! ❤️`、`Holamaideediaz! ❤️`），SOP 与 `assistant/domain/message_templates.py` 已同步修正，回归测试 `tests/assistant/test_message_templates.py::test_reminder_templates_greet_with_clean_spacing`。**改话术必须 SOP 与模板同时改**。D0 与感谢话术里还有同类历史写法（`Hola{名} !`、`Hi {名}❤️`、`Hola{名}!`），本次未改。
 

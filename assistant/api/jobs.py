@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from sqlalchemy import update
+from sqlalchemy import select, update
 
-from assistant.database.models import FollowupTask, Job
+from assistant.database.models import FollowupTask, Job, SampleCase, Store
 from assistant.jobs.locks import (
     create_or_get_pending_job,
     request_cancellation,
@@ -17,6 +20,8 @@ from assistant.jobs.locks import (
 )
 from assistant.jobs.progress import list_events
 from assistant.jobs.registry import can_request_cancellation
+from assistant.services.followup_service import FollowupService
+from assistant.services.release_lifecycle import admission_guard
 
 
 router = APIRouter()
@@ -222,6 +227,118 @@ def create_followup_send(
         ):
             raise HTTPException(status_code=409, detail="followup-send-busy")
     return {"job_id": job_id, "deduplicated": deduplicated}
+
+
+async def _read_unfulfilled_form(request: Request) -> tuple[list[int], int]:
+    """Accept only the fixed batch fields; repeated task_ids are intentional."""
+    if request.query_params:
+        raise HTTPException(400, "invalid-form-fields")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in {"multipart/form-data", "application/x-www-form-urlencoded"}:
+        raise HTTPException(415, "form-data-required")
+    try:
+        async with request.form(max_files=0) as form:
+            submitted_fields = list(form.multi_items())
+            allowed_fields = {"task_ids", "execute_limit", "confirmation"}
+            if any(name not in allowed_fields or not isinstance(value, str)
+                   for name, value in submitted_fields):
+                raise ValueError("Unknown fields or files")
+            for field_name in ("execute_limit", "confirmation"):
+                if len(form.getlist(field_name)) > 1:
+                    raise ValueError("Repeated non-task field")
+            confirmation = str(form.get("confirmation") or "").strip().lower()
+            if confirmation != "y":
+                raise HTTPException(400, "operator-confirmation-required")
+            raw_task_ids = form.getlist("task_ids")
+            raw_limit = str(form.get("execute_limit", "1")).strip()
+            if (not raw_task_ids or re.fullmatch(r"[0-9]+", raw_limit) is None
+                    or int(raw_limit) <= 0):
+                raise ValueError("Task IDs and a positive limit are required")
+            task_ids = []
+            for raw_task_id in raw_task_ids:
+                normalized_task_id = raw_task_id.strip()
+                if (re.fullmatch(r"[0-9]+", normalized_task_id) is None
+                        or int(normalized_task_id) <= 0):
+                    raise ValueError("Task IDs must be positive integers")
+                task_ids.append(int(normalized_task_id))
+            return sorted(set(task_ids)), int(raw_limit)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(400, "invalid-form-fields") from error
+
+
+@router.post("/api/jobs/followups/unfulfilled")
+async def create_unfulfilled_write(request: Request) -> dict:
+    """Freeze one local store's current D+15 candidates behind a typed gate."""
+    selected_task_ids, execute_limit = await _read_unfulfilled_form(request)
+    return await run_in_threadpool(
+        _admit_unfulfilled_write, _session_factory(request), selected_task_ids, execute_limit,
+    )
+
+
+def _unfulfilled_job_receipt(job: Job, *, deduplicated: bool) -> dict:
+    saved_payload = json.loads(job.result_summary)
+    return {
+        "job_id": job.id,
+        "deduplicated": deduplicated,
+        "task_ids": saved_payload["task_ids"],
+        "store_id": saved_payload["store_id"],
+        "execute_limit": saved_payload["execute_limit"],
+        "count": len(saved_payload["task_ids"]),
+    }
+
+
+def _admit_unfulfilled_write(session_factory, selected_task_ids: list[int], execute_limit: int) -> dict:
+    """Resolve local ownership, reuse active scope, then validate fresh candidates."""
+    with admission_guard(session_factory):
+        with session_factory() as session:
+            selected_tasks = session.execute(
+                select(FollowupTask.id, Store.ziniao_store_id)
+                .join(SampleCase, FollowupTask.sample_case_id == SampleCase.id)
+                .join(Store, SampleCase.store_id == Store.id)
+                .where(FollowupTask.id.in_(selected_task_ids))
+                .order_by(FollowupTask.scheduled_for, FollowupTask.id)
+            ).all()
+            if len(selected_tasks) != len(selected_task_ids):
+                raise HTTPException(409, "unfulfilled-task-not-eligible")
+            store_ids = {selected_store_id for _, selected_store_id in selected_tasks}
+            if len(store_ids) != 1 or not next(iter(store_ids)).strip():
+                raise HTTPException(400, "unfulfilled-single-store-required")
+            store_id = next(iter(store_ids))
+            existing_job = session.scalar(
+                select(Job)
+                .where(
+                    Job.job_type == "followup_unfulfilled_write",
+                    Job.store_id == store_id,
+                    Job.status.in_(("pending", "running")),
+                )
+                .order_by(Job.created_at)
+                .limit(1)
+            )
+            if existing_job is not None:
+                # Completed rows have left the candidates, but this request still
+                # refers to the original in-flight batch, not a new execution.
+                return _unfulfilled_job_receipt(existing_job, deduplicated=True)
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        candidates = FollowupService(session_factory).list_unfulfilled_candidates(None, today=today)
+        candidates_by_id = {int(candidate["task_id"]): candidate for candidate in candidates}
+        if any(task_id not in candidates_by_id for task_id in selected_task_ids):
+            raise HTTPException(409, "unfulfilled-task-not-eligible")
+        request_payload = {
+            "task_ids": [task_id for task_id, _ in selected_tasks][:execute_limit],
+            "store_id": store_id,
+            "execute_limit": execute_limit,
+        }
+        job_id, deduplicated = create_or_get_pending_job(
+            session_factory,
+            job_type="followup_unfulfilled_write",
+            store_id=store_id,
+            result_summary=json.dumps(request_payload, ensure_ascii=False, sort_keys=True),
+        )
+        with session_factory() as session:
+            job = session.get(Job, job_id)
+            return _unfulfilled_job_receipt(job, deduplicated=deduplicated)
 
 
 @router.get("/api/jobs/{job_id}")

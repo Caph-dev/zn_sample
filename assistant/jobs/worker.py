@@ -120,12 +120,13 @@ def _finish_job(
         job.status = status
         job.finished_at = utc_now()
         job.heartbeat_at = utc_now()
-        # Reconciliation and order-backfill failures must retain report pointers
+        # Write/report failures must retain report pointers and frozen requests
         # so the UI can recover uncertain writes rather than reverting to old
         # evidence or losing the result path of the last run.
         if result_summary or job.job_type not in {
             "auto_approval_reconcile",
             "auto_approval_order_backfill",
+            "followup_unfulfilled_write",
         }:
             job.result_summary = result_summary
         job.error_code = error_code

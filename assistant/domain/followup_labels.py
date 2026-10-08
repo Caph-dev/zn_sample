@@ -12,6 +12,8 @@ SENDING_RESULT = "sending"
 LISTED_RESULT = "listed"
 # D+15 未履约：飞书合作状态已写成「未发布」并回读确认。
 UNFULFILLED_WRITTEN_RESULT = "unfulfilled-written"
+UNFULFILLED_WRITING_RESULT = "unfulfilled-writing"
+UNFULFILLED_WRITE_UNKNOWN_RESULT = "unfulfilled-write-unknown"
 COMPLETED_RESULTS = frozenset(
     {
         MARKED_SENT_RESULT,
@@ -89,6 +91,8 @@ FOLLOWUP_SEND_RESULT_LABELS = {
     SENDING_RESULT: "发送中",
     LISTED_RESULT: "已出名单给业务",
     UNFULFILLED_WRITTEN_RESULT: "飞书合作状态已写未发布",
+    UNFULFILLED_WRITING_RESULT: "飞书未履约写入中或已中断，请人工核对，勿重复写入",
+    UNFULFILLED_WRITE_UNKNOWN_RESULT: "飞书未履约写入结果未知，请人工核对，勿重复写入",
 }
 
 CREATOR_TYPE_LABELS = {

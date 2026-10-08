@@ -170,6 +170,22 @@ class MainFlowTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
+    def test_unfulfilled_write_blocks_restart_without_terminating_old_instance(self) -> None:
+        with (
+            patch.object(launch_assistant, "ensure_user_dirs"),
+            patch.object(launch_assistant, "_read_runtime_state", return_value={"pid": 123, "port": 8765}),
+            patch.object(launch_assistant, "_existing_instance", return_value=(123, 8765)),
+            patch.object(launch_assistant, "_running_job_types", return_value=["followup_unfulfilled_write"]),
+            patch.object(launch_assistant, "_terminate_process") as terminate,
+            patch.object(launch_assistant, "_mark_interrupted_running_jobs") as mark,
+            patch.object(launch_assistant.bootstrap, "main") as bootstrap_main,
+            patch("sys.argv", ["launch_assistant.py"]),
+        ):
+            self.assertEqual(launch_assistant.main(), 2)
+        terminate.assert_not_called()
+        mark.assert_not_called()
+        bootstrap_main.assert_not_called()
+
     @patch("launch_assistant.bootstrap.main")
     @patch("launch_assistant.ensure_user_dirs")
     def test_readonly_running_job_is_interrupted_and_marked(self, _ensure_dirs, bootstrap_main) -> None:

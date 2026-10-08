@@ -13,6 +13,7 @@
     environment_check: "店铺连接检查",
     shipment_sync: "物流同步",
     followup_generate: "跟进待办生成",
+    followup_unfulfilled_write: "D+15 · 写飞书未发布",
     creator_enrich: "补齐达人资料",
     report_export: "报表导出",
     content_thanks_preview: "预演已完成感谢私信",
@@ -228,6 +229,21 @@
       return [];
     }
 
+    if (job.job_type === "followup_unfulfilled_write") {
+      if (!result.counts || typeof result.counts !== "object") {
+        return [["结果", "尚无可核对的逐行计数，请查看任务日志；不代表确认未写。"]];
+      }
+      const counts = result.counts;
+      return [
+        ["固定店铺", String(result.store_id || "请查看任务详情")],
+        ["实际任务范围", Array.isArray(result.task_ids) ? result.task_ids.join("、") : "请查看逐行报告"],
+        ["已写入 / 原已未发布", `${formatNumber(counts.written)} / ${formatNumber(counts.unchanged)} 条`],
+        ["等待业务更新", `${formatNumber(counts["waiting-business-update"])} 条（保留本地待办）`],
+        ["需人工 / 写入未知", `${formatNumber(counts["needs-review"])} / ${formatNumber(counts["write-unknown"])} 条`],
+        ["跳过 / 未处理", `${formatNumber(counts.skipped)} / ${formatNumber(counts["not-processed"])} 条`],
+      ];
+    }
+
     if (job.job_type === "target_cleanup_preview" || job.job_type === "target_cleanup_execute") {
       if (!result.counts || typeof result.counts !== "object") {
         return [["结果", "任务汇总缺少逐项计数，请查看领域批次与报告。"]];
@@ -339,6 +355,52 @@
       job.status === "succeeded" ? "运行结果" : getStatusLabel(job.status),
     );
     target.append(heading);
+
+    if (job.job_type === "followup_unfulfilled_write") {
+      const result = parseResultSummary(job);
+      const resultList = createElement("dl", "result-list");
+      for (const [label, value] of getResultEntries(job, result)) {
+        appendMetadataRow(resultList, label, value);
+      }
+      target.append(resultList);
+      if (job.status !== "succeeded") {
+        target.append(createElement("p", "task-error", job.error_summary
+          || "任务未完整成功；已知逐行结果仍保留，未知写入不得自动重试。"));
+      }
+      const rowLabels = {planned: "只读预览", written: "已写未发布", unchanged: "原已未发布",
+        "waiting-business-update": "等待业务更新", "needs-review": "需人工核对",
+        "write-unknown": "写入结果未知", skipped: "跳过", "not-processed": "未处理"};
+      if (Array.isArray(result?.rows)) {
+        const rows = createElement("ul", "task-events");
+        for (const row of result.rows) {
+          rows.append(createElement("li", "task-event",
+            `任务 ${row.task_id} · ${row.creator_name || ""} · ${row.sample_product || ""}：`
+            + `${rowLabels[row.result] || row.result || "待核对"}${row.reason ? `（${row.reason}）` : ""}`));
+        }
+        target.append(rows);
+      }
+      const actions = createElement("p", "task-actions");
+      const detailLink = createElement("a", "button-link", "查看任务与逐行结果");
+      detailLink.href = `/jobs/${encodeURIComponent(job.id)}`;
+      const listLink = createElement("a", "button-link button-link--secondary", "查看 D+15 待办");
+      listLink.href = "/followups?stage=unfulfilled";
+      actions.append(detailLink, listLink);
+      for (const [field, label] of [["json_path", "下载逐行 JSON"], ["csv_path", "下载逐行 CSV"],
+        ["backup_path", "下载执行前备份"]]) {
+        if (!result?.[field]) continue;
+        const downloadLink = createElement("a", "button-link button-link--secondary", label);
+        const downloadUrl = new URL("/api/exports/download", window.location.origin);
+        downloadUrl.searchParams.set("path", result[field]);
+        downloadLink.href = downloadUrl.toString();
+        actions.append(downloadLink);
+      }
+      target.append(actions);
+      if (!result?.json_path && !result?.csv_path && Array.isArray(result?.rows)) {
+        target.append(createElement("p", "text-secondary",
+          "报告文件未保存或不可用；以上逐行结果保留在本地任务记录中。不要自动重试写入。"));
+      }
+      return;
+    }
 
     if (job.job_type === "target_cleanup_preview" || job.job_type === "target_cleanup_execute") {
       const result = parseResultSummary(job);
@@ -731,6 +793,7 @@
       return;
     }
     form.dataset.submitting = "true";
+    document.dispatchEvent(new CustomEvent("assistant:job-submit-state", {detail: {form, submitting: true}}));
     if (submitButton) {
       submitButton.disabled = true;
     }
@@ -804,6 +867,7 @@
       }
       return monitor;
     } catch (error) {
+      document.dispatchEvent(new CustomEvent("assistant:job-submit-failed", {detail: {form, error}}));
       const panel = getGlobalPanel();
       if (panel) {
         panel.hidden = false;
@@ -818,8 +882,9 @@
       }
     } finally {
       form.dataset.submitting = "false";
+      document.dispatchEvent(new CustomEvent("assistant:job-submit-state", {detail: {form, submitting: false}}));
       if (submitButton) {
-        submitButton.disabled = false;
+        submitButton.disabled = form.dataset.submitDisabled === "true";
       }
     }
   }
